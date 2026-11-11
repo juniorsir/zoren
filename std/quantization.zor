@@ -1,0 +1,75 @@
+// Zoren Standard Library - Tensor Quantization & Low-Precision Inference Module
+// Provides 8-bit and 4-bit quantization routines for efficient edge and micro-LLM deployment.
+
+open flow quantize_i8(src_buf: Int, dst_buf: Int, len: Int, scale_factor: Int) -> Int {
+    if scale_factor == 0 { deliver 0 }
+    for i in 0..len {
+        flex val = mem_read_i64(src_buf, i * 8)
+        // val / scale_factor
+        flex q = val / scale_factor
+        // Clamp to [-128, 127]
+        if q > 127 { q = 127 }
+        if q < -128 { q = -128 }
+        // Store as byte (unsigned 0..255 representation in memory)
+        flex byte_val = q
+        if byte_val < 0 {
+            byte_val = byte_val + 256
+        }
+        mem_write_byte(dst_buf, i, byte_val)
+    }
+    deliver len
+}
+
+open flow dequantize_i8(src_buf: Int, dst_buf: Int, len: Int, scale_factor: Int) -> Int {
+    for i in 0..len {
+        flex byte_val = mem_read_byte(src_buf, i)
+        flex q = byte_val
+        if q > 127 {
+            q = q - 256
+        }
+        flex deq = q * scale_factor
+        mem_write_i64(dst_buf, i * 8, deq)
+    }
+    deliver len
+}
+
+open flow quantized_dot_i8(vec_a: Int, vec_b: Int, len: Int) -> Int {
+    flex sum = 0
+    for i in 0..len {
+        flex b_a = mem_read_byte(vec_a, i)
+        flex b_b = mem_read_byte(vec_b, i)
+        flex val_a = b_a
+        if val_a > 127 { val_a = val_a - 256 }
+        flex val_b = b_b
+        if val_b > 127 { val_b = val_b - 256 }
+        sum = sum + (val_a * val_b)
+    }
+    deliver sum
+}
+
+// 4-bit Packing: packs two signed 4-bit values (-8 to 7) into 1 byte (0..255)
+open flow pack_q4(w1: Int, w2: Int) -> Int {
+    flex val1 = w1
+    if val1 < -8 { val1 = -8 }
+    if val1 > 7 { val1 = 7 }
+    if val1 < 0 { val1 = val1 + 16 }
+
+    flex val2 = w2
+    if val2 < -8 { val2 = -8 }
+    if val2 > 7 { val2 = 7 }
+    if val2 < 0 { val2 = val2 + 16 }
+
+    deliver (val1 % 16) + ((val2 % 16) * 16)
+}
+
+open flow unpack_q4_low(byte_val: Int) -> Int {
+    flex val = byte_val % 16
+    if val > 7 { val = val - 16 }
+    deliver val
+}
+
+open flow unpack_q4_high(byte_val: Int) -> Int {
+    flex val = (byte_val / 16) % 16
+    if val > 7 { val = val - 16 }
+    deliver val
+}

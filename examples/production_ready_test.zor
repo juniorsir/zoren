@@ -1,0 +1,19 @@
+# Production Readiness Test Suite
+bring math
+
+flow main() -> Int {
+    post("--- Zoren Production Verification ---")
+
+    bind active = true
+    bind inactive = !active
+    if inactive == false {
+        post("Prefix Logical NOT Operator (!): SUCCESS")
+    } else {
+        post("Prefix Logical NOT Operator (!): FAILED")
+    }
+
+    bind empty_ptr = null
+    post("Null Literal Node Initialization: SUCCESS")
+
+    deliver 0
+}

@@ -1,0 +1,53 @@
+(* Zoren Formal EBNF Grammar Specification *)
+
+SourceFile = { TopLevelItem } ;
+TopLevelItem = ImportDirective | ModelDecl | AbilityDecl | GrantDecl | FlowDecl ;
+
+ImportDirective = "bring" ModulePath [ "as" Identifier ] [ "use" ( SingleUse | UseBlock ) ] ;
+ModulePath = Identifier { "." Identifier } ;
+SingleUse = Identifier [ "as" Identifier ] ;
+UseBlock = "{" SingleUse { "," SingleUse } "}" ;
+
+ModelDecl = [ Attribute ] [ "actor" ] "model" Identifier "{" { FieldDecl } "}" ;
+FieldDecl = [ "open" ] Identifier ":" Type ;
+
+AbilityDecl = "ability" Identifier "{" { FlowSignature } "}" ;
+GrantDecl = "grant" Identifier "for" Identifier "{" { MethodImpl } "}" ;
+
+FlowDecl = [ "open" | "async" | "comptime" | "accel" ] "flow" Identifier [ "[" GenericParams "]" ] "(" [ ParameterList ] ")" [ "->" Type ] [ "diverges" Type ] Block ;
+ParameterList = Parameter { "," Parameter } ;
+Parameter = Identifier ":" Type ;
+
+Block = "{" { Statement } "}" ;
+
+Statement = BindStmt | FlexStmt | AssignStmt | DeliverStmt | AssessStmt | RepeatWhileStmt | IfStmt | EnsureStmt | CallStmt ;
+
+BindStmt = "bind" Identifier [ ":" Type ] "=" Expression ;
+FlexStmt = "flex" Identifier [ ":" Type ] "=" Expression ;
+AssignStmt = Identifier "=" Expression ;
+DeliverStmt = "deliver" Expression ;
+EnsureStmt = "ensure" Block ;
+
+IfStmt = "if" Expression Block [ "else" ( Block | IfStmt ) ] ;
+AssessStmt = "assess" Expression "{" { "case" Pattern "->" Block } "}" ;
+RepeatWhileStmt = "repeat" "while" Expression Block ;
+
+Expression = CoalescingExpr ;
+CoalescingExpr = LogicalOrExpr { "??" LogicalOrExpr } ;
+LogicalOrExpr = LogicalAndExpr { "||" LogicalAndExpr } ;
+LogicalAndExpr = EqualityExpr { "&&" EqualityExpr } ;
+EqualityExpr = ComparisonExpr { ( "==" | "!=" ) ComparisonExpr } ;
+ComparisonExpr = AdditiveExpr { ( "<" | "<=" | ">" | ">=" ) AdditiveExpr } ;
+AdditiveExpr = MultiplicativeExpr { ( "+" | "-" ) MultiplicativeExpr } ;
+MultiplicativeExpr = UnaryExpr { ( "*" | "/" | "%" ) UnaryExpr } ;
+UnaryExpr = [ "-" | "!" ] PrimaryExpr [ "!" ] ;
+
+PrimaryExpr = Identifier | Literal | ParenthesizedExpr | ModelInstantiation | CallExpr ;
+CallExpr = Identifier [ "[" TypeList "]" ] "(" [ ArgumentList ] ")" ;
+
+Type = PrimitiveType | TypeAlias | Identifier | GenericType | OptionalType ;
+PrimitiveType = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "iptr" | "uptr" | "byte" | "rune" | "bool" | "text" | "void" ;
+TypeAlias = "Int" | "UInt" | "Float" | "Bool" | "Char" | "Text" | "Nothing" ;
+OptionalType = Type "?" ;
+
+Attribute = "#align(" Int ")" | "#soa" | "#zerocopy" | "#linear" | "#no_heap" | "#trace" | "#secure" | "#zeroize" | "#pac" ;

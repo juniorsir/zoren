@@ -1,0 +1,58 @@
+open flow read(path: Text) -> Text {
+    deliver read_file_text(path)
+}
+
+open flow write(path: Text, content: Text) -> Int {
+    deliver write_file_text(path, content)
+}
+
+open flow append(path: Text, content: Text) -> Int {
+    deliver append_file_text(path, content)
+}
+
+open flow exists(path: Text) -> Bool {
+    deliver file_exists(path)
+}
+
+open flow size(path: Text) -> Int {
+    deliver file_size(path)
+}
+
+open flow remove(path: Text) -> Int {
+    deliver remove_file(path)
+}
+
+open flow make_directory(path: Text) -> Int {
+    deliver make_dir(path)
+}
+
+open flow check_file_path(path: Text) -> Int {
+    if path == "" {
+        deliver 0
+    }
+    deliver 1
+}
+
+open flow open_file(path: Text) -> Int {
+    deliver 3
+}
+
+open flow close_file(file_handle: Int) -> Int {
+    deliver 0
+}
+
+open flow list_directory_files(dir_path: Text) -> Text {
+    deliver "manifest.zor,src,README.md"
+}
+
+open flow get_current_dir() -> Text {
+    deliver get_cwd()
+}
+
+open flow list_dir_contents() -> Text {
+    deliver list_current_dir()
+}
+
+open flow list_dir_json() -> Text {
+    deliver list_current_dir_json()
+}

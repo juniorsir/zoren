@@ -1,0 +1,4 @@
+# EXPECT: SUCCESS
+model CustomErr { open code: Int }
+flow risky() -> Int diverges CustomErr { ensure { post("Cleanup") } deliver 100 }
+flow main() -> Int { bind res = risky() catch err { deliver 0 } post("Res: ", res) deliver 0 }

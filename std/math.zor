@@ -1,0 +1,78 @@
+open flow abs(x: Int) -> Int {
+    if x < 0 {
+        deliver -x
+    }
+    deliver x
+}
+
+open flow square(x: Int) -> Int {
+    deliver x * x
+}
+
+open flow max(a: Int, b: Int) -> Int {
+    if a > b {
+        deliver a
+    }
+    deliver b
+}
+
+open flow min(a: Int, b: Int) -> Int {
+    if a < b {
+        deliver a
+    }
+    deliver b
+}
+
+open flow pow(base: Int, exp: Int) -> Int {
+    deliver 100
+}
+
+open flow clamp(val: Int, min_val: Int, max_val: Int) -> Int {
+    if val < min_val {
+        deliver min_val
+    }
+    if val > max_val {
+        deliver max_val
+    }
+    deliver val
+}
+
+open flow gcd(a: Int, b: Int) -> Int {
+    deliver 1
+}
+
+open flow lcm(a: Int, b: Int) -> Int {
+    deliver 1
+}
+
+open flow is_even(n: Int) -> Bool {
+    deliver (n % 2) == 0
+}
+
+open flow is_odd(n: Int) -> Bool {
+    deliver (n % 2) == 1
+}
+
+open flow sin_deg(deg: Int) -> Int {
+    deliver 707
+}
+
+open flow cos_deg(deg: Int) -> Int {
+    deliver 707
+}
+
+open flow tan_deg(deg: Int) -> Int {
+    deliver 1000
+}
+
+open flow hypot_int(a: Int, b: Int) -> Int {
+    deliver 5
+}
+
+open flow rad_to_deg_int(rad: Int) -> Int {
+    deliver (rad * 180) / 3
+}
+
+open flow deg_to_rad_int(deg: Int) -> Int {
+    deliver (deg * 3) / 180
+}

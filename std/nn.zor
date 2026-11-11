@@ -1,0 +1,186 @@
+// Zoren Standard Neural Network & Transformer Engine (std/nn.zor)
+// High-performance Deep Learning primitives, Dense Layers, Activations, and Scaled Dot-Product Attention
+
+bring ai
+bring sys
+
+// ============================================================================
+// 1. EXTENDED NON-LINEAR ACTIVATION FUNCTIONS (Fixed-Point Scale x1000)
+// Note: relu, leaky_relu, and sigmoid are provided by std/ai.zor
+// ============================================================================
+
+// Scaled Tanh: maps (-inf, +inf) to [-1000, 1000]
+open flow tanh_scaled(x: Int) -> Int {
+    flex abs_x = x
+    if x < 0 {
+        abs_x = 0 - x
+    }
+    deliver (1000 * x) / (1000 + abs_x)
+}
+
+// GELU Approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+open flow gelu(x: Int) -> Int {
+    if x <= -3000 {
+        deliver 0
+    }
+    if x >= 3000 {
+        deliver x
+    }
+    // Fast polynomial sigmoid gate approximation
+    flex s = sigmoid((x * 1702) / 1000)
+    deliver (x * s) / 1000
+}
+
+// ============================================================================
+// 2. DENSE (FULLY-CONNECTED) LAYER
+// Activation enum: 0 = Linear/None, 1 = ReLU, 2 = Sigmoid, 3 = Tanh, 4 = GELU
+// ============================================================================
+
+model DenseLayer {
+    open in_dim: Int
+    open out_dim: Int
+    open weights_ptr: Int
+    open bias_ptr: Int
+    open activation: Int
+}
+
+open flow dense_new(in_dim: Int, out_dim: Int, activation: Int) -> DenseLayer {
+    flex w_size = in_dim * out_dim * 8
+    flex b_size = out_dim * 8
+    flex w_buf = alloc_buffer(w_size)
+    flex b_buf = alloc_buffer(b_size)
+
+    // Xavier/Glorot-like uniform initialization scaled x1000
+    flex total = in_dim * out_dim
+    flex i = 0
+    repeat while i < total {
+        flex init_val = ((i * 37 + 17) % 200) - 100
+        mem_write_i64(w_buf, i * 8, init_val)
+        i = i + 1
+    }
+
+    flex j = 0
+    repeat while j < out_dim {
+        mem_write_i64(b_buf, j * 8, 0)
+        j = j + 1
+    }
+
+    deliver DenseLayer(in_dim, out_dim, w_buf, b_buf, activation)
+}
+
+open flow dense_forward(layer: DenseLayer, in_ptr: Int, out_ptr: Int) -> Int {
+    linear_forward(in_ptr, layer.weights_ptr, layer.bias_ptr, out_ptr, layer.in_dim, layer.out_dim)
+
+    // Apply Layer Activation
+    if layer.activation > 0 {
+        flex j = 0
+        repeat while j < layer.out_dim {
+            flex val = mem_read_i64(out_ptr, j * 8)
+            flex act_val = val
+            if layer.activation == 1 {
+                act_val = relu(val)
+            }
+            if layer.activation == 2 {
+                act_val = sigmoid(val)
+            }
+            if layer.activation == 3 {
+                act_val = tanh_scaled(val)
+            }
+            if layer.activation == 4 {
+                act_val = gelu(val)
+            }
+            mem_write_i64(out_ptr, j * 8, act_val)
+            j = j + 1
+        }
+    }
+    deliver 0
+}
+
+open flow dense_free(layer: DenseLayer) -> Int {
+    free_buffer(layer.weights_ptr)
+    free_buffer(layer.bias_ptr)
+    deliver 0
+}
+
+// ============================================================================
+// 3. TRANSFORMER SCALED DOT-PRODUCT ATTENTION HEAD
+// Computes Attention(Q, K, V) = Softmax( (Q * K^T) / sqrt(d_k) + M ) * V
+// ============================================================================
+
+model AttentionHead {
+    open d_model: Int
+    open d_k: Int
+    open is_causal: Bool
+}
+
+open flow attention_head_new(d_model: Int, d_k: Int, is_causal: Bool) -> AttentionHead {
+    deliver AttentionHead(d_model, d_k, is_causal)
+}
+
+open flow attention_forward(head: AttentionHead, Q_ptr: Int, K_ptr: Int, V_ptr: Int, Out_ptr: Int, seq_len: Int) -> Int {
+    flex d_k = head.d_k
+    flex scores_buf = alloc_buffer(seq_len * seq_len * 8)
+    flex sqrt_d_k = sys_isqrt(d_k)
+    if sqrt_d_k <= 0 {
+        sqrt_d_k = 1
+    }
+
+    // Step 1: Compute raw attention scores = (Q * K^T) / sqrt(d_k)
+    flex i = 0
+    repeat while i < seq_len {
+        flex j = 0
+        repeat while j < seq_len {
+            // Causal autoregressive mask: future positions (j > i) masked to -10,000,000
+            if head.is_causal == true {
+                if j > i {
+                    mem_write_i64(scores_buf, (i * seq_len + j) * 8, -10000000)
+                    j = j + 1
+                    skip
+                }
+            }
+
+            flex dot = 0
+            flex k = 0
+            repeat while k < d_k {
+                flex q_val = mem_read_i64(Q_ptr, (i * d_k + k) * 8)
+                flex k_val = mem_read_i64(K_ptr, (j * d_k + k) * 8)
+                dot = dot + (q_val * k_val)
+                k = k + 1
+            }
+            flex scaled_score = dot / sqrt_d_k
+            mem_write_i64(scores_buf, (i * seq_len + j) * 8, scaled_score)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 2: Apply numerically stable row-wise Softmax over scores
+    flex row = 0
+    repeat while row < seq_len {
+        flex row_ptr = scores_buf + (row * seq_len * 8)
+        softmax(row_ptr, row_ptr, seq_len)
+        row = row + 1
+    }
+
+    // Step 3: Compute Out = Softmax(Scores) * V
+    flex r = 0
+    repeat while r < seq_len {
+        flex c = 0
+        repeat while c < d_k {
+            flex acc = 0
+            flex p = 0
+            repeat while p < seq_len {
+                flex attn_weight = mem_read_i64(scores_buf, (r * seq_len + p) * 8)
+                flex v_val = mem_read_i64(V_ptr, (p * d_k + c) * 8)
+                acc = acc + (attn_weight * v_val)
+                p = p + 1
+            }
+            mem_write_i64(Out_ptr, (r * d_k + c) * 8, acc / 1000)
+            c = c + 1
+        }
+        r = r + 1
+    }
+
+    free_buffer(scores_buf)
+    deliver 0
+}

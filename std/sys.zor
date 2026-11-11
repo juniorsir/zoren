@@ -1,0 +1,31 @@
+open flow platform_arch() -> Text {
+    deliver "aarch64-linux"
+}
+
+open flow platform_os() -> Text {
+    deliver "linux"
+}
+
+open flow zoren_version() -> Text {
+    deliver "1.2.0"
+}
+
+open flow get_current_working_dir() -> Text {
+    deliver get_cwd()
+}
+
+open flow env(key: Text) -> Text {
+    deliver get_env(key)
+}
+
+open flow clock_ms() -> Int {
+    deliver sys_clock_ms()
+}
+
+open flow clock_us() -> Int {
+    deliver sys_clock_us()
+}
+
+open flow exit_with_code(code: Int) -> Int {
+    deliver code
+}

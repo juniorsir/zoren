@@ -1,0 +1,355 @@
+// Zoren Standard Collections Module (std/collections.zor)
+// Production-grade heap-backed dynamic arrays, stacks, queues, and fast hash maps
+
+model Vector[T] {
+    open length: Int
+    open capacity: Int
+}
+
+open flow create_vector(capacity: Int) -> Int {
+    deliver list_new(capacity)
+}
+
+// ==============================================================================
+// 1. DYNAMIC LIST / RESIZABLE ARRAY
+// ==============================================================================
+
+open flow list_new(initial_cap: Int) -> Int {
+    flex cap = initial_cap
+    if cap <= 0 { cap = 16 }
+    flex header = alloc_buffer(24)
+    flex data = alloc_buffer(cap * 8)
+    mem_write_i64(header, 0, 0)
+    mem_write_i64(header, 8, cap)
+    mem_write_i64(header, 16, data)
+    deliver header
+}
+
+open flow list_len(list_ptr: Int) -> Int {
+    deliver mem_read_i64(list_ptr, 0)
+}
+
+open flow list_capacity(list_ptr: Int) -> Int {
+    deliver mem_read_i64(list_ptr, 8)
+}
+
+open flow list_push(list_ptr: Int, item: Int) -> Int {
+    flex len = mem_read_i64(list_ptr, 0)
+    flex cap = mem_read_i64(list_ptr, 8)
+    flex data = mem_read_i64(list_ptr, 16)
+
+    if len >= cap {
+        flex new_cap = cap * 2
+        flex new_data = alloc_buffer(new_cap * 8)
+        mem_copy(new_data, data, len * 8)
+        free_buffer(data)
+        data = new_data
+        mem_write_i64(list_ptr, 8, new_cap)
+        mem_write_i64(list_ptr, 16, new_data)
+    }
+
+    mem_write_i64(data, len * 8, item)
+    mem_write_i64(list_ptr, 0, len + 1)
+    deliver len + 1
+}
+
+open flow list_pop(list_ptr: Int) -> Int {
+    flex len = mem_read_i64(list_ptr, 0)
+    if len <= 0 { deliver 0 }
+    flex new_len = len - 1
+    flex data = mem_read_i64(list_ptr, 16)
+    flex val = mem_read_i64(data, new_len * 8)
+    mem_write_i64(list_ptr, 0, new_len)
+    deliver val
+}
+
+open flow list_get(list_ptr: Int, idx: Int) -> Int {
+    flex data = mem_read_i64(list_ptr, 16)
+    deliver mem_read_i64(data, idx * 8)
+}
+
+open flow list_set(list_ptr: Int, idx: Int, val: Int) -> Int {
+    flex data = mem_read_i64(list_ptr, 16)
+    mem_write_i64(data, idx * 8, val)
+    deliver 0
+}
+
+open flow list_clear(list_ptr: Int) -> Int {
+    mem_write_i64(list_ptr, 0, 0)
+    deliver 0
+}
+
+open flow list_free(list_ptr: Int) -> Int {
+    flex data = mem_read_i64(list_ptr, 16)
+    free_buffer(data)
+    free_buffer(list_ptr)
+    deliver 0
+}
+
+// ==============================================================================
+// 2. LIFO STACK
+// ==============================================================================
+
+open flow stack_new() -> Int {
+    deliver list_new(16)
+}
+
+open flow stack_push(s_ptr: Int, val: Int) -> Int {
+    deliver list_push(s_ptr, val)
+}
+
+open flow stack_pop(s_ptr: Int) -> Int {
+    deliver list_pop(s_ptr)
+}
+
+open flow stack_peek(s_ptr: Int) -> Int {
+    flex len = list_len(s_ptr)
+    if len <= 0 { deliver 0 }
+    deliver list_get(s_ptr, len - 1)
+}
+
+open flow stack_is_empty(s_ptr: Int) -> Bool {
+    deliver list_len(s_ptr) == 0
+}
+
+open flow stack_size(s_ptr: Int) -> Int {
+    deliver list_len(s_ptr)
+}
+
+open flow stack_free(s_ptr: Int) -> Int {
+    deliver list_free(s_ptr)
+}
+
+// ==============================================================================
+// 3. FIFO CIRCULAR QUEUE
+// ==============================================================================
+
+open flow queue_new(initial_cap: Int) -> Int {
+    flex cap = initial_cap
+    if cap <= 0 { cap = 16 }
+    flex header = alloc_buffer(40)
+    flex data = alloc_buffer(cap * 8)
+    mem_write_i64(header, 0, 0)       // head
+    mem_write_i64(header, 8, 0)       // tail
+    mem_write_i64(header, 16, 0)      // count
+    mem_write_i64(header, 24, cap)    // capacity
+    mem_write_i64(header, 32, data)   // data buffer
+    deliver header
+}
+
+open flow queue_size(q_ptr: Int) -> Int {
+    deliver mem_read_i64(q_ptr, 16)
+}
+
+open flow queue_is_empty(q_ptr: Int) -> Bool {
+    deliver mem_read_i64(q_ptr, 16) == 0
+}
+
+open flow queue_enqueue(q_ptr: Int, val: Int) -> Int {
+    flex count = mem_read_i64(q_ptr, 16)
+    flex cap = mem_read_i64(q_ptr, 24)
+    flex data = mem_read_i64(q_ptr, 32)
+    flex tail = mem_read_i64(q_ptr, 8)
+
+    if count >= cap {
+        flex new_cap = cap * 2
+        flex new_data = alloc_buffer(new_cap * 8)
+        flex head = mem_read_i64(q_ptr, 0)
+        flex i = 0
+        repeat while i < count {
+            flex old_idx = (head + i) % cap
+            flex item = mem_read_i64(data, old_idx * 8)
+            mem_write_i64(new_data, i * 8, item)
+            i = i + 1
+        }
+        free_buffer(data)
+        data = new_data
+        head = 0
+        tail = count
+        cap = new_cap
+        mem_write_i64(q_ptr, 0, 0)
+        mem_write_i64(q_ptr, 8, tail)
+        mem_write_i64(q_ptr, 24, new_cap)
+        mem_write_i64(q_ptr, 32, new_data)
+    }
+
+    mem_write_i64(data, tail * 8, val)
+    tail = (tail + 1) % cap
+    mem_write_i64(q_ptr, 8, tail)
+    mem_write_i64(q_ptr, 16, count + 1)
+    deliver count + 1
+}
+
+open flow queue_dequeue(q_ptr: Int) -> Int {
+    flex count = mem_read_i64(q_ptr, 16)
+    if count <= 0 { deliver 0 }
+    flex head = mem_read_i64(q_ptr, 0)
+    flex cap = mem_read_i64(q_ptr, 24)
+    flex data = mem_read_i64(q_ptr, 32)
+
+    flex val = mem_read_i64(data, head * 8)
+    head = (head + 1) % cap
+    mem_write_i64(q_ptr, 0, head)
+    mem_write_i64(q_ptr, 16, count - 1)
+    deliver val
+}
+
+open flow queue_peek(q_ptr: Int) -> Int {
+    flex count = mem_read_i64(q_ptr, 16)
+    if count <= 0 { deliver 0 }
+    flex head = mem_read_i64(q_ptr, 0)
+    flex data = mem_read_i64(q_ptr, 32)
+    deliver mem_read_i64(data, head * 8)
+}
+
+open flow queue_free(q_ptr: Int) -> Int {
+    flex data = mem_read_i64(q_ptr, 32)
+    free_buffer(data)
+    free_buffer(q_ptr)
+    deliver 0
+}
+
+// ==============================================================================
+// 4. HIGH-PERFORMANCE KEY-VALUE HASH MAP
+// ==============================================================================
+
+open flow map_new(initial_cap: Int) -> Int {
+    flex cap = initial_cap
+    if cap < 16 { cap = 16 }
+    flex header = alloc_buffer(24)
+    flex slots = alloc_buffer(cap * 24)
+    mem_write_i64(header, 0, 0)       // count
+    mem_write_i64(header, 8, cap)     // capacity
+    mem_write_i64(header, 16, slots)  // slots pointer
+    deliver header
+}
+
+open flow map_size(m_ptr: Int) -> Int {
+    deliver mem_read_i64(m_ptr, 0)
+}
+
+open flow map_put(m_ptr: Int, key: Text, val: Int) -> Int {
+    flex count = mem_read_i64(m_ptr, 0)
+    flex cap = mem_read_i64(m_ptr, 8)
+    flex slots = mem_read_i64(m_ptr, 16)
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % cap
+
+    flex step = 0
+    repeat while step < cap {
+        flex slot_offset = idx * 24
+        flex state = mem_read_i64(slots, slot_offset)
+        flex slot_hash = mem_read_i64(slots, slot_offset + 8)
+
+        if state == 0 {
+            mem_write_i64(slots, slot_offset, 1)
+            mem_write_i64(slots, slot_offset + 8, h)
+            mem_write_i64(slots, slot_offset + 16, val)
+            mem_write_i64(m_ptr, 0, count + 1)
+            deliver 1
+        }
+        if state == 1 {
+            if slot_hash == h {
+                mem_write_i64(slots, slot_offset + 16, val)
+                deliver 0
+            }
+        }
+
+        idx = (idx + 1) % cap
+        step = step + 1
+    }
+    deliver -1
+}
+
+open flow map_get(m_ptr: Int, key: Text) -> Int {
+    flex cap = mem_read_i64(m_ptr, 8)
+    flex slots = mem_read_i64(m_ptr, 16)
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % cap
+
+    flex step = 0
+    repeat while step < cap {
+        flex slot_offset = idx * 24
+        flex state = mem_read_i64(slots, slot_offset)
+        if state == 0 {
+            deliver 0
+        }
+        if state == 1 {
+            flex slot_hash = mem_read_i64(slots, slot_offset + 8)
+            if slot_hash == h {
+                deliver mem_read_i64(slots, slot_offset + 16)
+            }
+        }
+        idx = (idx + 1) % cap
+        step = step + 1
+    }
+    deliver 0
+}
+
+open flow map_has(m_ptr: Int, key: Text) -> Bool {
+    flex cap = mem_read_i64(m_ptr, 8)
+    flex slots = mem_read_i64(m_ptr, 16)
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % cap
+
+    flex step = 0
+    repeat while step < cap {
+        flex slot_offset = idx * 24
+        flex state = mem_read_i64(slots, slot_offset)
+        if state == 0 {
+            deliver false
+        }
+        if state == 1 {
+            flex slot_hash = mem_read_i64(slots, slot_offset + 8)
+            if slot_hash == h {
+                deliver true
+            }
+        }
+        idx = (idx + 1) % cap
+        step = step + 1
+    }
+    deliver false
+}
+
+open flow map_remove(m_ptr: Int, key: Text) -> Int {
+    flex cap = mem_read_i64(m_ptr, 8)
+    flex slots = mem_read_i64(m_ptr, 16)
+    flex count = mem_read_i64(m_ptr, 0)
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % cap
+
+    flex step = 0
+    repeat while step < cap {
+        flex slot_offset = idx * 24
+        flex state = mem_read_i64(slots, slot_offset)
+        if state == 0 {
+            deliver 0
+        }
+        if state == 1 {
+            flex slot_hash = mem_read_i64(slots, slot_offset + 8)
+            if slot_hash == h {
+                mem_write_i64(slots, slot_offset, 2) // Tombstone state
+                mem_write_i64(m_ptr, 0, count - 1)
+                deliver 1
+            }
+        }
+        idx = (idx + 1) % cap
+        step = step + 1
+    }
+    deliver 0
+}
+
+open flow map_free(m_ptr: Int) -> Int {
+    flex slots = mem_read_i64(m_ptr, 16)
+    free_buffer(slots)
+    free_buffer(m_ptr)
+    deliver 0
+}

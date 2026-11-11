@@ -1,0 +1,7 @@
+# EXPECT: SUCCESS
+model User { open id: Int }
+flow main() -> Int {
+    bind u = User(101)
+    post("ID: ", u.id)
+    deliver 0
+}

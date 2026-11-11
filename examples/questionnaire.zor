@@ -1,0 +1,86 @@
+flow read_validated_int(prompt: Text) -> Int {
+    flex value_read: Int = 0
+    flex is_valid: Bool = false
+    repeat while (is_valid == false) {
+        post(prompt)
+        value_read = pull[Int]()
+        bind status: Int = read_i64_status()
+        assess (status == 1) {
+            case true -> {
+                is_valid = true
+            }
+            case false -> {
+                post("  Error: Expected a valid numeric integer. Please try again!")
+                pull[Text]()
+            }
+        }
+    }
+    deliver value_read
+}
+flow main() {
+    post("==================================================")
+    post("         WELCOME TO THE ZOREN SYSTEM DEMO         ")
+    post("==================================================")
+    post("This interactive program demonstrates 64-bit I/O,")
+    post("register-pinned loops, and semantic null safety.")
+    post("==================================================")
+    post("Enter your first name: ")
+    bind name: Text = pull[Text]()
+    flex birth_year: Int = 0
+    flex current_year: Int = 0
+    flex is_years_valid: Bool = false
+    repeat while (is_years_valid == false) {
+        birth_year = read_validated_int("Enter the year you were born (e.g. 1998): ")
+        current_year = read_validated_int("Enter the current year (e.g. 2026): ")
+        assess (birth_year <= current_year) {
+            case true -> {
+                is_years_valid = true
+            }
+            case false -> {
+                post("  Error: Birth year cannot be greater than the current year!")
+            }
+        }
+    }
+    bind favorite_number: Int = read_validated_int("Enter your favorite integer: ")
+    bind age: Int = current_year - birth_year
+    bind age_next_year: Int = age + 1
+    bind age_in_10_years: Int = age + 10
+    post("")
+    post("==================================================")
+    post("             ZOREN PROFILE SUMMARY                ")
+    post("==================================================")
+    post("  User Name:      {name}")
+    post("  Born In:        {birth_year}")
+    post("  Current Age:    {age}")
+    post("  Age Next Year:  {age_next_year}")
+    post("  Age in 10 Years:{age_in_10_years}")
+    assess (age >= 18) {
+        case true -> {
+            post("  Status:         User is a verified ADULT.")
+        }
+        case false -> {
+            post("  Status:         User is a verified MINOR.")
+        }
+    }
+    bind remainder: Int = favorite_number % 2
+    assess remainder {
+        case 0 -> {
+            post("  Favorite Int:   {favorite_number} (EVEN number)")
+        }
+        case _ -> {
+            post("  Favorite Int:   {favorite_number} (ODD number)")
+        }
+    }
+    assess (age < 100) {
+        case true -> {
+            bind years_to_100: Int = 100 - age
+            post("  Century Progress: {years_to_100} years remaining until age 100.")
+        }
+        case false -> {
+            post("  Century Progress: User has already lived over a century!")
+        }
+    }
+    post("==================================================")
+    post("           END OF INTERACTIVE SYSTEM DEMO         ")
+    post("==================================================")
+}

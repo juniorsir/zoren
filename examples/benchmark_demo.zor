@@ -1,0 +1,10 @@
+flow main() {
+    post("Zoren Lightweight Loop Performance:")
+    flex i: Int = 1
+    bind limit: Int = 1000000000
+    repeat while i <= limit {
+        i = i + 1
+    }
+    post("Count complete. Iterations completed successfully:")
+    post(i - 1)
+}

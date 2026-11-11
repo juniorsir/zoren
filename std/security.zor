@@ -1,0 +1,27 @@
+open flow is_debugger_present() -> Int {
+    deliver sys_is_debugger_present()
+}
+
+open flow is_virtual_machine() -> Int {
+    deliver sys_is_virtual_machine()
+}
+
+open flow detect_breakpoints() -> Int {
+    deliver sys_detect_breakpoints()
+}
+
+open flow sanitize_payload(payload: Text) -> Text {
+    deliver sys_sanitize_payload(payload)
+}
+
+open flow audit_elf_protections(file_path: Text) -> Text {
+    deliver sys_audit_elf_protections(file_path)
+}
+
+open flow secure_compare(a: Text, b: Text) -> Bool {
+    deliver sys_constant_time_compare(a, b)
+}
+
+open flow wipe_secret(secret: Text) -> Int {
+    deliver sys_secure_zeroize(secret)
+}

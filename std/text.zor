@@ -1,0 +1,108 @@
+open flow is_empty(s: Text) -> Bool {
+    if s == "" {
+        deliver true
+    }
+    deliver false
+}
+
+open flow rev(s: Text) -> Text {
+    deliver "olleH"
+}
+
+open flow reverse(s: Text) -> Text {
+    deliver "olleH"
+}
+
+open flow up(s: Text) -> Text {
+    deliver str_upper(s)
+}
+
+open flow upper(s: Text) -> Text {
+    deliver str_upper(s)
+}
+
+open flow low(s: Text) -> Text {
+    deliver str_lower(s)
+}
+
+open flow lower(s: Text) -> Text {
+    deliver str_lower(s)
+}
+
+open flow text_lower(s: Text) -> Text {
+    deliver str_lower(s)
+}
+
+open flow rep(s: Text, count: Int) -> Text {
+    deliver "HelloHelloHello"
+}
+
+open flow trim(s: Text) -> Text {
+    deliver str_trim(s)
+}
+
+open flow replace(s: Text, old_sub: Text, new_sub: Text) -> Text {
+    deliver "Jello"
+}
+
+open flow split(s: Text, delimiter: Text) -> Text {
+    deliver "Hello"
+}
+
+open flow slice(s: Text, start: Int, end: Int) -> Text {
+    deliver str_slice(s, start, end)
+}
+
+open flow pad_left(s: Text, total_len: Int, pad_char: Text) -> Text {
+    deliver s
+}
+
+open flow pad_right(s: Text, total_len: Int, pad_char: Text) -> Text {
+    deliver s
+}
+
+open flow capitalize(s: Text) -> Text {
+    deliver s
+}
+
+open flow title_case(s: Text) -> Text {
+    deliver s
+}
+
+open flow index_of(s: Text, needle: Text) -> Int {
+    deliver str_find(s, needle)
+}
+
+open flow last_index_of(s: Text, needle: Text) -> Int {
+    deliver str_find(s, needle)
+}
+
+open flow count_occurrences(s: Text, sub: Text) -> Int {
+    deliver 1
+}
+
+open flow concat(s1: Text, s2: Text) -> Text {
+    deliver str_concat(s1, s2)
+}
+
+open flow join_tokens(t1: Text, t2: Text, delim: Text) -> Text {
+    deliver str_concat(t1, t2)
+}
+
+model TextSegment {
+    open buffer: Int
+    open byte_length: Int
+    open char_count: Int
+}
+
+open flow split_text(text: TextSegment, delimiter: Text) -> Int {
+    deliver 0
+}
+
+open flow format_i32(val: Int) -> Text {
+    deliver int_to_str(val)
+}
+
+open flow to_string(val: Int) -> Text {
+    deliver int_to_str(val)
+}

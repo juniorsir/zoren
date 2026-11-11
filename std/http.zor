@@ -1,0 +1,215 @@
+// Zoren Standard HTTP & REST Backend Framework (std/http.zor)
+// Production-grade async HTTP server primitives, REST routing, status handling, and response dispatch
+
+bring text
+bring net
+
+model HttpRequest {
+    open method: Text
+    open path: Text
+    open query: Text
+    open body: Text
+}
+
+model HttpResponse {
+    open status_code: Int
+    open content_type: Text
+    open body: Text
+}
+
+open flow make_response(status_code: Int, content_type: Text, body: Text) -> HttpResponse {
+    deliver HttpResponse(status_code, content_type, body)
+}
+
+open flow response_ok_json(body: Text) -> HttpResponse {
+    deliver HttpResponse(200, "application/json", body)
+}
+
+open flow response_created_json(body: Text) -> HttpResponse {
+    deliver HttpResponse(201, "application/json", body)
+}
+
+open flow response_ok_html(html: Text) -> HttpResponse {
+    deliver HttpResponse(200, "text/html; charset=utf-8", html)
+}
+
+open flow response_not_found(msg: Text) -> HttpResponse {
+    deliver HttpResponse(404, "application/json", msg)
+}
+
+open flow response_json(status_code: Int, body: Text) -> HttpResponse {
+    deliver HttpResponse(status_code, "application/json", body)
+}
+
+open flow response_html(status_code: Int, body: Text) -> HttpResponse {
+    deliver HttpResponse(status_code, "text/html; charset=utf-8", body)
+}
+
+open flow response_error(status_code: Int, error_msg: Text) -> HttpResponse {
+    flex err_json = str_concat("{\"error\":\"", str_concat(error_msg, "\"}"))
+    deliver HttpResponse(status_code, "application/json", err_json)
+}
+
+open flow response_bad_request(error_msg: Text) -> HttpResponse {
+    deliver response_error(400, error_msg)
+}
+
+open flow response_unauthorized(error_msg: Text) -> HttpResponse {
+    deliver response_error(401, error_msg)
+}
+
+open flow response_server_error(error_msg: Text) -> HttpResponse {
+    deliver response_error(500, error_msg)
+}
+
+open flow http_status_message(code: Int) -> Text {
+    if code == 200 { deliver "200 OK" }
+    if code == 201 { deliver "201 Created" }
+    if code == 204 { deliver "204 No Content" }
+    if code == 301 { deliver "301 Moved Permanently" }
+    if code == 302 { deliver "302 Found" }
+    if code == 400 { deliver "400 Bad Request" }
+    if code == 401 { deliver "401 Unauthorized" }
+    if code == 403 { deliver "403 Forbidden" }
+    if code == 404 { deliver "404 Not Found" }
+    if code == 405 { deliver "405 Method Not Allowed" }
+    if code == 500 { deliver "500 Internal Server Error" }
+    if code == 502 { deliver "502 Bad Gateway" }
+    if code == 503 { deliver "503 Service Unavailable" }
+    deliver "200 OK"
+}
+
+open flow http_route_match(pattern: Text, actual: Text) -> Bool {
+    if pattern == actual { deliver true }
+    flex colon_pos = str_find(pattern, ":")
+    if colon_pos > 0 {
+        flex prefix = str_slice(pattern, 0, colon_pos)
+        if starts_with(actual, prefix) {
+            deliver true
+        }
+    }
+    deliver false
+}
+
+open flow http_route_param(pattern: Text, actual: Text) -> Text {
+    flex colon_pos = str_find(pattern, ":")
+    if colon_pos > 0 {
+        flex prefix = str_slice(pattern, 0, colon_pos)
+        if starts_with(actual, prefix) {
+            deliver str_slice(actual, colon_pos, 256)
+        }
+    }
+    deliver ""
+}
+
+open flow http_query_param(query_str: Text, key: Text) -> Text {
+    deliver extract_query_param(query_str, key)
+}
+
+open flow http_parse_request(raw_request: Text) -> HttpRequest {
+    if raw_request == "" {
+        deliver HttpRequest("GET", "/", "", "")
+    }
+
+    flex space1 = str_find(raw_request, " ")
+    if space1 < 0 {
+        deliver HttpRequest("GET", "/", "", "")
+    }
+
+    flex method = str_slice(raw_request, 0, space1)
+    flex after_method = str_slice(raw_request, space1 + 1, 2048)
+    flex space2 = str_find(after_method, " ")
+    flex full_path = after_method
+    if space2 > 0 {
+        full_path = str_slice(after_method, 0, space2)
+    }
+
+    flex path = full_path
+    flex query = ""
+    flex q_pos = str_find(full_path, "?")
+    if q_pos >= 0 {
+        path = str_slice(full_path, 0, q_pos)
+        query = str_slice(full_path, q_pos + 1, 1024)
+    }
+
+    flex body = ""
+    flex body_sep = str_find(raw_request, "\r\n\r\n")
+    if body_sep >= 0 {
+        body = str_slice(raw_request, body_sep + 4, 65536)
+    }
+
+    deliver HttpRequest(method, path, query, body)
+}
+
+// Router Table Implementation
+// Holds up to 64 registered API endpoints in an aligned buffer
+// Header: [count, capacity, routes_buf]
+// Route item: [method_hash, pattern_hash, handler_id, 0] (32 bytes)
+
+open flow router_new() -> Int {
+    flex header = alloc_buffer(24)
+    flex buf = alloc_buffer(64 * 32)
+    mem_write_i64(header, 0, 0)
+    mem_write_i64(header, 8, 64)
+    mem_write_i64(header, 16, buf)
+    deliver header
+}
+
+open flow router_add(r_ptr: Int, method: Text, pattern: Text, handler_id: Int) -> Int {
+    flex count = mem_read_i64(r_ptr, 0)
+    flex cap = mem_read_i64(r_ptr, 8)
+    flex buf = mem_read_i64(r_ptr, 16)
+    if count >= cap { deliver -1 }
+
+    flex offset = count * 32
+    flex m_hash = sys_fast_hash(method)
+    flex p_hash = sys_fast_hash(pattern)
+    mem_write_i64(buf, offset, m_hash)
+    mem_write_i64(buf, offset + 8, p_hash)
+    mem_write_i64(buf, offset + 16, handler_id)
+    mem_write_i64(r_ptr, 0, count + 1)
+    deliver count + 1
+}
+
+open flow router_dispatch(r_ptr: Int, method: Text, path: Text) -> Int {
+    flex count = mem_read_i64(r_ptr, 0)
+    flex buf = mem_read_i64(r_ptr, 16)
+    flex m_hash = sys_fast_hash(method)
+    flex p_hash = sys_fast_hash(path)
+
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 32
+        flex route_m_hash = mem_read_i64(buf, offset)
+        flex route_p_hash = mem_read_i64(buf, offset + 8)
+        if route_m_hash == m_hash {
+            if route_p_hash == p_hash {
+                deliver mem_read_i64(buf, offset + 16)
+            }
+        }
+        i = i + 1
+    }
+    deliver -1 // 404 Route Not Found
+}
+
+open flow router_free(r_ptr: Int) -> Int {
+    flex buf = mem_read_i64(r_ptr, 16)
+    free_buffer(buf)
+    free_buffer(r_ptr)
+    deliver 0
+}
+
+open flow dispatch_response(client_fd: Int, status_code: Int, mime_type: Text, body: Text) -> Int {
+    flex status_line = str_concat("HTTP/1.1 ", str_concat(http_status_message(status_code), "\r\n"))
+    tcp_send(client_fd, status_line)
+    tcp_send(client_fd, "Server: Zoren-Native/1.2 (Linux AArch64)\r\n")
+    tcp_send(client_fd, "Content-Type: ")
+    tcp_send(client_fd, mime_type)
+    tcp_send(client_fd, "\r\n")
+    tcp_send(client_fd, "Access-Control-Allow-Origin: *\r\n")
+    tcp_send(client_fd, "Access-Control-Allow-Methods: GET, POST, OPTIONS, PUT, DELETE\r\n")
+    tcp_send(client_fd, "Access-Control-Allow-Headers: Content-Type, Authorization\r\n")
+    tcp_send(client_fd, "Connection: close\r\n\r\n")
+    tcp_send(client_fd, body)
+    deliver 0
+}

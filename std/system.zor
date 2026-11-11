@@ -1,0 +1,7 @@
+open flow exit_process(status_code: Int) -> Nothing {
+    post("System Process Exiting with code: ", status_code)
+}
+
+open flow type_of(val: Int) -> Text {
+    deliver "InferredType"
+}

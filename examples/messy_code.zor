@@ -1,0 +1,9 @@
+flow main() {
+    flex x: Int = 100
+    flex y: Int = x + 50
+    assess (y > x) {
+        case true -> {
+            post("Pristine Code Formatting Verified!")
+        }
+    }
+}

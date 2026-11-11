@@ -1,0 +1,11 @@
+{
+  "iconDefinitions": {
+    "_zoren_file": {
+      "iconPath": "./zoren.png"
+    }
+  },
+  "fileExtensions": {
+    "zor": "_zoren_file",
+    "zoren": "_zoren_file"
+  }
+}

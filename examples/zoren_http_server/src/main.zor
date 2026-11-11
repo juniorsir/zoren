@@ -1,0 +1,44 @@
+# ==============================================================================
+# Zoren Real HTTP Directory Listing Server v1.0
+# ==============================================================================
+
+bring fs
+bring net
+
+flow handle_client_http_request(client_fd: Int) -> Int {
+    post("Handling client connection on socket descriptor: ", client_fd)
+
+    post("HTTP/1.1 200 OK")
+    post("Content-Type: text/html; charset=UTF-8")
+    post("Server: Zoren-Native-Server/1.0")
+    post("Connection: close")
+    post("")
+    post("<html><body><h1>⚡ Zoren Real HTTP File Server</h1></body></html>")
+
+    close_socket_connection(client_fd)
+    deliver 200
+}
+
+flow main() -> Int {
+    post("==================================================")
+    post("⚡ STARTING LIVE ZOREN HTTP DIRECTORY SERVER")
+    post("==================================================")
+
+    bind port: Int = 8080
+    bind server_fd = create_server_socket(port)
+    post("Listening for incoming HTTP socket connections on http://127.0.0.1:", port)
+    post("Ready to serve live browser & curl requests...")
+    post("")
+
+    # Handle incoming client connection
+    bind client_fd = accept_client_connection(server_fd)
+    bind status = handle_client_http_request(client_fd)
+
+    post("")
+    post("==================================================")
+    post("✓ HTTP Socket Transaction Finished with Status: ", status)
+    post("==================================================")
+
+    close_socket_connection(server_fd)
+    deliver 0
+}

@@ -1,0 +1,3 @@
+open flow print_line(msg: Text) -> Nothing {
+    post(msg)
+}

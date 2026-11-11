@@ -1,0 +1,123 @@
+// Zoren Standard Binary Encoding & Checksum Engine (std/encoding.zor)
+// High-performance Varint (Protobuf), MessagePack binary packing, and hardware CRC32/Adler32
+
+bring sys
+
+// ============================================================================
+// 1. PROTOCOL BUFFERS / VARIABLE-LENGTH INTEGER (VARINT)
+// ============================================================================
+
+// Encodes a 64-bit unsigned integer into variable-length bytes (1-10 bytes).
+// Returns the number of bytes written.
+open flow varint_encode(val: Int, out_buf: Int, offset: Int) -> Int {
+    flex v = val
+    flex count = 0
+    repeat while v >= 128 {
+        flex b = (v % 128) + 128
+        mem_write_byte(out_buf, offset + count, b)
+        v = v / 128
+        count = count + 1
+    }
+    mem_write_byte(out_buf, offset + count, v)
+    deliver count + 1
+}
+
+// Decodes a variable-length integer from buffer at offset.
+open flow varint_decode(buf: Int, offset: Int) -> Int {
+    flex result = 0
+    flex shift = 1
+    flex i = 0
+    repeat while i < 10 {
+        flex b = mem_read_byte(buf, offset + i)
+        flex val_part = b % 128
+        result = result + (val_part * shift)
+        if b < 128 {
+            deliver result
+        }
+        shift = shift * 128
+        i = i + 1
+    }
+    deliver result
+}
+
+// Returns the number of bytes consumed by the varint at offset.
+open flow varint_len(buf: Int, offset: Int) -> Int {
+    flex i = 0
+    repeat while i < 10 {
+        flex b = mem_read_byte(buf, offset + i)
+        if b < 128 {
+            deliver i + 1
+        }
+        i = i + 1
+    }
+    deliver 1
+}
+
+// ============================================================================
+// 2. COMPACT BINARY PACKER (MESSAGEPACK-INSPIRED)
+// Format: [TypeTag: 1 byte] + [Length: Varint / 1-4 bytes] + [Payload]
+// Type tags: 0x01 = Int64, 0x02 = Bool, 0x03 = Text, 0x04 = RawBytes
+// ============================================================================
+
+open flow pack_int(val: Int, out_buf: Int, offset: Int) -> Int {
+    mem_write_byte(out_buf, offset, 1)
+    mem_write_i64(out_buf, offset + 1, val)
+    deliver 9
+}
+
+open flow unpack_int(buf: Int, offset: Int) -> Int {
+    flex tag = mem_read_byte(buf, offset)
+    if tag != 1 {
+        deliver 0
+    }
+    deliver mem_read_i64(buf, offset + 1)
+}
+
+open flow pack_bool(val: Bool, out_buf: Int, offset: Int) -> Int {
+    mem_write_byte(out_buf, offset, 2)
+    flex b = 0
+    if val == true {
+        b = 1
+    }
+    mem_write_byte(out_buf, offset + 1, b)
+    deliver 2
+}
+
+open flow unpack_bool(buf: Int, offset: Int) -> Bool {
+    flex tag = mem_read_byte(buf, offset)
+    if tag != 2 {
+        deliver false
+    }
+    flex b = mem_read_byte(buf, offset + 1)
+    if b == 1 {
+        deliver true
+    }
+    deliver false
+}
+
+open flow pack_bytes(src_buf: Int, src_len: Int, out_buf: Int, offset: Int) -> Int {
+    mem_write_byte(out_buf, offset, 4)
+    flex v_len = varint_encode(src_len, out_buf, offset + 1)
+    mem_copy(out_buf + offset + 1 + v_len, src_buf, src_len)
+    deliver 1 + v_len + src_len
+}
+
+// ============================================================================
+// 3. HARDWARE-ACCELERATED CHECKSUMS (CRC32 & ADLER-32)
+// ============================================================================
+
+open flow crc32(buf: Int, len: Int) -> Int {
+    deliver sys_crc32(buf, len)
+}
+
+open flow adler32(buf: Int, len: Int) -> Int {
+    deliver sys_adler32(buf, len)
+}
+
+open flow crc32_str(s: Text) -> Int {
+    deliver sys_crc32(s, length(s))
+}
+
+open flow adler32_str(s: Text) -> Int {
+    deliver sys_adler32(s, length(s))
+}

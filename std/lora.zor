@@ -1,0 +1,123 @@
+// Zoren AI Standard Library - Low-Rank Adaptation (LoRA) Matrix Module (std/lora.zor)
+// Parameter-Efficient Fine-Tuning (PEFT) and dynamic multi-tenant LLM adapter projection.
+
+bring sys
+
+// ============================================================================
+// LORA ADAPTER PROJECTION
+// Header layout (48 bytes):
+// [0..8]:   d_in
+// [8..16]:  d_out
+// [16..24]: rank (r)
+// [24..32]: alpha
+// [32..40]: a_buf (d_in * rank * 8 bytes)
+// [40..48]: b_buf (rank * d_out * 8 bytes)
+// Computes y = y_base + (alpha / rank) * (x * A * B)
+// All weights and activations scaled x1000 for integer arithmetic.
+// ============================================================================
+
+open flow lora_adapter_new(d_in: Int, d_out: Int, rank: Int, alpha: Int) -> Int {
+    flex a_size = d_in * rank * 8
+    flex b_size = rank * d_out * 8
+    flex a_buf = alloc_buffer(a_size)
+    flex b_buf = alloc_buffer(b_size)
+    mem_fill(a_buf, 0, a_size)
+    mem_fill(b_buf, 0, b_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, d_in)
+    mem_write_i64(header, 8, d_out)
+    mem_write_i64(header, 16, rank)
+    mem_write_i64(header, 24, alpha)
+    mem_write_i64(header, 32, a_buf)
+    mem_write_i64(header, 40, b_buf)
+
+    deliver header
+}
+
+open flow lora_set_weight_a(adapter_ptr: Int, in_idx: Int, r_idx: Int, val: Int) -> Int {
+    flex rank = mem_read_i64(adapter_ptr, 16)
+    flex a_buf = mem_read_i64(adapter_ptr, 32)
+    flex offset = (in_idx * rank + r_idx) * 8
+    mem_write_i64(a_buf, offset, val)
+    deliver 0
+}
+
+open flow lora_set_weight_b(adapter_ptr: Int, r_idx: Int, out_idx: Int, val: Int) -> Int {
+    flex d_out = mem_read_i64(adapter_ptr, 8)
+    flex b_buf = mem_read_i64(adapter_ptr, 40)
+    flex offset = (r_idx * d_out + out_idx) * 8
+    mem_write_i64(b_buf, offset, val)
+    deliver 0
+}
+
+// Computes the adapter delta: delta = (alpha / rank) * (x * A * B)
+open flow lora_forward_delta(adapter_ptr: Int, in_vec: Int, out_delta_vec: Int) -> Int {
+    flex d_in = mem_read_i64(adapter_ptr, 0)
+    flex d_out = mem_read_i64(adapter_ptr, 8)
+    flex rank = mem_read_i64(adapter_ptr, 16)
+    flex alpha = mem_read_i64(adapter_ptr, 24)
+    flex a_buf = mem_read_i64(adapter_ptr, 32)
+    flex b_buf = mem_read_i64(adapter_ptr, 40)
+
+    if rank == 0 { deliver 0 }
+
+    // Step 1: Down-projection: intermediate = in_vec * A (size: rank)
+    flex inter_buf = alloc_buffer(rank * 8)
+    for r in 0..rank {
+        flex dot_val = 0
+        for i in 0..d_in {
+            flex x = mem_read_i64(in_vec, i * 8)
+            flex w_a = mem_read_i64(a_buf, (i * rank + r) * 8)
+            dot_val = dot_val + (x * w_a)
+        }
+        // Scaled division by 1000
+        mem_write_i64(inter_buf, r * 8, dot_val / 1000)
+    }
+
+    // Step 2: Up-projection: out_delta = intermediate * B (size: d_out)
+    for j in 0..d_out {
+        flex dot_out = 0
+        for r in 0..rank {
+            flex inter = mem_read_i64(inter_buf, r * 8)
+            flex w_b = mem_read_i64(b_buf, (r * d_out + j) * 8)
+            dot_out = dot_out + (inter * w_b)
+        }
+        // Scaled division by 1000
+        flex raw_delta = dot_out / 1000
+        // Apply scaling factor: (alpha / rank)
+        flex scaled_delta = (raw_delta * alpha) / rank
+        mem_write_i64(out_delta_vec, j * 8, scaled_delta)
+    }
+
+    free_buffer(inter_buf)
+    deliver d_out
+}
+
+// Combines base layer output with LoRA delta: final_out = base_out + delta
+open flow lora_apply(adapter_ptr: Int, in_vec: Int, base_out_vec: Int, final_out_vec: Int) -> Int {
+    flex d_out = mem_read_i64(adapter_ptr, 8)
+    flex delta_buf = alloc_buffer(d_out * 8)
+
+    lora_forward_delta(adapter_ptr, in_vec, delta_buf)
+
+    for j in 0..d_out {
+        flex base_val = mem_read_i64(base_out_vec, j * 8)
+        flex delta_val = mem_read_i64(delta_buf, j * 8)
+        mem_write_i64(final_out_vec, j * 8, base_val + delta_val)
+    }
+
+    free_buffer(delta_buf)
+    deliver d_out
+}
+
+open flow lora_adapter_free(adapter_ptr: Int) -> Int {
+    if adapter_ptr != 0 {
+        flex a_buf = mem_read_i64(adapter_ptr, 32)
+        flex b_buf = mem_read_i64(adapter_ptr, 40)
+        if a_buf != 0 { free_buffer(a_buf) }
+        if b_buf != 0 { free_buffer(b_buf) }
+        free_buffer(adapter_ptr)
+    }
+    deliver 0
+}

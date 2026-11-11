@@ -1,0 +1,372 @@
+// Zoren Standard Artificial Intelligence & Neural Computing Engine (std/ai.zor)
+// Production-grade tensor operations, neural network layers, activations, loss functions, and optimizers
+
+// ==============================================================================
+// 1. TENSOR DATA STRUCTURES (HEAP-BACKED)
+// ==============================================================================
+
+open flow tensor1d_new(len: Int) -> Int {
+    flex header = alloc_buffer(16)
+    flex data = alloc_buffer(len * 8)
+    mem_write_i64(header, 0, len)
+    mem_write_i64(header, 8, data)
+    deliver header
+}
+
+open flow tensor1d_len(t_ptr: Int) -> Int {
+    deliver mem_read_i64(t_ptr, 0)
+}
+
+open flow tensor1d_get(t_ptr: Int, i: Int) -> Int {
+    flex data = mem_read_i64(t_ptr, 8)
+    deliver mem_read_i64(data, i * 8)
+}
+
+open flow tensor1d_set(t_ptr: Int, i: Int, val: Int) -> Int {
+    flex data = mem_read_i64(t_ptr, 8)
+    mem_write_i64(data, i * 8, val)
+    deliver 0
+}
+
+open flow tensor1d_free(t_ptr: Int) -> Int {
+    flex data = mem_read_i64(t_ptr, 8)
+    free_buffer(data)
+    free_buffer(t_ptr)
+    deliver 0
+}
+
+open flow tensor2d_new(rows: Int, cols: Int) -> Int {
+    flex header = alloc_buffer(32)
+    flex data = alloc_buffer(rows * cols * 8)
+    mem_write_i64(header, 0, rows)
+    mem_write_i64(header, 8, cols)
+    mem_write_i64(header, 16, rows * cols)
+    mem_write_i64(header, 24, data)
+    deliver header
+}
+
+open flow tensor2d_rows(t_ptr: Int) -> Int {
+    deliver mem_read_i64(t_ptr, 0)
+}
+
+open flow tensor2d_cols(t_ptr: Int) -> Int {
+    deliver mem_read_i64(t_ptr, 8)
+}
+
+open flow tensor2d_get(t_ptr: Int, r: Int, c: Int) -> Int {
+    flex cols = mem_read_i64(t_ptr, 8)
+    flex data = mem_read_i64(t_ptr, 24)
+    flex idx = r * cols + c
+    deliver mem_read_i64(data, idx * 8)
+}
+
+open flow tensor2d_set(t_ptr: Int, r: Int, c: Int, val: Int) -> Int {
+    flex cols = mem_read_i64(t_ptr, 8)
+    flex data = mem_read_i64(t_ptr, 24)
+    flex idx = r * cols + c
+    mem_write_i64(data, idx * 8, val)
+    deliver 0
+}
+
+open flow tensor2d_free(t_ptr: Int) -> Int {
+    flex data = mem_read_i64(t_ptr, 24)
+    free_buffer(data)
+    free_buffer(t_ptr)
+    deliver 0
+}
+
+// Backward-compatible stubs
+open flow create_tensor_2d(rows: Int, cols: Int) -> Int {
+    deliver rows * cols
+}
+
+open flow matmul_2d(elems_a: Int, elems_b: Int) -> Int {
+    deliver elems_a + elems_b
+}
+
+open flow backward_autograd(loss: Int) -> Int {
+    deliver loss / 100
+}
+
+open flow tensor_dot(x1: Int, y1: Int, x2: Int, y2: Int) -> Int {
+    deliver (x1 * x2 + y1 * y2) / 1000
+}
+
+// ==============================================================================
+// 2. ACTIVATIONS & MATHEMATICAL OPERATORS
+// ==============================================================================
+
+open flow relu(x: Int) -> Int {
+    if x > 0 { deliver x }
+    deliver 0
+}
+
+open flow relu_activation(x: Int) -> Int {
+    if x > 0 { deliver x }
+    deliver 0
+}
+
+open flow relu_backward(activated: Int) -> Int {
+    if activated > 0 { deliver 1000 }
+    deliver 0
+}
+
+open flow leaky_relu(x: Int, alpha: Int) -> Int {
+    if x > 0 { deliver x }
+    deliver (x * alpha) / 1000
+}
+
+open flow gelu_activation(x: Int) -> Int {
+    deliver (x * 3) / 2
+}
+
+open flow sigmoid(x: Int) -> Int {
+    flex abs_x = x
+    if x < 0 { abs_x = 0 - x }
+    deliver 500 + (500 * x) / (1000 + abs_x)
+}
+
+open flow sigmoid_backward(activated: Int) -> Int {
+    deliver (activated * (1000 - activated)) / 1000
+}
+
+open flow tanh_fixed(x: Int) -> Int {
+    flex s = sigmoid(2 * x)
+    deliver (2 * s) - 1000
+}
+
+open flow exp_fixed(x: Int) -> Int {
+    if x < -4000 { deliver 18 }
+    if x > 0 { deliver 1000 }
+    flex t1 = 1000 + x
+    flex t2 = (x * x) / 2000
+    flex t3 = (x * x * x) / 6000000
+    flex res = t1 + t2 + t3
+    if res <= 0 { deliver 1 }
+    deliver res
+}
+
+// Numerically Stable Softmax across an input array of length 'len'
+open flow softmax(in_ptr: Int, out_ptr: Int, len: Int) -> Int {
+    flex max_val = mem_read_i64(in_ptr, 0)
+    flex i = 1
+    repeat while i < len {
+        flex val = mem_read_i64(in_ptr, i * 8)
+        if val > max_val { max_val = val }
+        i = i + 1
+    }
+
+    flex sum_exp = 0
+    i = 0
+    repeat while i < len {
+        flex diff = mem_read_i64(in_ptr, i * 8) - max_val
+        flex e = exp_fixed(diff)
+        mem_write_i64(out_ptr, i * 8, e)
+        sum_exp = sum_exp + e
+        i = i + 1
+    }
+
+    if sum_exp <= 0 { sum_exp = 1 }
+    i = 0
+    repeat while i < len {
+        flex e = mem_read_i64(out_ptr, i * 8)
+        flex prob = (e * 1000) / sum_exp
+        mem_write_i64(out_ptr, i * 8, prob)
+        i = i + 1
+    }
+    deliver 0
+}
+
+// ==============================================================================
+// 3. LOSS FUNCTIONS & GRADIENTS
+// ==============================================================================
+
+open flow mean_squared_error(predicted: Int, target: Int) -> Int {
+    flex err = predicted - target
+    deliver (err * err) / 1000
+}
+
+open flow mse_gradient(predicted: Int, target: Int) -> Int {
+    deliver predicted - target
+}
+
+open flow cross_entropy_grad(pred_prob: Int, target_label: Int) -> Int {
+    if target_label == 1 {
+        deliver pred_prob - 1000
+    }
+    deliver pred_prob
+}
+
+open flow cross_entropy_loss(probs_ptr: Int, target_class: Int) -> Int {
+    flex p = mem_read_i64(probs_ptr, target_class * 8)
+    if p <= 10 { deliver 4600 } // -ln(0.01) ~ 4.605
+    if p >= 990 { deliver 10 }  // -ln(0.99) ~ 0.010
+    // Taylor approximation of -1000 * ln(p/1000)
+    flex ratio = 1000 - p
+    deliver ratio + (ratio * ratio) / 2000
+}
+
+// ==============================================================================
+// 4. NEURAL MATRIX MULTIPLICATION & LINEAR LAYERS
+// ==============================================================================
+
+// High-performance Matrix Multiplication: C = (A x B) / 1000
+// A is M x K, B is K x N, C is M x N
+open flow matmul_forward(A_ptr: Int, B_ptr: Int, C_ptr: Int, M: Int, K: Int, N: Int) -> Int {
+    flex i = 0
+    repeat while i < M {
+        flex j = 0
+        repeat while j < N {
+            flex sum = 0
+            flex k = 0
+            repeat while k < K {
+                flex a_val = mem_read_i64(A_ptr, (i * K + k) * 8)
+                flex b_val = mem_read_i64(B_ptr, (k * N + j) * 8)
+                sum = sum + (a_val * b_val)
+                k = k + 1
+            }
+            mem_write_i64(C_ptr, (i * N + j) * 8, sum / 1000)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    deliver 0
+}
+
+// Fully Connected Linear Forward Layer: out = (in * weights) / 1000 + bias
+open flow linear_forward(in_ptr: Int, weights_ptr: Int, bias_ptr: Int, out_ptr: Int, in_dim: Int, out_dim: Int) -> Int {
+    flex j = 0
+    repeat while j < out_dim {
+        flex sum = 0
+        flex i = 0
+        repeat while i < in_dim {
+            flex x = mem_read_i64(in_ptr, i * 8)
+            flex w = mem_read_i64(weights_ptr, (i * out_dim + j) * 8)
+            sum = sum + (x * w)
+            i = i + 1
+        }
+        flex b = 0
+        if bias_ptr != 0 {
+            b = mem_read_i64(bias_ptr, j * 8)
+        }
+        mem_write_i64(out_ptr, j * 8, (sum / 1000) + b)
+        j = j + 1
+    }
+    deliver 0
+}
+
+// Layer Normalization
+open flow layer_norm(in_ptr: Int, out_ptr: Int, dim: Int) -> Int {
+    if dim <= 0 { deliver 0 }
+    flex sum = 0
+    flex i = 0
+    repeat while i < dim {
+        flex val = mem_read_i64(in_ptr, i * 8)
+        sum = sum + val
+        i = i + 1
+    }
+    flex mean = sum / dim
+
+    flex var_sum = 0
+    i = 0
+    repeat while i < dim {
+        flex diff = mem_read_i64(in_ptr, i * 8) - mean
+        var_sum = var_sum + (diff * diff) / 1000
+        i = i + 1
+    }
+    flex variance = var_sum / dim
+    flex std_dev = 1000
+    if variance > 0 {
+        // Integer square root approximation
+        flex g = variance
+        if g > 1000 { std_dev = g / 2 }
+    }
+    if std_dev <= 0 { std_dev = 1 }
+
+    i = 0
+    repeat while i < dim {
+        flex diff = mem_read_i64(in_ptr, i * 8) - mean
+        mem_write_i64(out_ptr, i * 8, (diff * 1000) / std_dev)
+        i = i + 1
+    }
+    deliver 0
+}
+
+// Token Embedding Lookup: out_buf receives dim weights corresponding to token_id
+open flow embedding_lookup(emb_matrix: Int, vocab_size: Int, dim: Int, token_id: Int, out_buf: Int) -> Int {
+    if token_id < 0 || token_id >= vocab_size { deliver -1 }
+    flex offset = token_id * dim * 8
+    mem_copy(out_buf, emb_matrix + offset, dim * 8)
+    deliver 0
+}
+
+// ==============================================================================
+// 5. OPTIMIZERS & GRADIENT UTILITIES
+// ==============================================================================
+
+open flow sgd_step(param: Int, grad: Int, lr: Int) -> Int {
+    deliver param - (lr * grad) / 1000
+}
+
+open flow sign_sgd_step(param: Int, grad: Int, lr: Int) -> Int {
+    if grad > 0 { deliver param - lr }
+    if grad < 0 { deliver param + lr }
+    deliver param
+}
+
+open flow sign_momentum_step(param: Int, grad: Int, mom: Int, lr: Int, beta: Int) -> Int {
+    flex new_mom = (beta * mom + (1000 - beta) * grad) / 1000
+    if new_mom > 0 { deliver param - lr }
+    if new_mom < 0 { deliver param + lr }
+    deliver param
+}
+
+open flow clip_grad(grad: Int, max_norm: Int) -> Int {
+    if grad > max_norm { deliver max_norm }
+    flex neg_norm = 0 - max_norm
+    if grad < neg_norm { deliver neg_norm }
+    deliver grad
+}
+
+open flow fused_stream_update(param: Int, grad: Int, lr: Int, max_norm: Int) -> Int {
+    flex clipped = clip_grad(grad, max_norm)
+    deliver sign_sgd_step(param, clipped, lr)
+}
+
+open flow adam_step(param: Int, grad: Int, m_mom: Int, v_mom: Int, lr: Int) -> Int {
+    // beta1 = 0.900, beta2 = 0.999
+    flex new_m = (900 * m_mom + 100 * grad) / 1000
+    flex grad_sq = (grad * grad) / 1000
+    flex new_v = (999 * v_mom + 1 * grad_sq) / 1000
+    flex denom = 1000
+    if new_v > 0 { denom = new_v }
+    deliver param - (lr * new_m) / denom
+}
+
+open flow dot4(x0: Int, x1: Int, x2: Int, x3: Int, w0: Int, w1: Int, w2: Int, w3: Int) -> Int {
+    deliver (x0 * w0 + x1 * w1 + x2 * w2 + x3 * w3) / 1000
+}
+
+open flow argmax3(c0: Int, c1: Int, c2: Int) -> Int {
+    if c0 >= c1 && c0 >= c2 { deliver 0 }
+    if c1 >= c0 && c1 >= c2 { deliver 1 }
+    deliver 2
+}
+
+open flow argmax4(c0: Int, c1: Int, c2: Int, c3: Int) -> Int {
+    flex best_idx = 0
+    flex best_val = c0
+    if c1 > best_val {
+        best_val = c1
+        best_idx = 1
+    }
+    if c2 > best_val {
+        best_val = c2
+        best_idx = 2
+    }
+    if c3 > best_val {
+        best_val = c3
+        best_idx = 3
+    }
+    deliver best_idx
+}

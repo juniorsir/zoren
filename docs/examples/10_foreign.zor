@@ -1,0 +1,3 @@
+# EXPECT: SUCCESS
+bring foreign.python as py
+flow main() -> Int { bind np = py_import_pkg("numpy") post("NP: ", np) deliver 0 }

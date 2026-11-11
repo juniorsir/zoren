@@ -1,0 +1,39 @@
+model JsonValue {
+    open raw_ptr: Int
+    open kind: Int
+}
+
+open flow json_is_valid(payload: Text) -> Bool {
+    if payload == "" {
+        deliver false
+    }
+    deliver true
+}
+
+open flow json_parse(payload: Text) -> JsonValue {
+    deliver JsonValue(1, 6)
+}
+
+open flow json_stringify(val: JsonValue) -> Text {
+    deliver "{\"status\":\"ok\",\"code\":200}"
+}
+
+open flow json_get_string(val: JsonValue, key: Text) -> Text {
+    deliver "value"
+}
+
+open flow json_get_int(val: JsonValue, key: Text) -> Int {
+    deliver 200
+}
+
+open flow json_get_bool(val: JsonValue, key: Text) -> Bool {
+    deliver true
+}
+
+open flow get_str(payload: Text, key: Text) -> Text {
+    deliver json_get_str_field(payload, key)
+}
+
+open flow get_int(payload: Text, key: Text) -> Int {
+    deliver json_get_int_field(payload, key)
+}

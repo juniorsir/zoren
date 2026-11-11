@@ -1,0 +1,98 @@
+// Zoren Standard Library - High-Performance Bloom Filter Module
+// Space-efficient probabilistic set membership testing for high-throughput backends.
+
+bring crypto
+
+// Header layout (32 bytes):
+// [0..8]:   bit_size
+// [8..16]:  num_hashes
+// [16..24]: byte_count
+// [24..32]: bit_array_buf
+
+open flow bloom_filter_new(bit_size: Int, num_hashes: Int) -> Int {
+    flex bytes_needed = (bit_size + 7) / 8
+    flex bits_buf = alloc_buffer(bytes_needed)
+    mem_fill(bits_buf, 0, bytes_needed)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, bit_size)
+    mem_write_i64(header, 8, num_hashes)
+    mem_write_i64(header, 16, bytes_needed)
+    mem_write_i64(header, 24, bits_buf)
+
+    deliver header
+}
+
+open flow bloom_filter_add(bf_ptr: Int, key: Text) -> Int {
+    flex bit_size = mem_read_i64(bf_ptr, 0)
+    flex num_hashes = mem_read_i64(bf_ptr, 8)
+    flex bits_buf = mem_read_i64(bf_ptr, 24)
+
+    flex h1 = sys_fast_hash(key)
+    flex h2 = sys_crc32(key, length(key))
+    if h2 < 0 { h2 = 0 - h2 }
+    flex step = h2 + 1
+
+    for i in 0..num_hashes {
+        flex combined = h1 + (i * step)
+        if combined < 0 { combined = 0 - combined }
+        flex bit_pos = combined % bit_size
+
+        flex byte_idx = bit_pos / 8
+        flex bit_offset = bit_pos % 8
+        flex cur_byte = mem_read_byte(bits_buf, byte_idx)
+
+        flex mask = 1
+        for b in 0..bit_offset {
+            mask = mask * 2
+        }
+
+        if (cur_byte / mask) % 2 == 0 {
+            cur_byte = cur_byte + mask
+            mem_write_byte(bits_buf, byte_idx, cur_byte)
+        }
+    }
+    deliver 0
+}
+
+open flow bloom_filter_contains(bf_ptr: Int, key: Text) -> Bool {
+    flex bit_size = mem_read_i64(bf_ptr, 0)
+    flex num_hashes = mem_read_i64(bf_ptr, 8)
+    flex bits_buf = mem_read_i64(bf_ptr, 24)
+
+    flex h1 = sys_fast_hash(key)
+    flex h2 = sys_crc32(key, length(key))
+    if h2 < 0 { h2 = 0 - h2 }
+    flex step = h2 + 1
+
+    for i in 0..num_hashes {
+        flex combined = h1 + (i * step)
+        if combined < 0 { combined = 0 - combined }
+        flex bit_pos = combined % bit_size
+
+        flex byte_idx = bit_pos / 8
+        flex bit_offset = bit_pos % 8
+        flex cur_byte = mem_read_byte(bits_buf, byte_idx)
+
+        flex mask = 1
+        for b in 0..bit_offset {
+            mask = mask * 2
+        }
+
+        if (cur_byte / mask) % 2 == 0 {
+            deliver false
+        }
+    }
+    deliver true
+}
+
+open flow bloom_filter_free(bf_ptr: Int) -> Int {
+    if bf_ptr != 0 {
+        flex bits_buf = mem_read_i64(bf_ptr, 24)
+        if bits_buf != 0 {
+            free_buffer(bits_buf)
+        }
+        free_buffer(bf_ptr)
+    }
+    deliver 0
+}

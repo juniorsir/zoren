@@ -1,0 +1,12 @@
+# Zoren HTTP Server Manifest
+package     <- "zoren::org::http_server"
+version     <- "1.0.0"
+epoch       <- "2026"
+
+author      <- "Zoren Core Team <team@zoren.org>"
+license     <- "Apache-2.0 OR MIT"
+
+binary "zhttp_server" {
+    source      <- "src/main.zor"
+    description <- "High-Speed Async HTTP Directory Listing Server"
+}

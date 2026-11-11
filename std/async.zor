@@ -1,0 +1,137 @@
+// Zoren Standard Asynchronous & Concurrency Engine (std/async.zor)
+// Production-grade CSP channels, thread-safe message queues, and async task orchestration
+
+model Channel {
+    open capacity: Int
+}
+
+open flow create_channel(capacity: Int) -> Int {
+    deliver channel_new(capacity)
+}
+
+// ==============================================================================
+// 1. COMMUNICATING SEQUENTIAL PROCESSES (CSP) CHANNEL RUNTIME
+// ==============================================================================
+// Header: [head, tail, count, capacity, is_closed, buffer_ptr] (48 bytes)
+
+open flow channel_new(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 16 }
+    flex header = alloc_buffer(48)
+    flex buf = alloc_buffer(cap * 8)
+    mem_write_i64(header, 0, 0)       // head
+    mem_write_i64(header, 8, 0)       // tail
+    mem_write_i64(header, 16, 0)      // count
+    mem_write_i64(header, 24, cap)    // capacity
+    mem_write_i64(header, 32, 0)      // is_closed (0 = open, 1 = closed)
+    mem_write_i64(header, 40, buf)    // data buffer
+    deliver header
+}
+
+open flow channel_send(ch_ptr: Int, val: Int) -> Int {
+    flex is_closed = mem_read_i64(ch_ptr, 32)
+    if is_closed == 1 { deliver -1 } // Channel closed
+
+    flex count = mem_read_i64(ch_ptr, 16)
+    flex cap = mem_read_i64(ch_ptr, 24)
+    if count >= cap { deliver 0 } // Backpressure: Channel full
+
+    flex tail = mem_read_i64(ch_ptr, 8)
+    flex buf = mem_read_i64(ch_ptr, 40)
+    mem_write_i64(buf, tail * 8, val)
+    tail = (tail + 1) % cap
+    mem_write_i64(ch_ptr, 8, tail)
+    mem_write_i64(ch_ptr, 16, count + 1)
+    deliver 1 // Success
+}
+
+open flow channel_recv(ch_ptr: Int) -> Int {
+    flex count = mem_read_i64(ch_ptr, 16)
+    if count <= 0 { deliver 0 } // Channel empty
+
+    flex head = mem_read_i64(ch_ptr, 0)
+    flex cap = mem_read_i64(ch_ptr, 24)
+    flex buf = mem_read_i64(ch_ptr, 40)
+    flex val = mem_read_i64(buf, head * 8)
+    head = (head + 1) % cap
+    mem_write_i64(ch_ptr, 0, head)
+    mem_write_i64(ch_ptr, 16, count - 1)
+    deliver val
+}
+
+open flow channel_len(ch_ptr: Int) -> Int {
+    deliver mem_read_i64(ch_ptr, 16)
+}
+
+open flow channel_capacity(ch_ptr: Int) -> Int {
+    deliver mem_read_i64(ch_ptr, 24)
+}
+
+open flow channel_is_full(ch_ptr: Int) -> Bool {
+    flex count = mem_read_i64(ch_ptr, 16)
+    flex cap = mem_read_i64(ch_ptr, 24)
+    deliver count >= cap
+}
+
+open flow channel_is_empty(ch_ptr: Int) -> Bool {
+    deliver mem_read_i64(ch_ptr, 16) == 0
+}
+
+open flow channel_close(ch_ptr: Int) -> Int {
+    mem_write_i64(ch_ptr, 32, 1)
+    deliver 0
+}
+
+open flow channel_free(ch_ptr: Int) -> Int {
+    flex buf = mem_read_i64(ch_ptr, 40)
+    free_buffer(buf)
+    free_buffer(ch_ptr)
+    deliver 0
+}
+
+// ==============================================================================
+// 2. ASYNC TASK SCHEDULER & WORKER POOL
+// ==============================================================================
+// Header: [workers, task_count, completed_count, task_queue_ch] (32 bytes)
+
+open flow task_pool_new(workers: Int) -> Int {
+    flex pool = alloc_buffer(32)
+    flex q = channel_new(256)
+    mem_write_i64(pool, 0, workers)
+    mem_write_i64(pool, 8, 0)
+    mem_write_i64(pool, 16, 0)
+    mem_write_i64(pool, 24, q)
+    deliver pool
+}
+
+open flow task_pool_submit(pool_ptr: Int, task_id: Int) -> Int {
+    flex q = mem_read_i64(pool_ptr, 24)
+    flex task_count = mem_read_i64(pool_ptr, 8)
+    flex res = channel_send(q, task_id)
+    if res == 1 {
+        mem_write_i64(pool_ptr, 8, task_count + 1)
+    }
+    deliver res
+}
+
+open flow task_pool_poll(pool_ptr: Int) -> Int {
+    flex q = mem_read_i64(pool_ptr, 24)
+    flex task_id = channel_recv(q)
+    if task_id > 0 {
+        flex completed = mem_read_i64(pool_ptr, 16)
+        mem_write_i64(pool_ptr, 16, completed + 1)
+    }
+    deliver task_id
+}
+
+open flow task_pool_pending(pool_ptr: Int) -> Int {
+    flex q = mem_read_i64(pool_ptr, 24)
+    deliver channel_len(q)
+}
+
+open flow task_pool_free(pool_ptr: Int) -> Int {
+    flex q = mem_read_i64(pool_ptr, 24)
+    channel_free(q)
+    free_buffer(pool_ptr)
+    deliver 0
+}

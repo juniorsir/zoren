@@ -1,0 +1,7 @@
+# EXPECT: SUCCESS
+bring collections
+flow main() -> Int {
+    bind v = create_vector[Int]()
+    post("Vector created.")
+    deliver 0
+}

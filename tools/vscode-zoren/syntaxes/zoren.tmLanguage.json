@@ -1,0 +1,279 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Zoren",
+  "scopeName": "source.zoren",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#decorators" },
+    { "include": "#keywords" },
+    { "include": "#builtins" },
+    { "include": "#types" },
+    { "include": "#declarations" },
+    { "include": "#function_calls" },
+    { "include": "#literals" },
+    { "include": "#operators" },
+    { "include": "#delimiters" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.zoren",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [
+            {
+              "name": "storage.type.class.zoren",
+              "match": "@(param|return|returns|brief|note|warning|throws|type)\\b"
+            }
+          ]
+        },
+        {
+          "name": "comment.line.double-slash.zoren",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.line.number-sign.zoren",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.zoren",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.zoren",
+              "match": "\\\\([nrt\\\\\\'\"0]|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4})"
+            },
+            {
+              "name": "meta.template.expression.zoren",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": { "name": "punctuation.definition.template-expression.begin.zoren" }
+              },
+              "endCaptures": {
+                "0": { "name": "punctuation.definition.template-expression.end.zoren" }
+              },
+              "patterns": [
+                { "include": "$self" }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.zoren",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.zoren",
+              "match": "\\\\([nrt\\\\\\'\"0]|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4})"
+            }
+          ]
+        }
+      ]
+    },
+    "decorators": {
+      "patterns": [
+        {
+          "name": "entity.name.function.decorator.zoren",
+          "match": "@(inline|pure|track|matrix|simd|memoize|audit|test|cold|fast|secure|export|packed|vectorize|[a-zA-Z_][a-zA-Z0-9_]*)"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.zoren",
+          "match": "\\b(if|else|match|when|assess|case|repeat|while|for|in|break|continue|escape|skip|deliver|ret|divert|diverges|catch|maybe|err|ensure)\\b"
+        },
+        {
+          "name": "keyword.declaration.zoren",
+          "match": "\\b(flow|model|ability|grant|bind|flex|pack|expose|use|bring|as|enum|actor|chamber|extern|ABI|comptime|compute_kernel|accel)\\b"
+        },
+        {
+          "name": "keyword.control.async.zoren",
+          "match": "\\b(async|await)\\b"
+        },
+        {
+          "name": "keyword.control.ai.zoren",
+          "match": "\\b(ai|simd)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.zoren",
+          "match": "\\b(post|print|println|len|sqrt|min|max|pow|abs|square|clamp|hypot|sin_deg|cos_deg|assert|panic|exit|typeof|push|pop|insert|remove|keys|values|contains|sum|avg|clone|copy)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.zoren",
+          "match": "\\b(int|flt|str|bool|byte|rune|void|Int|UInt|Float|Bool|Char|Text|Nothing|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|iptr|uptr)\\b"
+        },
+        {
+          "name": "support.type.collection.zoren",
+          "match": "\\b(vec|map|dyn|Result|Option|Tensor|Embedding|Graph|Table|Stream|Queue|Set)\\b"
+        },
+        {
+          "name": "entity.name.type.class.zoren",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(flow)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "keyword.declaration.zoren" },
+            "2": { "name": "entity.name.function.zoren" }
+          }
+        },
+        {
+          "match": "\\b(model|ability|enum)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.zoren" },
+            "2": { "name": "entity.name.type.class.zoren" }
+          }
+        },
+        {
+          "match": "\\b(grant)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s+(for)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.zoren" },
+            "2": { "name": "entity.name.type.class.zoren" },
+            "3": { "name": "keyword.control.zoren" },
+            "4": { "name": "entity.name.type.class.zoren" }
+          }
+        },
+        {
+          "match": "\\b(bind|flex)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.zoren" },
+            "2": { "name": "variable.other.declaration.zoren" }
+          }
+        }
+      ]
+    },
+    "function_calls": {
+      "patterns": [
+        {
+          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.call.zoren" }
+          }
+        }
+      ]
+    },
+    "literals": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.zoren",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.zoren",
+          "match": "\\b(null)\\b"
+        },
+        {
+          "name": "variable.language.this.zoren",
+          "match": "\\b(self)\\b"
+        },
+        {
+          "name": "constant.language.math.zoren",
+          "match": "\\b(PI|TAU|E)\\b"
+        },
+        {
+          "name": "constant.numeric.hex.zoren",
+          "match": "\\b0x[0-9a-fA-F][0-9a-fA-F_]*\\b"
+        },
+        {
+          "name": "constant.numeric.binary.zoren",
+          "match": "\\b0b[01][01_]*\\b"
+        },
+        {
+          "name": "constant.numeric.octal.zoren",
+          "match": "\\b0o[0-7][0-7_]*\\b"
+        },
+        {
+          "name": "constant.numeric.float.zoren",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.zoren",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pipeline.zoren",
+          "match": "(\\|>|->|=>|::)"
+        },
+        {
+          "name": "keyword.operator.comparison.zoren",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.zoren",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.assignment.compound.zoren",
+          "match": "(\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>=)"
+        },
+        {
+          "name": "keyword.operator.assignment.zoren",
+          "match": "(=)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.zoren",
+          "match": "(\\+|-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.bitwise.zoren",
+          "match": "(&|\\||\\^|~|<<|>>)"
+        },
+        {
+          "name": "keyword.operator.special.zoren",
+          "match": "(\\?\\?|\\?|\\.\\.)"
+        }
+      ]
+    },
+    "delimiters": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.zoren",
+          "match": "[,;]"
+        },
+        {
+          "name": "punctuation.accessor.zoren",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.brackets.curly.zoren",
+          "match": "[{}]"
+        },
+        {
+          "name": "punctuation.brackets.round.zoren",
+          "match": "[()]"
+        },
+        {
+          "name": "punctuation.brackets.square.zoren",
+          "match": "[\\[\\]]"
+        }
+      ]
+    }
+  }
+}

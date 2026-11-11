@@ -1,0 +1,80 @@
+flow fibonacci_recursive(n: Int) -> Int {
+    assess (n <= 1) {
+        case true -> {
+            deliver n
+        }
+        case false -> {
+            deliver fibonacci_recursive(n - 1) + fibonacci_recursive(n - 2)
+        }
+    }
+}
+flow run_collatz_benchmark(seed: Int) -> Int {
+    flex n: Int = seed
+    flex steps: Int = 0
+    repeat while (n > 1) {
+        bind remainder: Int = n % 2
+        assess remainder {
+            case 0 -> {
+                n = n / 2
+            }
+            case _ -> {
+                n = (n * 3) + 1
+            }
+        }
+        steps = steps + 1
+    }
+    deliver steps
+}
+flow run_binary_search_benchmark(target: Int, max_val: Int) -> Int {
+    flex low: Int = 0
+    flex high: Int = max_val
+    flex mid: Int = 0
+    flex found: Bool = false
+    repeat while (low <= high) {
+        mid = (low + high) / 2
+        assess (mid == target) {
+            case true -> {
+                found = true
+                low = high + 1
+            }
+            case false -> {
+                assess (mid < target) {
+                    case true -> {
+                        low = mid + 1
+                    }
+                    case false -> {
+                        high = mid - 1
+                    }
+                }
+            }
+        }
+    }
+    assess found {
+        case true -> {
+            deliver mid
+        }
+        case false -> {
+            deliver 0 - 1
+        }
+    }
+}
+flow main() {
+    post("==================================================")
+    post("ZOREN SYSTEMS BENCHMARK SUITE")
+    post("==================================================")
+    post("1. Running Deep Recursive Fibonacci (n = 40)...")
+    bind fib_res: Int = fibonacci_recursive(40)
+    post("   Fibonacci(40) result:")
+    post(fib_res)
+    post("2. Running Collatz Conjecture (seed = 9876543210)...")
+    bind collatz_steps: Int = run_collatz_benchmark(9876543210)
+    post("   Collatz steps to reach 1:")
+    post(collatz_steps)
+    post("3. Running Binary Search (Target = 7865432109)...")
+    bind search_res: Int = run_binary_search_benchmark(7865432109, 10000000000)
+    post("   Binary Search found value:")
+    post(search_res)
+    post("==================================================")
+    post("BENCHMARK EXECUTION COMPLETE.")
+    post("==================================================")
+}

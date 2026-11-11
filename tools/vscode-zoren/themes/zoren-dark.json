@@ -1,0 +1,317 @@
+{
+  "name": "Zoren Dark Modern",
+  "type": "dark",
+  "colors": {
+    "editor.background": "#12141a",
+    "editor.foreground": "#d4d8e2",
+    "editorCursor.foreground": "#528bff",
+    "editor.lineHighlightBackground": "#1e222d",
+    "editorLineNumber.foreground": "#4b5263",
+    "editorLineNumber.activeForeground": "#61afef",
+    "editor.selectionBackground": "#3e4451",
+    "editor.inactiveSelectionBackground": "#282c34",
+    "activityBar.background": "#0e1015",
+    "sideBar.background": "#14171f",
+    "sideBar.foreground": "#abb2bf",
+    "statusBar.background": "#0b0d12",
+    "statusBar.foreground": "#abb2bf",
+    "statusBarItem.prominentBackground": "#1a1f2c"
+  },
+  "tokenColors": [
+    {
+      "name": "Comments",
+      "scope": [
+        "comment",
+        "comment.line",
+        "comment.block"
+      ],
+      "settings": {
+        "foreground": "#5c6370",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "name": "Documentation Tags",
+      "scope": [
+        "storage.type.class.zoren"
+      ],
+      "settings": {
+        "foreground": "#e5c07b",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Keywords Control",
+      "scope": [
+        "keyword.control.zoren",
+        "keyword.control"
+      ],
+      "settings": {
+        "foreground": "#c678dd",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Keywords Declaration",
+      "scope": [
+        "keyword.declaration.zoren",
+        "storage.type.zoren"
+      ],
+      "settings": {
+        "foreground": "#e06c75",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Keywords Async",
+      "scope": [
+        "keyword.control.async.zoren"
+      ],
+      "settings": {
+        "foreground": "#61afef",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Keywords AI & SIMD",
+      "scope": [
+        "keyword.control.ai.zoren"
+      ],
+      "settings": {
+        "foreground": "#38bdf8",
+        "fontStyle": "bold italic"
+      }
+    },
+    {
+      "name": "Decorators and Attributes",
+      "scope": [
+        "entity.name.function.decorator.zoren",
+        "meta.annotation.zoren"
+      ],
+      "settings": {
+        "foreground": "#d19a66",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Types Primitives",
+      "scope": [
+        "support.type.primitive.zoren"
+      ],
+      "settings": {
+        "foreground": "#4ec9b0",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "name": "Types Collections and Classes",
+      "scope": [
+        "support.type.collection.zoren",
+        "entity.name.type.class.zoren",
+        "entity.name.type.zoren"
+      ],
+      "settings": {
+        "foreground": "#56b6c2",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Function Definitions",
+      "scope": [
+        "entity.name.function.zoren"
+      ],
+      "settings": {
+        "foreground": "#61afef",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Function Invocations",
+      "scope": [
+        "entity.name.function.call.zoren"
+      ],
+      "settings": {
+        "foreground": "#61afef"
+      }
+    },
+    {
+      "name": "Built-in Functions",
+      "scope": [
+        "support.function.builtin.zoren",
+        "support.function"
+      ],
+      "settings": {
+        "foreground": "#4dd0e1",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Variable Binding Identifiers",
+      "scope": [
+        "variable.other.declaration.zoren"
+      ],
+      "settings": {
+        "foreground": "#e5c07b"
+      }
+    },
+    {
+      "name": "Strings",
+      "scope": [
+        "string.quoted.double.zoren",
+        "string.quoted.single.zoren"
+      ],
+      "settings": {
+        "foreground": "#98c379"
+      }
+    },
+    {
+      "name": "Escape Characters",
+      "scope": [
+        "constant.character.escape.zoren"
+      ],
+      "settings": {
+        "foreground": "#56b6c2",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Numbers and Numerics",
+      "scope": [
+        "constant.numeric",
+        "constant.numeric.hex.zoren",
+        "constant.numeric.binary.zoren",
+        "constant.numeric.octal.zoren",
+        "constant.numeric.float.zoren",
+        "constant.numeric.integer.zoren"
+      ],
+      "settings": {
+        "foreground": "#d19a66"
+      }
+    },
+    {
+      "name": "Booleans and Constants",
+      "scope": [
+        "constant.language.boolean.zoren",
+        "constant.language.null.zoren",
+        "constant.language.math.zoren"
+      ],
+      "settings": {
+        "foreground": "#e5c07b",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Self Language Variable",
+      "scope": [
+        "variable.language.this.zoren"
+      ],
+      "settings": {
+        "foreground": "#e06c75",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "name": "Operators",
+      "scope": [
+        "keyword.operator.comparison.zoren",
+        "keyword.operator.logical.zoren",
+        "keyword.operator.arithmetic.zoren",
+        "keyword.operator.assignment.zoren",
+        "keyword.operator.assignment.compound.zoren",
+        "keyword.operator.bitwise.zoren",
+        "keyword.operator.pipeline.zoren",
+        "keyword.operator.special.zoren"
+      ],
+      "settings": {
+        "foreground": "#56b6c2"
+      }
+    },
+    {
+      "name": "Pipeline and Arrows",
+      "scope": [
+        "keyword.operator.pipeline.zoren"
+      ],
+      "settings": {
+        "foreground": "#61afef",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Delimiters and Punctuation",
+      "scope": [
+        "punctuation.separator.zoren",
+        "punctuation.accessor.zoren",
+        "punctuation.brackets.curly.zoren",
+        "punctuation.brackets.round.zoren",
+        "punctuation.brackets.square.zoren"
+      ],
+      "settings": {
+        "foreground": "#abb2bf"
+      }
+    },
+    {
+      "name": "Python Functions and Def",
+      "scope": [
+        "entity.name.function.python",
+        "meta.function.python"
+      ],
+      "settings": {
+        "foreground": "#61afef",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Python Classes",
+      "scope": [
+        "entity.name.type.class.python"
+      ],
+      "settings": {
+        "foreground": "#e5c07b",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Python Self and Special Vars",
+      "scope": [
+        "variable.language.special.self.python",
+        "variable.parameter.function.language.special.self.python"
+      ],
+      "settings": {
+        "foreground": "#e06c75",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "name": "Python Decorators",
+      "scope": [
+        "entity.name.function.decorator.python",
+        "meta.function.decorator.python"
+      ],
+      "settings": {
+        "foreground": "#d19a66",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Python Builtin Functions and Types",
+      "scope": [
+        "support.function.builtin.python",
+        "support.type.python"
+      ],
+      "settings": {
+        "foreground": "#56b6c2",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Python Docstrings",
+      "scope": [
+        "string.quoted.docstring.multi.python"
+      ],
+      "settings": {
+        "foreground": "#7f848e",
+        "fontStyle": "italic"
+      }
+    }
+  ]
+}

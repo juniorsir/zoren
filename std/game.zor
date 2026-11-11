@@ -1,0 +1,13 @@
+open flow create_frame_chamber(size_bytes: Int) -> Int {
+    deliver size_bytes
+}
+
+open flow reset_frame_chamber(chamber_id: Int) -> Int {
+    post("Frame Chamber memory reset for next game loop iteration.")
+    deliver 0
+}
+
+open flow calculate_delta_time(current_ticks: Int, previous_ticks: Int) -> F64 {
+    bind elapsed: Int = current_ticks - previous_ticks
+    deliver elapsed / 1000.0
+}

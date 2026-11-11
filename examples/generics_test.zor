@@ -1,0 +1,19 @@
+flow max[T](a: T, b: T) -> T {
+    assess (a > b) {
+        case true -> {
+            deliver a
+        }
+        case false -> {
+            deliver b
+        }
+    }
+}
+flow main() {
+    post("--- Compile-Time Generics Specialization Verification ---")
+    bind int_max: Int = max[Int](15, 30)
+    post("Specialized max[Int](15, 30) result:")
+    post(int_max)
+    bind float_max: f64 = max[f64](4.12, 1.84)
+    post("Specialized max[f64](4.12, 1.84) result:")
+    print_f64(float_max)
+}

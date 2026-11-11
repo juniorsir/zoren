@@ -1,0 +1,6 @@
+# EXPECT: SUCCESS
+flow max[T](a: T, b: T) -> T { if a > b { deliver a } deliver b }
+flow main() -> Int {
+    post("Max: ", max(10, 20))
+    deliver 0
+}

@@ -1,0 +1,6 @@
+# EXPECT: SUCCESS
+bring math
+flow main() -> Int {
+    post("Abs: ", abs(-50))
+    deliver 0
+}

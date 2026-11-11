@@ -1,0 +1,22 @@
+// Zoren Web & WebAssembly Standard Library Module
+// Provides high-level browser interop, DOM manipulation, and web platform APIs
+
+open flow web_log(message: Text) -> Nothing {
+    post(message)
+}
+
+open flow web_alert(message: Text) -> Nothing {
+    dom_alert(message)
+}
+
+open flow web_set_element(element_id: Text, text_value: Text) -> Nothing {
+    dom_set_text(element_id, text_value)
+}
+
+open flow web_now_ms() -> Int {
+    deliver get_time_ms()
+}
+
+open flow web_is_browser() -> Bool {
+    deliver true
+}

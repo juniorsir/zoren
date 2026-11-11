@@ -1,0 +1,47 @@
+open flow create_server_socket(port: Int) -> Int {
+    deliver port
+}
+
+open flow accept_client_connection(server_fd: Int) -> Int {
+    deliver 101
+}
+
+open flow write_socket_response(client_fd: Int, payload: Text) -> Int {
+    deliver 1
+}
+
+open flow close_socket_connection(fd: Int) -> Int {
+    deliver 0
+}
+
+open async flow fetch_http_payload(url: Text) -> Int {
+    deliver 200
+}
+
+open flow connect_tcp(host: Text, port: Int) -> Int {
+    deliver 100
+}
+
+open flow close_tcp(sock_fd: Int) -> Int {
+    deliver 0
+}
+
+open flow live_listen(port: Int) -> Int {
+    deliver tcp_listen(port)
+}
+
+open flow live_accept(server_fd: Int) -> Int {
+    deliver tcp_accept(server_fd)
+}
+
+open flow live_recv(client_fd: Int) -> Text {
+    deliver tcp_recv(client_fd)
+}
+
+open flow live_send(client_fd: Int, data: Text) -> Int {
+    deliver tcp_send(client_fd, data)
+}
+
+open flow live_close(fd: Int) -> Int {
+    deliver tcp_close(fd)
+}

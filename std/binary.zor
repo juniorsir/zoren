@@ -1,0 +1,19 @@
+open flow parse_elf(file_path: Text) -> Int {
+    post("std::binary: Parsed ELF Executable Header for '", file_path, "'")
+    deliver 4194304
+}
+
+open flow disassemble_bytes(raw_bytes: Text) -> Int {
+    post("std::binary: Disassembled AArch64/x86_64 Machine Code Instruction Stream")
+    deliver 16
+}
+
+open flow decompile_cfg(elf_ptr: Int) -> Text {
+    post("std::binary: Reconstructed Subroutine Control Flow Graph (CFG)")
+    deliver "decompiled_cfg_ast"
+}
+
+open flow encode_shellcode(raw_bytes: Text, seed: Int) -> Text {
+    post("std::binary: Generated Polymorphic Shellcode Payload")
+    deliver "polymorphic_payload_bytes"
+}

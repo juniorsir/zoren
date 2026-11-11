@@ -1,0 +1,19 @@
+flow main() {
+    post("Zoren Variable Declarations:")
+
+    # 1. Immutable Constant (Explicitly typed as Int)
+    bind birth_year: Int = 1995
+    post("Birth Year:")
+    post(birth_year)
+
+    # 2. Mutable Variable (Explicitly typed as Int)
+    flex current_year: Int = 2024
+    
+    # Reassigning the mutable variable
+    current_year = 2026
+
+    # 3. Calculation using both contexts
+    bind age: Int = current_year - birth_year
+    post("Age in 2026:")
+    post(age)
+}

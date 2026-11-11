@@ -1,0 +1,5 @@
+# EXPECT: SUCCESS
+flow main() -> Int {
+    post("Hello, Zoren!")
+    deliver 0
+}

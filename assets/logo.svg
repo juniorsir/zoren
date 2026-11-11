@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 240" width="100%" height="100%">
+  <defs>
+    <linearGradient id="zorenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00F2FE" />
+      <stop offset="50%" stop-color="#4FACFE" />
+      <stop offset="100%" stop-color="#7F00FF" />
+    </linearGradient>
+    <linearGradient id="darkBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090D16" />
+      <stop offset="100%" stop-color="#121826" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background Card -->
+  <rect width="800" height="240" rx="20" fill="url(#darkBg)" stroke="#1F293D" stroke-width="2" />
+
+  <!-- Zoren Geometric Emblem Symbol -->
+  <g transform="translate(60, 40)">
+    <!-- Shield/Hex Outer Glow -->
+    <polygon points="80,10 145,45 145,115 80,150 15,115 15,45" fill="none" stroke="url(#zorenGrad)" stroke-width="3" opacity="0.3" />
+    <!-- Stylized Fast Angular 'Z' -->
+    <path d="M 35 40 L 125 40 L 50 120 L 125 120 L 115 130 L 25 130 L 100 50 L 35 50 Z" fill="url(#zorenGrad)" filter="url(#glow)" />
+    <!-- Core Speed Slice -->
+    <polygon points="55,80 105,80 85,90 35,90" fill="#FFFFFF" opacity="0.9" />
+  </g>
+
+  <!-- Typography -->
+  <g transform="translate(240, 125)">
+    <text font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-weight="900" font-size="76" fill="#FFFFFF" letter-spacing="4">ZOREN</text>
+    <text y="42" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-weight="600" font-size="18" fill="#4FACFE" letter-spacing="6">SYSTEMS PROGRAMMING LANGUAGE</text>
+  </g>
+</svg>

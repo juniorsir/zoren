@@ -1,0 +1,40 @@
+# ==============================================================================
+# Zoren Extension Syntax Highlighting Demo
+# ==============================================================================
+
+bring math
+
+# Data Models & Constants
+model Particle {
+    open x: Float
+    open y: Float
+}
+
+# Subroutines & Control Flow
+flow calculate_velocity(p: Particle) -> Float {
+    bind magnitude: Float = 100.5
+    
+    if p.x > 0.0 {
+        deliver magnitude * 1.5
+    } else {
+        deliver magnitude
+    }
+}
+
+# Abilities & Generics
+ability Renderable {
+    flow draw() -> Nothing
+}
+
+grant Renderable for Particle {
+    draw {
+        post("Drawing Particle: ", self.x)
+    }
+}
+
+flow main() -> Int {
+    bind p = Particle(10.0, 20.0)
+    post("Velocity: ", calculate_velocity(p))
+    p.draw()
+    deliver 0
+}

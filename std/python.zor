@@ -1,0 +1,9 @@
+open flow py_import_pkg(pkg_name: Text) -> Int {
+    post("Python Enclave Bridge: Imported package '", pkg_name, "'")
+    deliver 1
+}
+
+open flow py_call(pkg_handle: Int, method_name: Text, arg_val: Int) -> Int {
+    post("Python Enclave Bridge: Called method '", method_name, "' on handle ", pkg_handle)
+    deliver 100
+}

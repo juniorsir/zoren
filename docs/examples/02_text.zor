@@ -1,0 +1,7 @@
+# EXPECT: SUCCESS
+bring text
+flow main() -> Int {
+    bind sample: Text = "Hello"
+    post("Reversed: ", text_reverse(sample))
+    deliver 0
+}

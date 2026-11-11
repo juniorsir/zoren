@@ -1,0 +1,12 @@
+# Zoren Sentinel Package Manifest
+package     <- "zoren::org::sentinel"
+version     <- "1.0.0"
+epoch       <- "2026"
+
+author      <- "Zoren Core Security Team <security@zoren.org>"
+license     <- "Apache-2.0 OR MIT"
+
+binary "zsentinel" {
+    source      <- "src/main.zor"
+    description <- "High-Speed Static Binary Auditor and Security Inspector"
+}

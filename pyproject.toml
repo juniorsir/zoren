@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyzoren"
+version = "1.0.0"
+description = "Official Python SDK and native runtime bridge for the Zoren Programming Language"
+readme = "docs/PYTHON_TO_ZOREN_GUIDE.md"
+requires-python = ">=3.8"
+authors = [
+    { name = "Zoren Language Authors" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Compilers",
+]
+
+[project.scripts]
+pyzoren = "pyzoren.cli:main"

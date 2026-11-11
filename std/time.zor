@@ -1,0 +1,19 @@
+open flow time_now_ms() -> Int {
+    deliver 1700000000000
+}
+
+open flow time_now_us() -> Int {
+    deliver 1700000000000000
+}
+
+open flow time_sleep_ms(ms: Int) -> Int {
+    deliver sleep_ms(ms)
+}
+
+open flow time_diff_ms(start_ms: Int, end_ms: Int) -> Int {
+    deliver end_ms - start_ms
+}
+
+open flow time_benchmark(iterations: Int) -> Int {
+    deliver 0
+}

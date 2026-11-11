@@ -1,0 +1,185 @@
+// Zoren AI & Backend Standard Library - Streaming JSON Tokenizer (std/json_stream.zor)
+// Zero-allocation streaming JSON parser and structured key-value extractor
+// designed for LLM function calling, agent tool execution, and high-throughput microservices.
+
+bring sys
+
+open flow json_is_whitespace(b: Int) -> Int {
+    if b == 32 { deliver 1 } // Space
+    if b == 9 { deliver 1 }  // Tab \t
+    if b == 10 { deliver 1 } // Newline \n
+    if b == 13 { deliver 1 } // Carriage return \r
+    deliver 0
+}
+
+open flow json_is_digit(b: Int) -> Int {
+    if b >= 48 {
+        if b <= 57 {
+            deliver 1
+        }
+    }
+    deliver 0
+}
+
+// Parses signed integer starting at ptr
+open flow json_parse_int_at(ptr: Int, max_bytes: Int) -> Int {
+    flex val = 0
+    flex sign = 1
+    flex pos = 0
+
+    // Skip leading whitespace
+    while pos < max_bytes {
+        flex b = mem_read_byte(ptr, pos)
+        if json_is_whitespace(b) == 0 {
+            if b == 45 { // '-'
+                sign = 0 - 1
+                pos = pos + 1
+            }
+            while pos < max_bytes {
+                flex digit = mem_read_byte(ptr, pos)
+                if json_is_digit(digit) == 1 {
+                    val = (val * 10) + (digit - 48)
+                    pos = pos + 1
+                } else {
+                    deliver val * sign
+                }
+            }
+            deliver val * sign
+        }
+        pos = pos + 1
+    }
+    deliver val * sign
+}
+
+// Finds the memory byte offset to the value corresponding to key_ptr
+open flow json_find_key_offset(json_ptr: Int, json_len: Int, key_ptr: Int, key_len: Int) -> Int {
+    flex i = 0
+
+    while i < json_len {
+        flex b = mem_read_byte(json_ptr, i)
+
+        if b == 34 { // '"'
+            flex match_key = 1
+            flex k = 0
+
+            while k < key_len {
+                if (i + 1 + k) >= json_len {
+                    match_key = 0
+                    k = key_len
+                } else {
+                    flex j_byte = mem_read_byte(json_ptr, i + 1 + k)
+                    flex k_byte = mem_read_byte(key_ptr, k)
+                    if j_byte != k_byte {
+                        match_key = 0
+                        k = key_len
+                    } else {
+                        k = k + 1
+                    }
+                }
+            }
+
+            if match_key == 1 {
+                if (i + 1 + key_len) < json_len {
+                    flex end_quote = mem_read_byte(json_ptr, i + 1 + key_len)
+                    if end_quote == 34 {
+                        flex c = i + 2 + key_len
+                        while c < json_len {
+                            flex cb = mem_read_byte(json_ptr, c)
+                            if cb == 58 { // ':'
+                                flex v = c + 1
+                                while v < json_len {
+                                    flex vb = mem_read_byte(json_ptr, v)
+                                    if json_is_whitespace(vb) == 0 {
+                                        deliver v
+                                    }
+                                    v = v + 1
+                                }
+                            }
+                            if cb != 32 {
+                                if cb != 9 {
+                                    if cb != 10 {
+                                        if cb != 13 {
+                                            c = json_len
+                                        }
+                                    }
+                                }
+                            }
+                            c = c + 1
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    deliver 0 - 1
+}
+
+// Extracts integer value for a JSON key
+open flow json_extract_int(json_ptr: Int, json_len: Int, key_ptr: Int, key_len: Int) -> Int {
+    flex val_offset = json_find_key_offset(json_ptr, json_len, key_ptr, key_len)
+    if val_offset < 0 {
+        deliver 0 - 1
+    }
+    flex v_ptr = json_ptr + val_offset
+    flex remaining = json_len - val_offset
+    deliver json_parse_int_at(v_ptr, remaining)
+}
+
+// Extracts boolean value for a JSON key (1 = true, 0 = false, -1 = not found)
+open flow json_extract_bool(json_ptr: Int, json_len: Int, key_ptr: Int, key_len: Int) -> Int {
+    flex val_offset = json_find_key_offset(json_ptr, json_len, key_ptr, key_len)
+    if val_offset < 0 {
+        deliver 0 - 1
+    }
+    flex first_b = mem_read_byte(json_ptr, val_offset)
+    if first_b == 116 { // 't'
+        deliver 1
+    }
+    if first_b == 102 { // 'f'
+        deliver 0
+    }
+    deliver 0 - 1
+}
+
+// Extracts string contents into out_buf (excluding quotes)
+// Returns length of extracted string
+open flow json_extract_string(
+    json_ptr: Int,
+    json_len: Int,
+    key_ptr: Int,
+    key_len: Int,
+    out_buf: Int,
+    max_len: Int
+) -> Int {
+    flex val_offset = json_find_key_offset(json_ptr, json_len, key_ptr, key_len)
+    if val_offset < 0 {
+        deliver 0 - 1
+    }
+    flex quote_start = mem_read_byte(json_ptr, val_offset)
+    if quote_start != 34 {
+        deliver 0 - 2
+    }
+
+    flex i = 0
+    flex src = val_offset + 1
+
+    while src < json_len {
+        if i >= max_len {
+            mem_write_byte(out_buf, i, 0)
+            deliver i
+        }
+        flex b = mem_read_byte(json_ptr, src)
+        if b == 34 { // End quote
+            mem_write_byte(out_buf, i, 0)
+            deliver i
+        }
+        mem_write_byte(out_buf, i, b)
+        i = i + 1
+        src = src + 1
+    }
+
+    mem_write_byte(out_buf, i, 0)
+    deliver i
+}

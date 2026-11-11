@@ -1,0 +1,11 @@
+open flow vec3_add(a_x: Int, b_x: Int) -> Int {
+    deliver a_x + b_x
+}
+
+open flow vec3_dot(a_x: Int, a_y: Int, b_x: Int, b_y: Int) -> Int {
+    deliver (a_x * b_x) + (a_y * b_y)
+}
+
+open flow vec3_scale(v_x: Int, factor: Int) -> Int {
+    deliver v_x * factor
+}

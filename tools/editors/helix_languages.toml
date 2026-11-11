@@ -1,0 +1,21 @@
+# Helix Editor Configuration for Zoren Language
+[[language]]
+name = "zoren"
+scope = "source.zoren"
+injection-regex = "zoren"
+file-types = ["zor", "zoren"]
+roots = ["manifest.zor", ".git"]
+comment-tokens = ["//", "#"]
+block-comment-tokens = { start = "/*", end = "*/" }
+indent = { tab-width = 4, unit = "    " }
+
+[language.auto-pairs]
+'(' = ')'
+'{' = '}'
+'[' = ']'
+'"' = '"'
+"'" = "'"
+
+[language.lsp]
+command = "zoren"
+args = ["lsp"]

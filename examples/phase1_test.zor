@@ -1,0 +1,46 @@
+# Zoren Phase 1 Comprehensive Test Verification Suite
+
+flow main() -> Int {
+    post("--- Zoren Phase 1 Language Verification Suite ---")
+
+    # 1. Variable Declarations & Type Inference
+    bind initial_age = 20
+    flex current_score = 100
+    current_score = current_score + 5
+
+    post("Initial constant age: ", initial_age)
+    post("Inferred mutated score (105 expected): ", current_score)
+
+    # 2. Conditional If / Else Branching Verification
+    if current_score > 100 {
+        post("If Condition branch: SUCCESS (Score is > 100)")
+    } else {
+        post("If Condition branch: FAILED (Score is <= 100)")
+    }
+
+    # 3. Nested Else If Verification
+    if initial_age == 18 {
+        post("Nested branch: age is 18 (FAILED)")
+    } else if initial_age == 20 {
+        post("Nested branch: age is 20 (SUCCESS)")
+    } else {
+        post("Nested branch: other (FAILED)")
+    }
+
+    # 4. Arithmetic & Boolean Verification
+    bind passed = true
+    if passed && (current_score >= 105) {
+        post("Logical Verification: SUCCESS")
+    } else {
+        post("Logical Verification: FAILED")
+    }
+
+    # 5. Compound Assignments and Increments Verification
+    flex score_comp = 10
+    score_comp += 5
+    score_comp *= 2
+    score_comp++
+    post("Compound assignment and increment verification (31 expected): ", score_comp)
+
+    deliver 0
+}

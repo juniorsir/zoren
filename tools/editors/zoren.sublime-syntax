@@ -1,0 +1,112 @@
+%YAML 1.2
+---
+name: Zoren
+file_extensions:
+  - zor
+  - zoren
+scope: source.zoren
+
+contexts:
+  main:
+    - include: comments
+    - include: strings
+    - include: decorators
+    - include: keywords
+    - include: types
+    - include: builtins
+    - include: numbers
+    - include: operators
+
+  comments:
+    - match: '//.*$'
+      scope: comment.line.double-slash.zoren
+    - match: '#.*$'
+      scope: comment.line.number-sign.zoren
+    - match: '/\*'
+      scope: comment.block.zoren
+      push:
+        - match: '\*/'
+          pop: true
+        - match: '@(param|return|brief|note|throws)\b'
+          scope: storage.type.class.zoren
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.zoren
+      push:
+        - match: '"'
+          scope: punctuation.definition.string.end.zoren
+          pop: true
+        - match: '\\([nrt\\'"0]|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4})'
+          scope: constant.character.escape.zoren
+        - match: '\$\{'
+          scope: punctuation.definition.template-expression.begin.zoren
+          push:
+            - match: '\}'
+              scope: punctuation.definition.template-expression.end.zoren
+              pop: true
+            - include: main
+        - match: '.'
+          scope: string.quoted.double.zoren
+
+  decorators:
+    - match: '@[a-zA-Z_][a-zA-Z0-9_]*'
+      scope: entity.name.function.decorator.zoren
+
+  keywords:
+    - match: '\b(if|else|match|when|assess|case|repeat|while|for|in|break|continue|escape|skip|deliver|ret|divert|diverges|catch|maybe|err|ensure)\b'
+      scope: keyword.control.zoren
+    - match: '\b(flow|model|ability|grant|bind|flex|pack|expose|use|bring|as|enum|actor|chamber|extern|ABI|comptime|compute_kernel|accel)\b'
+      scope: keyword.declaration.zoren
+    - match: '\b(async|await)\b'
+      scope: keyword.control.async.zoren
+    - match: '\b(ai|simd)\b'
+      scope: keyword.control.ai.zoren
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.zoren
+    - match: '\b(null)\b'
+      scope: constant.language.null.zoren
+    - match: '\b(self)\b'
+      scope: variable.language.this.zoren
+    - match: '\b(PI|TAU|E)\b'
+      scope: constant.language.math.zoren
+
+  types:
+    - match: '\b(int|flt|str|bool|byte|rune|void|Int|UInt|Float|Bool|Char|Text|Nothing|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|iptr|uptr)\b'
+      scope: support.type.primitive.zoren
+    - match: '\b(vec|map|dyn|Result|Option|Tensor|Embedding|Graph|Table|Stream)\b'
+      scope: support.type.collection.zoren
+    - match: '\b[A-Z][a-zA-Z0-9_]*\b'
+      scope: entity.name.type.class.zoren
+
+  builtins:
+    - match: '\b(post|print|println|len|sqrt|min|max|pow|abs|square|clamp|hypot|sin_deg|cos_deg|assert|panic|exit|typeof|push|pop|insert|remove|keys|values|contains|sum|avg|clone|copy)\b'
+      scope: support.function.builtin.zoren
+
+  numbers:
+    - match: '\b0x[0-9a-fA-F_]+\b'
+      scope: constant.numeric.hex.zoren
+    - match: '\b0b[01_]+\b'
+      scope: constant.numeric.binary.zoren
+    - match: '\b0o[0-7_]+\b'
+      scope: constant.numeric.octal.zoren
+    - match: '\b[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\b'
+      scope: constant.numeric.float.zoren
+    - match: '\b[0-9][0-9_]*\b'
+      scope: constant.numeric.integer.zoren
+
+  operators:
+    - match: '(\|>|->|=>|::)'
+      scope: keyword.operator.pipeline.zoren
+    - match: '(==|!=|<=|>=|<|>)'
+      scope: keyword.operator.comparison.zoren
+    - match: '(&&|\|\||!)'
+      scope: keyword.operator.logical.zoren
+    - match: '(\+=|-=|\*=|/=|%=|=)'
+      scope: keyword.operator.assignment.zoren
+    - match: '(\+|-|\*|/|%)'
+      scope: keyword.operator.arithmetic.zoren
+    - match: '(&|\||\^|~|<<|>>)'
+      scope: keyword.operator.bitwise.zoren
+    - match: '(\?\?|\?|\.\.)'
+      scope: keyword.operator.special.zoren

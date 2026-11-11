@@ -1,0 +1,278 @@
+{
+  "Main Subroutine": {
+    "prefix": "main",
+    "body": [
+      "flow main() -> int {",
+      "    println(\"${1:Hello, Zoren!}\")",
+      "    ret 0",
+      "}"
+    ],
+    "description": "Standard Zoren application entrypoint flow"
+  },
+  "Flow Function Definition": {
+    "prefix": "flow",
+    "body": [
+      "flow ${1:function_name}(${2:param}: ${3:int}) -> ${4:int} {",
+      "    ${0:// implementation}",
+      "    ret ${5:0}",
+      "}"
+    ],
+    "description": "Define a typed Zoren flow function"
+  },
+  "Data Model Struct": {
+    "prefix": "model",
+    "body": [
+      "model ${1:ModelName} {",
+      "    open ${2:field_name}: ${3:str}",
+      "    open ${4:score}: ${5:int}",
+      "}"
+    ],
+    "description": "Define a composite Zoren struct data model"
+  },
+  "Ability Interface Contract": {
+    "prefix": "ability",
+    "body": [
+      "ability ${1:AbilityName} {",
+      "    flow ${2:method_name}(${3:param}: ${4:str}) -> ${5:bool}",
+      "}"
+    ],
+    "description": "Define an ability (trait/interface) contract"
+  },
+  "Grant Ability Implementation": {
+    "prefix": "grant",
+    "body": [
+      "grant ${1:AbilityName} for ${2:ModelName} {",
+      "    flow ${3:method_name}(${4:param}: ${5:str}) -> ${6:bool} {",
+      "        ${0:ret true}",
+      "    }",
+      "}"
+    ],
+    "description": "Implement an ability for a concrete model"
+  },
+  "Immutable Variable Binding": {
+    "prefix": "bind",
+    "body": [
+      "bind ${1:name}: ${2:int} = ${3:0}"
+    ],
+    "description": "Declare an immutable variable binding"
+  },
+  "Mutable Variable Binding": {
+    "prefix": "flex",
+    "body": [
+      "flex ${1:name}: ${2:int} = ${3:0}"
+    ],
+    "description": "Declare a mutable variable binding"
+  },
+  "For In Range Loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i} in ${2:0}..${3:10} {",
+      "    ${0:println(i)}",
+      "}"
+    ],
+    "description": "For loop over an integer range"
+  },
+  "While Loop": {
+    "prefix": "while",
+    "body": [
+      "while ${1:condition} {",
+      "    ${0:// loop body}",
+      "}"
+    ],
+    "description": "Conditional while loop"
+  },
+  "Repeat Loop": {
+    "prefix": "repeat",
+    "body": [
+      "repeat ${1:5} {",
+      "    ${0:// repeated body}",
+      "}"
+    ],
+    "description": "Fixed-count repeat loop"
+  },
+  "Pattern Match Expression": {
+    "prefix": "match",
+    "body": [
+      "match ${1:target} {",
+      "    case ${2:pattern} -> {",
+      "        ${3:println(\"Matched\");}",
+      "    }",
+      "    case _ -> {",
+      "        ${0:// default}",
+      "    }",
+      "}"
+    ],
+    "description": "Pattern matching construct"
+  },
+  "Conditional If Else": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "    ${2:// then}",
+      "} else {",
+      "    ${0:// else}",
+      "}"
+    ],
+    "description": "If-else conditional statement"
+  },
+  "Maybe Error Handling": {
+    "prefix": "maybe",
+    "body": [
+      "maybe ${1:result} = ${2:risky_operation()} {",
+      "    err(e) -> {",
+      "        println(\"Error encountered: \" + e)",
+      "        ret 1",
+      "    }",
+      "    ok(val) -> {",
+      "        ${0:// proceed with val}",
+      "    }",
+      "}"
+    ],
+    "description": "Error handling block with maybe/err"
+  },
+  "AI Neural Kernel Block": {
+    "prefix": "ai",
+    "body": [
+      "@matrix",
+      "ai flow ${1:forward_layer}(input: Tensor, weights: Tensor) -> Tensor {",
+      "    bind output = matmul(input, weights)",
+      "    ret silu(output)",
+      "}"
+    ],
+    "description": "Accelerated AI tensor forward flow"
+  },
+  "SIMD Vector Kernel": {
+    "prefix": "simd",
+    "body": [
+      "@simd",
+      "flow ${1:vector_kernel}(a: [int], b: [int], count: int) -> int {",
+      "    flex acc: int = 0",
+      "    for i in 0..count {",
+      "        acc += a[i] * b[i]",
+      "    }",
+      "    ret acc",
+      "}"
+    ],
+    "description": "Vectorized SIMD parallel execution flow"
+  },
+  "Test Case Flow": {
+    "prefix": "test",
+    "body": [
+      "@test",
+      "flow test_${1:feature}() -> int {",
+      "    bind result = ${2:execute()}",
+      "    assert(result == ${3:expected})",
+      "    ret 0",
+      "}"
+    ],
+    "description": "Unit test flow definition with assertion"
+  },
+  "Print Line": {
+    "prefix": "pl",
+    "body": [
+      "println(\"${1:message}\")"
+    ],
+    "description": "Print line to standard output"
+  },
+  "B-Plus Tree DB Query": {
+    "prefix": "bptree",
+    "body": [
+      "use plugins.bptree_db as db",
+      "",
+      "bind handle = db.open(\"${1:data.db}\")",
+      "db.insert(handle, \"${2:key}\", \"${3:value}\")",
+      "bind val = db.get(handle, \"${2:key}\")",
+      "println(\"Retrieved: \" + val)",
+      "db.close(handle)"
+    ],
+    "description": "B+ Tree embedded database transaction snippet"
+  },
+  "Raft Consensus Node": {
+    "prefix": "raft",
+    "body": [
+      "use plugins.raft_consensus as raft",
+      "",
+      "bind cluster = raft.init_node(${1:1}, [${2:1, 2, 3}])",
+      "raft.start_election(cluster)",
+      "raft.propose(cluster, \"${3:set x = 42}\")"
+    ],
+    "description": "Raft distributed consensus cluster node snippet"
+  },
+  "JSON Stream Parse": {
+    "prefix": "json",
+    "body": [
+      "use std.json_stream as json",
+      "",
+      "bind doc = json.parse(\"${1:{\\\"status\\\": 200}}\")",
+      "bind status = json.get_int(doc, \"status\")",
+      "println(status)"
+    ],
+    "description": "High-throughput JSON stream parse snippet"
+  },
+  "Python Def Function Alias": {
+    "prefix": "def",
+    "body": [
+      "flow ${1:function_name}(${2:param}: ${3:int}) -> ${4:int} {",
+      "    ${0:// implementation}",
+      "    ret ${5:0}",
+      "}"
+    ],
+    "description": "Python 'def' alias for Zoren flow definition"
+  },
+  "Python Class Model Alias": {
+    "prefix": "class",
+    "body": [
+      "model ${1:ClassName} {",
+      "    open ${2:field}: ${3:str}",
+      "    open ${4:count}: ${5:int}",
+      "}"
+    ],
+    "description": "Python 'class' alias for Zoren model definition"
+  },
+  "Python Import Use Alias": {
+    "prefix": "import",
+    "body": [
+      "use ${1:package} as ${2:alias}"
+    ],
+    "description": "Python 'import' alias for Zoren use statement"
+  },
+  "Python From Import Alias": {
+    "prefix": "from",
+    "body": [
+      "use ${1:package}.${2:submodule} as ${3:alias}"
+    ],
+    "description": "Python 'from ... import' alias for Zoren submodule use"
+  },
+  "Python Try Except Alias": {
+    "prefix": "try",
+    "body": [
+      "maybe ${1:result} = ${2:risky_call()} {",
+      "    err(e) -> {",
+      "        println(\"Exception caught: \" + e)",
+      "        ret 1",
+      "    }",
+      "    ok(${3:val}) -> {",
+      "        ${0:// proceed with val}",
+      "    }",
+      "}"
+    ],
+    "description": "Python 'try/except' alias for Zoren maybe error handling"
+  },
+  "Python Print Alias": {
+    "prefix": "print",
+    "body": [
+      "println(\"${1:Hello from Python alias!}\")"
+    ],
+    "description": "Python 'print' alias for Zoren println"
+  },
+  "Python Dataclass Alias": {
+    "prefix": "dataclass",
+    "body": [
+      "model ${1:DataRecord} {",
+      "    open ${2:id}: int",
+      "    open ${3:name}: str",
+      "}"
+    ],
+    "description": "Python '@dataclass' alias for Zoren struct model"
+  }
+}

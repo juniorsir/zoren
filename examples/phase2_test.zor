@@ -1,0 +1,39 @@
+# Zoren Phase 2 Verification Suite
+
+flow square(n: Int) -> Int {
+    deliver n * n
+}
+
+flow add(a: Int, b: Int) -> Int {
+    deliver a + b
+}
+
+flow main() -> Int {
+    post("=== Zoren Phase 2 Verification Suite ===")
+
+    # 1. Expressions, Grouping & Precedence
+    bind value = (5 + 8) * 2
+    bind neg_val = -(5 + 8) * 2
+    post("Grouped Expression (5 + 8) * 2 [Expected 26]: ", value)
+    post("Unary Negated Expression -(5 + 8) * 2 [Expected -26]: ", neg_val)
+
+    # 2. Nested Function Calls
+    bind result = add(square(4), 2)
+    post("Nested Call add(square(4), 2) [Expected 18]: ", result)
+
+    # 3. Pattern Matching (assess) with Else Arm
+    bind number = 1
+    assess number {
+        case 0 {
+            post("Assess arm: Zero")
+        }
+        case 1 {
+            post("Assess arm: One (SUCCESS)")
+        }
+        else {
+            post("Assess arm: Other")
+        }
+    }
+
+    deliver 0
+}

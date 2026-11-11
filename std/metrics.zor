@@ -1,0 +1,226 @@
+// Zoren Standard Library - Telemetry & Metrics Observability Module (std/metrics.zor)
+// Prometheus / OpenMetrics compatible metric collectors: Counters, Gauges, and Histograms.
+
+bring sys
+
+// ============================================================================
+// METRICS REGISTRY
+// Supports up to 64 registered metrics.
+// Header layout (32 bytes):
+// [0..8]:   metric_count
+// [8..16]:  max_metrics (64)
+// [16..24]: table_buf
+// [24..32]: histograms_buf
+//
+// Metric entry (32 bytes):
+// [0..8]:   name_hash (fast_hash of metric name)
+// [8..16]:  metric_type (1: Counter, 2: Gauge, 3: Histogram)
+// [16..24]: current_value (for Counter and Gauge)
+// [24..32]: extra_data (e.g. Histogram bucket index)
+//
+// Histogram entry (64 bytes):
+// [0..8]:   count
+// [8..16]:  sum
+// [16..24]: b_under_10ms
+// [24..32]: b_under_50ms
+// [32..40]: b_under_200ms
+// [40..48]: b_under_1000ms
+// [48..56]: b_inf
+// [56..64]: reserved
+// ============================================================================
+
+open flow metrics_registry_new() -> Int {
+    flex max_m = 64
+    flex t_buf = alloc_buffer(max_m * 32)
+    mem_fill(t_buf, 0, max_m * 32)
+
+    flex h_buf = alloc_buffer(max_m * 64)
+    mem_fill(h_buf, 0, max_m * 64)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0) // metric_count
+    mem_write_i64(header, 8, max_m)
+    mem_write_i64(header, 16, t_buf)
+    mem_write_i64(header, 24, h_buf)
+
+    deliver header
+}
+
+open flow counter_inc(reg_ptr: Int, name: Text, delta: Int) -> Int {
+    flex count = mem_read_i64(reg_ptr, 0)
+    flex max_m = mem_read_i64(reg_ptr, 8)
+    flex t_buf = mem_read_i64(reg_ptr, 16)
+    flex h = sys_fast_hash(name)
+
+    // Check if counter already exists
+    for i in 0..count {
+        flex offset = i * 32
+        flex cur_h = mem_read_i64(t_buf, offset)
+        if cur_h == h {
+            flex val = mem_read_i64(t_buf, offset + 16) + delta
+            mem_write_i64(t_buf, offset + 16, val)
+            deliver val
+        }
+    }
+
+    if count >= max_m { deliver -1 }
+
+    // Register new counter
+    flex new_offset = count * 32
+    mem_write_i64(t_buf, new_offset, h)
+    mem_write_i64(t_buf, new_offset + 8, 1) // Type 1: Counter
+    mem_write_i64(t_buf, new_offset + 16, delta)
+    mem_write_i64(t_buf, new_offset + 24, 0)
+    mem_write_i64(reg_ptr, 0, count + 1)
+
+    deliver delta
+}
+
+open flow counter_get(reg_ptr: Int, name: Text) -> Int {
+    flex count = mem_read_i64(reg_ptr, 0)
+    flex t_buf = mem_read_i64(reg_ptr, 16)
+    flex h = sys_fast_hash(name)
+
+    for i in 0..count {
+        flex offset = i * 32
+        if mem_read_i64(t_buf, offset) == h {
+            deliver mem_read_i64(t_buf, offset + 16)
+        }
+    }
+    deliver 0
+}
+
+open flow gauge_set(reg_ptr: Int, name: Text, value: Int) -> Int {
+    flex count = mem_read_i64(reg_ptr, 0)
+    flex max_m = mem_read_i64(reg_ptr, 8)
+    flex t_buf = mem_read_i64(reg_ptr, 16)
+    flex h = sys_fast_hash(name)
+
+    for i in 0..count {
+        flex offset = i * 32
+        flex cur_h = mem_read_i64(t_buf, offset)
+        if cur_h == h {
+            mem_write_i64(t_buf, offset + 16, value)
+            deliver value
+        }
+    }
+
+    if count >= max_m { deliver -1 }
+
+    flex new_offset = count * 32
+    mem_write_i64(t_buf, new_offset, h)
+    mem_write_i64(t_buf, new_offset + 8, 2) // Type 2: Gauge
+    mem_write_i64(t_buf, new_offset + 16, value)
+    mem_write_i64(t_buf, new_offset + 24, 0)
+    mem_write_i64(reg_ptr, 0, count + 1)
+
+    deliver value
+}
+
+open flow gauge_get(reg_ptr: Int, name: Text) -> Int {
+    flex count = mem_read_i64(reg_ptr, 0)
+    flex t_buf = mem_read_i64(reg_ptr, 16)
+    flex h = sys_fast_hash(name)
+
+    for i in 0..count {
+        flex offset = i * 32
+        if mem_read_i64(t_buf, offset) == h {
+            deliver mem_read_i64(t_buf, offset + 16)
+        }
+    }
+    deliver 0
+}
+
+open flow histogram_observe(reg_ptr: Int, name: Text, duration_ms: Int) -> Int {
+    flex count = mem_read_i64(reg_ptr, 0)
+    flex max_m = mem_read_i64(reg_ptr, 8)
+    flex t_buf = mem_read_i64(reg_ptr, 16)
+    flex h_buf = mem_read_i64(reg_ptr, 24)
+    flex h = sys_fast_hash(name)
+
+    flex h_idx = -1
+    for i in 0..count {
+        flex offset = i * 32
+        if mem_read_i64(t_buf, offset) == h {
+            h_idx = mem_read_i64(t_buf, offset + 24)
+            escape
+        }
+    }
+
+    if h_idx == -1 {
+        if count >= max_m { deliver -1 }
+        h_idx = count
+        flex new_offset = count * 32
+        mem_write_i64(t_buf, new_offset, h)
+        mem_write_i64(t_buf, new_offset + 8, 3) // Type 3: Histogram
+        mem_write_i64(t_buf, new_offset + 16, 0)
+        mem_write_i64(t_buf, new_offset + 24, h_idx)
+        mem_write_i64(reg_ptr, 0, count + 1)
+    }
+
+    // Record observation in histogram bucket
+    flex base = h_idx * 64
+    flex total_count = mem_read_i64(h_buf, base) + 1
+    flex total_sum = mem_read_i64(h_buf, base + 8) + duration_ms
+    mem_write_i64(h_buf, base, total_count)
+    mem_write_i64(h_buf, base + 8, total_sum)
+
+    if duration_ms <= 10 {
+        mem_write_i64(h_buf, base + 16, mem_read_i64(h_buf, base + 16) + 1)
+    }
+    if duration_ms <= 50 {
+        mem_write_i64(h_buf, base + 24, mem_read_i64(h_buf, base + 24) + 1)
+    }
+    if duration_ms <= 200 {
+        mem_write_i64(h_buf, base + 32, mem_read_i64(h_buf, base + 32) + 1)
+    }
+    if duration_ms <= 1000 {
+        mem_write_i64(h_buf, base + 40, mem_read_i64(h_buf, base + 40) + 1)
+    }
+    mem_write_i64(h_buf, base + 48, mem_read_i64(h_buf, base + 48) + 1)
+
+    deliver total_count
+}
+
+open flow histogram_count(reg_ptr: Int, name: Text) -> Int {
+    flex count = mem_read_i64(reg_ptr, 0)
+    flex t_buf = mem_read_i64(reg_ptr, 16)
+    flex h_buf = mem_read_i64(reg_ptr, 24)
+    flex h = sys_fast_hash(name)
+
+    for i in 0..count {
+        flex offset = i * 32
+        if mem_read_i64(t_buf, offset) == h {
+            flex h_idx = mem_read_i64(t_buf, offset + 24)
+            deliver mem_read_i64(h_buf, h_idx * 64)
+        }
+    }
+    deliver 0
+}
+
+open flow histogram_sum(reg_ptr: Int, name: Text) -> Int {
+    flex count = mem_read_i64(reg_ptr, 0)
+    flex t_buf = mem_read_i64(reg_ptr, 16)
+    flex h_buf = mem_read_i64(reg_ptr, 24)
+    flex h = sys_fast_hash(name)
+
+    for i in 0..count {
+        flex offset = i * 32
+        if mem_read_i64(t_buf, offset) == h {
+            flex h_idx = mem_read_i64(t_buf, offset + 24)
+            deliver mem_read_i64(h_buf, (h_idx * 64) + 8)
+        }
+    }
+    deliver 0
+}
+
+open flow metrics_registry_free(reg_ptr: Int) -> Int {
+    if reg_ptr != 0 {
+        flex t_buf = mem_read_i64(reg_ptr, 16)
+        flex h_buf = mem_read_i64(reg_ptr, 24)
+        if t_buf != 0 { free_buffer(t_buf) }
+        if h_buf != 0 { free_buffer(h_buf) }
+        free_buffer(reg_ptr)
+    }
+    deliver 0
+}

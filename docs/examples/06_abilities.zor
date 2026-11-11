@@ -1,0 +1,9 @@
+# EXPECT: SUCCESS
+ability Printable { flow print_summary() -> Nothing }
+model Item { open id: Int }
+grant Printable for Item { print_summary { post("ID: ", self.id) } }
+flow main() -> Int {
+    bind item = Item(100)
+    item.print_summary()
+    deliver 0
+}

@@ -1,0 +1,7 @@
+# EXPECT: SUCCESS
+bring math
+flow main() -> Int {
+    bind val = sin_deg(45)
+    post("Sin: ", val)
+    deliver 0
+}

@@ -1,0 +1,137 @@
+{
+  "Zoren Run Script": {
+    "prefix": "zor_run",
+    "body": [
+      "import pyzoren",
+      "",
+      "result = pyzoren.run(\"${1:path/to/script.zor}\")",
+      "if result.success:",
+      "    print(\"Output:\", result.stdout)",
+      "else:",
+      "    print(\"Error:\", result.stderr)"
+    ],
+    "description": "Execute a Zoren source file and capture output via pyzoren"
+  },
+  "Zoren Eval Expression": {
+    "prefix": "zor_eval",
+    "body": [
+      "import pyzoren",
+      "",
+      "val = pyzoren.eval_expr(\"${1:sqrt(144) * 2}\")",
+      "print(\"Evaluated:\", val)"
+    ],
+    "description": "Evaluate an expression dynamically in Zoren REPL engine from Python"
+  },
+  "Zoren Persistent Session": {
+    "prefix": "zor_session",
+    "body": [
+      "import pyzoren",
+      "",
+      "with pyzoren.ZorenSession() as zor:",
+      "    zor.execute(\"bind x: int = 100\")",
+      "    out = zor.execute(\"x * 5\")",
+      "    print(\"Session output:\", out)"
+    ],
+    "description": "Create a persistent interactive Zoren REPL session in Python"
+  },
+  "Zoren FastAPI Route": {
+    "prefix": "zor_fastapi",
+    "body": [
+      "from fastapi import FastAPI, HTTPException",
+      "import pyzoren",
+      "",
+      "app = FastAPI(title=\"Zoren-Backed Microservice\")",
+      "",
+      "@app.post(\"/api/v1/${1:compute}\")",
+      "async def ${1:compute}_endpoint(payload: dict):",
+      "    code = f\"\"\"",
+      "    flow main() -> int {",
+      "        println(\"Processing payload\")",
+      "        ret 0",
+      "    }",
+      "    \"\"\"",
+      "    res = pyzoren.run(code)",
+      "    if not res.success:",
+      "        raise HTTPException(status_code=500, detail=res.stderr)",
+      "    return {\"status\": \"ok\", \"output\": res.stdout.strip(), \"duration_ms\": res.duration_ms}"
+    ],
+    "description": "High-throughput FastAPI endpoint backed by Zoren native execution"
+  },
+  "Zoren Benchmark Showdown": {
+    "prefix": "zor_bench",
+    "body": [
+      "import time",
+      "import pyzoren",
+      "",
+      "def python_version(n: int) -> int:",
+      "    acc = 0",
+      "    for i in range(n):",
+      "        acc += i * i",
+      "    return acc",
+      "",
+      "N = 10_000_000",
+      "t0 = time.perf_counter()",
+      "py_res = python_version(N)",
+      "py_ms = (time.perf_counter() - t0) * 1000.0",
+      "",
+      "zor_code = f\"\"\"",
+      "flow main() -> int {",
+      "    flex acc: int = 0",
+      "    for i in 0..{N} {",
+      "        acc += i * i",
+      "    }",
+      "    println(acc)",
+      "    ret 0",
+      "}",
+      "\"\"\"",
+      "zor_res = pyzoren.run(zor_code)",
+      "print(f\"Python : {py_ms:.2f} ms\")",
+      "print(f\"Zoren  : {zor_res.duration_ms:.2f} ms\")",
+      "if zor_res.duration_ms > 0:",
+      "    print(f\"Speedup: {py_ms / zor_res.duration_ms:.1f}x faster\")"
+    ],
+    "description": "Compare runtime performance between Python and native Zoren"
+  },
+  "Zoren NumPy Tensor Bridge": {
+    "prefix": "zor_numpy",
+    "body": [
+      "import numpy as np",
+      "import pyzoren",
+      "",
+      "# 1. Create NumPy high-dimensional array",
+      "arr = np.random.randn(1024, 1024).astype(np.float32)",
+      "",
+      "# 2. Forward tensor metadata to Zoren accelerated flow",
+      "res = pyzoren.run(f\"\"\"",
+      "use foreign.python as py",
+      "",
+      "flow main() -> int {",
+      "    bind np = py.import_pkg(\"numpy\")",
+      "    println(\"NumPy array hooked into Zoren AI Enclave\")",
+      "    ret 0",
+      "}",
+      "\"\"\")",
+      "print(res.stdout)"
+    ],
+    "description": "Zero-overhead NumPy tensor bridge to Zoren AI enclave"
+  },
+  "Zoren CTypes Shared Library": {
+    "prefix": "zor_ctypes",
+    "body": [
+      "import ctypes",
+      "import pyzoren",
+      "",
+      "# Compile Zoren source to native shared library (.so)",
+      "pyzoren.compile_file(\"${1:kernel.zor}\", \"${2:kernel.so}\", fast=True)",
+      "",
+      "# Bind functions with ctypes",
+      "lib = ctypes.CDLL(\"./${2:kernel.so}\")",
+      "lib.${3:flow_name}.argtypes = [ctypes.c_int64, ctypes.c_int64]",
+      "lib.${3:flow_name}.restype = ctypes.c_int64",
+      "",
+      "result = lib.${3:flow_name}(10, 20)",
+      "print(\"Native result:\", result)"
+    ],
+    "description": "Load and call compiled Zoren shared object (.so) from Python via ctypes"
+  }
+}

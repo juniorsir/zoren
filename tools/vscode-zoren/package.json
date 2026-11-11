@@ -1,0 +1,182 @@
+{
+  "name": "zoren-lang",
+  "displayName": "Zoren",
+  "description": "Official Zoren language extension: modern syntax highlighting, themes, snippets, compiler integration, REPL, and LSP",
+  "version": "1.3.0",
+  "publisher": "zoren-org",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zoren-lang/zoren"
+  },
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:zoren"
+  ],
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Themes"
+  ],
+  "keywords": [
+    "zoren",
+    "syntax",
+    "compiler",
+    "lsp",
+    "systems programming",
+    "high performance"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "zoren",
+        "aliases": [
+          "Zoren",
+          "zoren"
+        ],
+        "extensions": [
+          ".zor",
+          ".zoren"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/zoren.png",
+          "dark": "./icons/zoren.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "zoren",
+        "scopeName": "source.zoren",
+        "path": "./syntaxes/zoren.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "zoren",
+        "path": "./snippets/zoren.json"
+      },
+      {
+        "language": "python",
+        "path": "./snippets/python.json"
+      }
+    ],
+    "themes": [
+      {
+        "id": "zoren-dark",
+        "label": "Zoren Dark Modern",
+        "uiTheme": "vs-dark",
+        "path": "./themes/zoren-dark.json"
+      }
+    ],
+    "iconThemes": [
+      {
+        "id": "zoren-icon-theme",
+        "label": "Zoren Icons",
+        "path": "./icons/icon-theme.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "zoren.run",
+        "title": "Zoren: Run Current File",
+        "category": "Zoren",
+        "icon": "$(play)"
+      },
+      {
+        "command": "zoren.build",
+        "title": "Zoren: Compile Current File",
+        "category": "Zoren",
+        "icon": "$(package)"
+      },
+      {
+        "command": "zoren.check",
+        "title": "Zoren: Run Doctor Diagnostics",
+        "category": "Zoren",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "zoren.format",
+        "title": "Zoren: Format Document",
+        "category": "Zoren",
+        "icon": "$(check)"
+      },
+      {
+        "command": "zoren.repl",
+        "title": "Zoren: Open Interactive REPL Studio",
+        "category": "Zoren",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "zoren.menu",
+        "title": "Zoren: Quick Actions Menu",
+        "category": "Zoren",
+        "icon": "$(zap)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "zoren.run",
+        "key": "alt+r",
+        "when": "editorLangId == zoren"
+      },
+      {
+        "command": "zoren.check",
+        "key": "alt+d",
+        "when": "editorLangId == zoren"
+      },
+      {
+        "command": "zoren.repl",
+        "key": "alt+z",
+        "when": "editorLangId == zoren"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "zoren.run",
+          "group": "navigation",
+          "when": "editorLangId == zoren"
+        },
+        {
+          "command": "zoren.repl",
+          "group": "navigation",
+          "when": "editorLangId == zoren"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "zoren.run",
+          "group": "zoren_group@1",
+          "when": "editorLangId == zoren"
+        },
+        {
+          "command": "zoren.check",
+          "group": "zoren_group@2",
+          "when": "editorLangId == zoren"
+        },
+        {
+          "command": "zoren.format",
+          "group": "zoren_group@3",
+          "when": "editorLangId == zoren"
+        }
+      ]
+    },
+    "configuration": {
+      "type": "object",
+      "title": "Zoren Language Configuration",
+      "properties": {
+        "zoren.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom path to the Zoren compiler executable binary (defaults to auto-detection in PATH, ~/.zoren/bin, or /usr/local/bin)"
+        }
+      }
+    }
+  },
+  "icon": "icons/zoren.png"
+}

@@ -1,0 +1,78 @@
+// Zoren Standard Cryptography & Security Module (std/crypto.zor)
+// Production-grade, hardware-accelerated, constant-time cryptographic primitives
+
+open flow sha256(payload: Text) -> Text {
+    deliver sys_sha256_hex(payload)
+}
+
+open flow sha256_hex(payload: Text) -> Text {
+    deliver sys_sha256_hex(payload)
+}
+
+open flow md5(payload: Text) -> Text {
+    deliver sys_md5_hex(payload)
+}
+
+open flow md5_hex(payload: Text) -> Text {
+    deliver sys_md5_hex(payload)
+}
+
+open flow base64_encode(raw: Text) -> Text {
+    deliver sys_base64_encode(raw)
+}
+
+open flow base64_decode(encoded: Text) -> Text {
+    deliver sys_base64_decode(encoded)
+}
+
+open flow uuid_v4() -> Text {
+    deliver sys_uuid_v4()
+}
+
+open flow fast_hash(payload: Text) -> Int {
+    deliver sys_fast_hash(payload)
+}
+
+open flow hex_encode(raw: Text) -> Text {
+    deliver sys_hex_encode(raw)
+}
+
+open flow hex_decode(encoded: Text) -> Text {
+    deliver sys_hex_decode(encoded)
+}
+
+open flow constant_time_compare(a: Text, b: Text) -> Bool {
+    deliver sys_constant_time_compare(a, b)
+}
+
+open flow hmac_sha256(key: Text, message: Text) -> Text {
+    deliver sys_hmac_sha256_hex(key, message)
+}
+
+open flow hmac_sha256_hex(key: Text, message: Text) -> Text {
+    deliver sys_hmac_sha256_hex(key, message)
+}
+
+open flow secure_zeroize(secret: Text) -> Int {
+    deliver sys_secure_zeroize(secret)
+}
+
+open flow secure_random_int(min_val: Int, max_val: Int) -> Int {
+    deliver sys_secure_random_int(min_val, max_val)
+}
+
+open flow secure_random_bytes(len: Int) -> Text {
+    deliver sys_secure_random_bytes(len)
+}
+
+open flow ct_select(mask: Int, a: Int, b: Int) -> Int {
+    deliver sys_ct_select(mask, a, b)
+}
+
+open flow rotl64(val: Int, shift: Int) -> Int {
+    deliver sys_rotl64(val, shift)
+}
+
+open flow rotr64(val: Int, shift: Int) -> Int {
+    deliver sys_rotr64(val, shift)
+}
