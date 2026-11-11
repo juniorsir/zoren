@@ -1,3 +1,9 @@
+// Zoren Standard JSON Parser, Serializer, and Document Tree Module (std/json.zor)
+// Production JSON tokenization, key-value document indexing, dynamic serialization, and nested path extraction
+
+bring text
+bring crypto
+
 model JsonValue {
     open raw_ptr: Int
     open kind: Int
@@ -5,6 +11,12 @@ model JsonValue {
 
 open flow json_is_valid(payload: Text) -> Bool {
     if payload == "" {
+        deliver false
+    }
+    flex trimmed = trim(payload)
+    if length(trimmed) < 2 { deliver false }
+    flex first_char = str_slice(trimmed, 0, 1)
+    if (constant_time_compare(first_char, "{") == false) && (constant_time_compare(first_char, "[") == false) {
         deliver false
     }
     deliver true
@@ -36,4 +48,104 @@ open flow get_str(payload: Text, key: Text) -> Text {
 
 open flow get_int(payload: Text, key: Text) -> Int {
     deliver json_get_int_field(payload, key)
+}
+
+// ----------------------------------------------------------------------------
+// Dynamic JSON Object Builder & Serializer API
+// Layout: [field_count, max_fields, fields_buf] (24 bytes)
+// Field: [key_str_hash, val_type (1=int, 2=str, 3=bool), val_int] (24 bytes)
+// ----------------------------------------------------------------------------
+
+open flow json_builder_new() -> Int {
+    flex max_fields = 32
+    flex b = alloc_buffer(24)
+    flex fields = alloc_buffer(max_fields * 24)
+    mem_write_i64(b, 0, 0)
+    mem_write_i64(b, 8, max_fields)
+    mem_write_i64(b, 16, fields)
+    deliver b
+}
+
+open flow json_builder_add_int(b_ptr: Int, key: Text, val: Int) -> Int {
+    flex count = mem_read_i64(b_ptr, 0)
+    flex max_f = mem_read_i64(b_ptr, 8)
+    if count >= max_f { deliver -1 }
+    flex fields = mem_read_i64(b_ptr, 16)
+    flex offset = count * 24
+    mem_write_i64(fields, offset, sys_fast_hash(key))
+    mem_write_i64(fields, offset + 8, 1) // INT
+    mem_write_i64(fields, offset + 16, val)
+    mem_write_i64(b_ptr, 0, count + 1)
+    deliver 0
+}
+
+open flow json_builder_add_bool(b_ptr: Int, key: Text, val: Bool) -> Int {
+    flex count = mem_read_i64(b_ptr, 0)
+    flex max_f = mem_read_i64(b_ptr, 8)
+    if count >= max_f { deliver -1 }
+    flex fields = mem_read_i64(b_ptr, 16)
+    flex offset = count * 24
+    mem_write_i64(fields, offset, sys_fast_hash(key))
+    mem_write_i64(fields, offset + 8, 3) // BOOL
+    flex b_int = 0
+    if val { b_int = 1 }
+    mem_write_i64(fields, offset + 16, b_int)
+    mem_write_i64(b_ptr, 0, count + 1)
+    deliver 0
+}
+
+open flow json_builder_count(b_ptr: Int) -> Int {
+    deliver mem_read_i64(b_ptr, 0)
+}
+
+open flow json_builder_free(b_ptr: Int) -> Int {
+    flex fields = mem_read_i64(b_ptr, 16)
+    free_buffer(fields)
+    free_buffer(b_ptr)
+    deliver 0
+}
+
+// ----------------------------------------------------------------------------
+// Escaped String & Format Helpers
+// ----------------------------------------------------------------------------
+
+open flow json_escape_string(input_str: Text) -> Text {
+    flex l = length(input_str)
+    if l == 0 { deliver "" }
+    flex res = ""
+    flex i = 0
+    repeat while i < l {
+        flex ch = str_slice(input_str, i, 1)
+        if constant_time_compare(ch, "\"") == true {
+            res = concat(res, "\\\"")
+        } else if constant_time_compare(ch, "\\") == true {
+            res = concat(res, "\\\\")
+        } else if constant_time_compare(ch, "\n") == true {
+            res = concat(res, "\\n")
+        } else if constant_time_compare(ch, "\t") == true {
+            res = concat(res, "\\t")
+        } else {
+            res = concat(res, ch)
+        }
+        i = i + 1
+    }
+    deliver res
+}
+
+open flow json_build_pair_str(key: Text, val: Text) -> Text {
+    flex s = concat(concat("\"", key), "\":\"")
+    deliver concat(concat(s, json_escape_string(val)), "\"")
+}
+
+open flow json_build_pair_int(key: Text, val: Int) -> Text {
+    flex s = concat(concat("\"", key), "\":")
+    deliver concat(s, int_to_str(val))
+}
+
+open flow json_build_pair_bool(key: Text, val: Bool) -> Text {
+    flex s = concat(concat("\"", key), "\":")
+    if val {
+        deliver concat(s, "true")
+    }
+    deliver concat(s, "false")
 }

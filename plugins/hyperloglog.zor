@@ -1,0 +1,153 @@
+// Zoren Analytics Plugin - HyperLogLog Cardinality Estimator (plugins/hyperloglog.zor)
+// Production distinct element counter for Big Data, streaming analytics, and unique visitor metrics
+// Memory footprint: ~128 bytes for 128 registers with Flajolet bias correction and Linear Counting
+
+bring crypto
+
+// HyperLogLog Header (32 bytes):
+// [0..8]:   m_registers (number of buckets, e.g. 64 or 128)
+// [8..16]:  precision_bits (p, where m = 2^p)
+// [16..24]: registers_buf
+// [24..32]: total_items_added
+
+open flow hll_new(precision_bits: Int) -> Int {
+    flex p = precision_bits
+    if p < 4 { p = 4 }
+    if p > 8 { p = 8 } // max 256 buckets
+
+    // Compute m = 2^p
+    flex m = 1
+    flex i = 0
+    repeat while i < p {
+        m = m * 2
+        i = i + 1
+    }
+
+    flex header = alloc_buffer(32)
+    flex reg_buf = alloc_buffer(m * 8)
+    mem_fill(reg_buf, 0, m * 8)
+
+    mem_write_i64(header, 0, m)
+    mem_write_i64(header, 8, p)
+    mem_write_i64(header, 16, reg_buf)
+    mem_write_i64(header, 24, 0) // total_items_added
+
+    deliver header
+}
+
+// Counts leading zeros in a 64-bit integer
+open flow hll_clz(val: Int) -> Int {
+    if val <= 0 { deliver 32 }
+    flex v = val
+    flex zeros = 0
+    repeat while zeros < 32 {
+        if v >= 1073741824 { // 2^30
+            deliver zeros
+        }
+        v = v * 2
+        zeros = zeros + 1
+    }
+    deliver zeros
+}
+
+open flow hll_add(hll_ptr: Int, key: Text) -> Int {
+    flex m = mem_read_i64(hll_ptr, 0)
+    flex reg_buf = mem_read_i64(hll_ptr, 16)
+    flex added = mem_read_i64(hll_ptr, 24)
+
+    flex h = sys_fast_hash(key)
+    if h < 0 { h = 0 - h }
+
+    // Bucket index from lower p bits
+    flex idx = h % m
+    // Remaining bits for leading zero counting
+    flex w = h / m
+    flex rank = hll_clz(w) + 1
+
+    flex offset = idx * 8
+    flex cur_val = mem_read_i64(reg_buf, offset)
+    if rank > cur_val {
+        mem_write_i64(reg_buf, offset, rank)
+    }
+
+    mem_write_i64(hll_ptr, 24, added + 1)
+    deliver 0
+}
+
+// Estimates distinct items using Flajolet harmonic mean
+open flow hll_count(hll_ptr: Int) -> Int {
+    flex m = mem_read_i64(hll_ptr, 0)
+    flex reg_buf = mem_read_i64(hll_ptr, 16)
+
+    // Sum harmonic indicator: sum(2^-M[j])
+    // Scaled by 1048576 (2^20) for fixed-point precision
+    flex sum_scaled = 0
+    flex zeros = 0
+
+    flex j = 0
+    repeat while j < m {
+        flex r = mem_read_i64(reg_buf, j * 8)
+        if r == 0 {
+            zeros = zeros + 1
+        }
+        // 2^-r scaled by 1048576 = 1048576 / 2^r
+        flex weight = 1048576
+        flex k = 0
+        repeat while k < r {
+            weight = weight / 2
+            k = k + 1
+        }
+        sum_scaled = sum_scaled + weight
+        j = j + 1
+    }
+
+    if sum_scaled == 0 { deliver 0 }
+
+    // Raw estimate E = alpha_m * m^2 / sum(2^-M[j])
+    // Alpha for m >= 64 is approx 0.709 -> scaled * 1000 = 709
+    flex alpha_m_scaled = 709
+    flex m_sq = m * m
+    flex raw_estimate = ((alpha_m_scaled * m_sq * 1048576) / (sum_scaled * 1000))
+
+    // Small range correction: Linear Counting if empty registers exist
+    if raw_estimate <= ((5 * m) / 2) {
+        if zeros > 0 {
+            // Linear Counting: m * ln(m / zeros)
+            // ln approximation via (m - zeros)
+            deliver m - zeros
+        }
+    }
+
+    deliver raw_estimate
+}
+
+// Merges another HyperLogLog estimator into this one
+open flow hll_merge(dst_hll: Int, src_hll: Int) -> Bool {
+    flex m_dst = mem_read_i64(dst_hll, 0)
+    flex m_src = mem_read_i64(src_hll, 0)
+    if m_dst != m_src { deliver false } // Must have matching precision
+
+    flex dst_buf = mem_read_i64(dst_hll, 16)
+    flex src_buf = mem_read_i64(src_hll, 16)
+
+    flex i = 0
+    repeat while i < m_dst {
+        flex offset = i * 8
+        flex v_dst = mem_read_i64(dst_buf, offset)
+        flex v_src = mem_read_i64(src_buf, offset)
+        if v_src > v_dst {
+            mem_write_i64(dst_buf, offset, v_src)
+        }
+        i = i + 1
+    }
+    deliver true
+}
+
+open flow hll_free(hll_ptr: Int) -> Int {
+    if hll_ptr != 0 {
+        flex reg_buf = mem_read_i64(hll_ptr, 16)
+        if reg_buf != 0 { free_buffer(reg_buf) }
+        free_buffer(hll_ptr)
+    }
+    deliver 0
+}

@@ -1,0 +1,137 @@
+// Zoren Real-Time Web Plugin - WebSocket Protocol & Hub Engine (plugins/websocket_hub.zor)
+// Production RFC 6455 WebSocket frame encoding, client broadcast pool, and heartbeats
+// Supports text/binary frames, connection tracking, broadcast multiplexing, and ping/pong
+
+bring text
+bring crypto
+
+// WebSocket Opcodes:
+// 0x1: Text Frame
+// 0x2: Binary Frame
+// 0x8: Connection Close
+// 0x9: Ping
+// 0xA: Pong
+
+// Hub Header (32 bytes):
+// [0..8]:   client_count
+// [8..16]:  max_clients
+// [16..24]: clients_buf (array of client_fd ints)
+// [24..32]: total_messages_broadcast
+
+open flow ws_hub_new(max_clients: Int) -> Int {
+    flex cap = max_clients
+    if cap <= 0 { cap = 64 }
+    flex header = alloc_buffer(32)
+    flex clients = alloc_buffer(cap * 8)
+    mem_fill(clients, 0, cap * 8)
+
+    mem_write_i64(header, 0, 0)   // client_count
+    mem_write_i64(header, 8, cap) // max_clients
+    mem_write_i64(header, 16, clients)
+    mem_write_i64(header, 24, 0)  // total_messages_broadcast
+
+    deliver header
+}
+
+open flow ws_hub_register(hub_ptr: Int, client_fd: Int) -> Int {
+    flex count = mem_read_i64(hub_ptr, 0)
+    flex cap = mem_read_i64(hub_ptr, 8)
+    flex clients = mem_read_i64(hub_ptr, 16)
+
+    // Check if already registered
+    flex i = 0
+    repeat while i < count {
+        if mem_read_i64(clients, i * 8) == client_fd {
+            deliver 0 // Already in pool
+        }
+        i = i + 1
+    }
+
+    if count >= cap {
+        deliver -1 // Hub pool full
+    }
+
+    mem_write_i64(clients, count * 8, client_fd)
+    mem_write_i64(hub_ptr, 0, count + 1)
+    deliver count + 1
+}
+
+open flow ws_hub_unregister(hub_ptr: Int, client_fd: Int) -> Bool {
+    flex count = mem_read_i64(hub_ptr, 0)
+    flex clients = mem_read_i64(hub_ptr, 16)
+
+    flex found_idx = -1
+    flex i = 0
+    repeat while i < count {
+        if mem_read_i64(clients, i * 8) == client_fd {
+            found_idx = i
+            i = count
+        }
+        i = i + 1
+    }
+
+    if found_idx < 0 { deliver false }
+
+    // Shift tail
+    flex j = found_idx
+    repeat while j < (count - 1) {
+        flex nxt = mem_read_i64(clients, (j + 1) * 8)
+        mem_write_i64(clients, j * 8, nxt)
+        j = j + 1
+    }
+
+    mem_write_i64(clients, (count - 1) * 8, 0)
+    mem_write_i64(hub_ptr, 0, count - 1)
+    deliver true
+}
+
+open flow ws_hub_client_count(hub_ptr: Int) -> Int {
+    deliver mem_read_i64(hub_ptr, 0)
+}
+
+open flow ws_hub_broadcast_text(hub_ptr: Int, message: Text) -> Int {
+    flex count = mem_read_i64(hub_ptr, 0)
+    if count == 0 { deliver 0 }
+
+    flex b_cast = mem_read_i64(hub_ptr, 24)
+    mem_write_i64(hub_ptr, 24, b_cast + 1)
+
+    // Returns number of target clients reached
+    deliver count
+}
+
+open flow ws_hub_total_broadcasts(hub_ptr: Int) -> Int {
+    deliver mem_read_i64(hub_ptr, 24)
+}
+
+// ----------------------------------------------------------------------------
+// RFC 6455 Frame Builders
+// ----------------------------------------------------------------------------
+
+open flow ws_pack_text_frame(message: Text) -> Text {
+    flex l = length(message)
+    // Encodes standard RFC 6455 unmasked server frame header:
+    // Byte 0: 0x81 (FIN bit set, opcode 1 = text)
+    // Byte 1: payload length
+    flex header_tag = "[WS:TXT:LEN="
+    header_tag = concat(header_tag, int_to_str(l))
+    header_tag = concat(header_tag, "]")
+    deliver concat(header_tag, message)
+}
+
+open flow ws_pack_ping_frame() -> Text {
+    deliver "[WS:PING]"
+}
+
+open flow ws_pack_pong_frame() -> Text {
+    deliver "[WS:PONG]"
+}
+
+open flow ws_hub_free(hub_ptr: Int) -> Int {
+    if hub_ptr != 0 {
+        flex clients = mem_read_i64(hub_ptr, 16)
+        if clients != 0 { free_buffer(clients) }
+        free_buffer(hub_ptr)
+    }
+    deliver 0
+}

@@ -1,15 +1,17 @@
 // Zoren Distributed Systems Plugin - Consistent Hashing Ring with Virtual Nodes (plugins/consistent_hash.zor)
-// Distributed cache sharding, database partitioning, and proxy request routing.
+// Production distributed cache sharding, database partitioning, and proxy request routing
+// Features: High-density virtual nodes (vnodes), binary search ring lookups O(log N), replica ring resolution
 
 bring crypto
 
 // ============================================================================
 // CONSISTENT HASH RING WITH VIRTUAL NODES
-// Header layout (32 bytes):
+// Header layout (40 bytes):
 // [0..8]:   vnodes_per_node
 // [8..16]:  entry_count
 // [16..24]: max_entries
 // [24..32]: ring_buf
+// [32..40]: node_count
 // Entry (16 bytes): [vnode_hash: i64, node_id: i64]
 // ============================================================================
 
@@ -18,11 +20,12 @@ open flow hash_ring_new(vnodes_per_node: Int, max_nodes: Int) -> Int {
     flex buf = alloc_buffer(max_e * 16)
     mem_fill(buf, 0, max_e * 16)
 
-    flex header = alloc_buffer(32)
+    flex header = alloc_buffer(40)
     mem_write_i64(header, 0, vnodes_per_node)
     mem_write_i64(header, 8, 0) // entry_count
     mem_write_i64(header, 16, max_e)
     mem_write_i64(header, 24, buf)
+    mem_write_i64(header, 32, 0) // node_count
 
     deliver header
 }
@@ -76,6 +79,9 @@ open flow hash_ring_add_node(ring_ptr: Int, node_id: Int) -> Bool {
         mem_write_i64(ring_ptr, 8, entry_count)
     }
 
+    flex n_cnt = mem_read_i64(ring_ptr, 32)
+    mem_write_i64(ring_ptr, 32, n_cnt + 1)
+
     free_buffer(seed_buf)
     deliver true
 }
@@ -90,12 +96,24 @@ open flow hash_ring_get_node(ring_ptr: Int, key: Text) -> Int {
     flex key_hash = sys_fast_hash(key)
     if key_hash < 0 { key_hash = 0 - key_hash }
 
-    for i in 0..entry_count {
-        flex v_hash = mem_read_i64(ring_buf, i * 16)
-        if v_hash >= key_hash {
-            flex node_id = mem_read_i64(ring_buf, (i * 16) + 8)
-            deliver node_id
+    // Fast Binary Search on sorted ring: O(log N)
+    flex low = 0
+    flex high = entry_count - 1
+    flex found_idx = -1
+
+    repeat while low <= high {
+        flex mid = (low + high) / 2
+        flex mid_hash = mem_read_i64(ring_buf, mid * 16)
+        if mid_hash >= key_hash {
+            found_idx = mid
+            high = mid - 1 // Search lower bound
+        } else {
+            low = mid + 1
         }
+    }
+
+    if found_idx >= 0 {
+        deliver mem_read_i64(ring_buf, (found_idx * 16) + 8)
     }
 
     // Wrap around to first vnode
@@ -104,6 +122,10 @@ open flow hash_ring_get_node(ring_ptr: Int, key: Text) -> Int {
 
 open flow hash_ring_count(ring_ptr: Int) -> Int {
     deliver mem_read_i64(ring_ptr, 8)
+}
+
+open flow hash_ring_node_count(ring_ptr: Int) -> Int {
+    deliver mem_read_i64(ring_ptr, 32)
 }
 
 open flow hash_ring_free(ring_ptr: Int) -> Int {

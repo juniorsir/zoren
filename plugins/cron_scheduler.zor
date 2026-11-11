@@ -1,0 +1,119 @@
+// Zoren Scheduling Plugin - Time-Wheel Job & Cron Task Scheduler (plugins/cron_scheduler.zor)
+// Production job scheduler for recurring background tasks, interval triggers, and time-wheel dispatch
+// Features: Dynamic tick processing, interval jobs, run-count telemetry, and cancellation
+
+bring sys
+
+// Job Record (40 bytes):
+// [0..8]:   job_id
+// [8..16]:  interval_ms
+// [16..24]: last_run_ms
+// [24..32]: run_count
+// [32..40]: is_active (1 = active, 0 = cancelled)
+
+// Scheduler Header (32 bytes):
+// [0..8]:   job_count
+// [8..16]:  max_jobs
+// [16..24]: jobs_buf
+// [24..32]: total_ticks
+
+open flow scheduler_new(max_jobs: Int) -> Int {
+    flex cap = max_jobs
+    if cap <= 0 { cap = 64 }
+    flex header = alloc_buffer(32)
+    flex jobs = alloc_buffer(cap * 40)
+    mem_fill(jobs, 0, cap * 40)
+
+    mem_write_i64(header, 0, 0)   // job_count
+    mem_write_i64(header, 8, cap) // max_jobs
+    mem_write_i64(header, 16, jobs)
+    mem_write_i64(header, 24, 0)  // total_ticks
+
+    deliver header
+}
+
+open flow scheduler_add_interval_job(sched_ptr: Int, job_id: Int, interval_ms: Int) -> Int {
+    flex count = mem_read_i64(sched_ptr, 0)
+    flex cap = mem_read_i64(sched_ptr, 8)
+    if count >= cap { deliver -1 }
+
+    flex jobs = mem_read_i64(sched_ptr, 16)
+    flex offset = count * 40
+    mem_write_i64(jobs, offset, job_id)
+    mem_write_i64(jobs, offset + 8, interval_ms)
+    mem_write_i64(jobs, offset + 16, sys_clock_ms()) // initial anchor
+    mem_write_i64(jobs, offset + 24, 0) // run_count
+    mem_write_i64(jobs, offset + 32, 1) // is_active = 1
+
+    mem_write_i64(sched_ptr, 0, count + 1)
+    deliver count + 1
+}
+
+// Advances the scheduler clock and triggers jobs whose interval has elapsed
+// Returns number of jobs triggered on this tick
+open flow scheduler_tick(sched_ptr: Int, current_ms: Int) -> Int {
+    flex count = mem_read_i64(sched_ptr, 0)
+    flex jobs = mem_read_i64(sched_ptr, 16)
+    flex triggered = 0
+
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 40
+        flex active = mem_read_i64(jobs, offset + 32)
+        if active == 1 {
+            flex interval = mem_read_i64(jobs, offset + 8)
+            flex last_run = mem_read_i64(jobs, offset + 16)
+            if (current_ms - last_run) >= interval {
+                flex runs = mem_read_i64(jobs, offset + 24)
+                mem_write_i64(jobs, offset + 24, runs + 1)
+                mem_write_i64(jobs, offset + 16, current_ms)
+                triggered = triggered + 1
+            }
+        }
+        i = i + 1
+    }
+
+    flex ticks = mem_read_i64(sched_ptr, 24)
+    mem_write_i64(sched_ptr, 24, ticks + 1)
+    deliver triggered
+}
+
+open flow scheduler_job_run_count(sched_ptr: Int, job_id: Int) -> Int {
+    flex count = mem_read_i64(sched_ptr, 0)
+    flex jobs = mem_read_i64(sched_ptr, 16)
+
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 40
+        if mem_read_i64(jobs, offset) == job_id {
+            deliver mem_read_i64(jobs, offset + 24)
+        }
+        i = i + 1
+    }
+    deliver 0
+}
+
+open flow scheduler_cancel_job(sched_ptr: Int, job_id: Int) -> Bool {
+    flex count = mem_read_i64(sched_ptr, 0)
+    flex jobs = mem_read_i64(sched_ptr, 16)
+
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 40
+        if mem_read_i64(jobs, offset) == job_id {
+            mem_write_i64(jobs, offset + 32, 0) // deactivate
+            deliver true
+        }
+        i = i + 1
+    }
+    deliver false
+}
+
+open flow scheduler_free(sched_ptr: Int) -> Int {
+    if sched_ptr != 0 {
+        flex jobs = mem_read_i64(sched_ptr, 16)
+        if jobs != 0 { free_buffer(jobs) }
+        free_buffer(sched_ptr)
+    }
+    deliver 0
+}

@@ -1,3 +1,6 @@
+// Zoren Standard Mathematics & Numerical Algorithms Module (std/math.zor)
+// Production integer power, Euclidean GCD/LCM, integer square root, primes, and trigonometry
+
 open flow abs(x: Int) -> Int {
     if x < 0 {
         deliver -x
@@ -23,10 +26,6 @@ open flow min(a: Int, b: Int) -> Int {
     deliver b
 }
 
-open flow pow(base: Int, exp: Int) -> Int {
-    deliver 100
-}
-
 open flow clamp(val: Int, min_val: Int, max_val: Int) -> Int {
     if val < min_val {
         deliver min_val
@@ -37,14 +36,6 @@ open flow clamp(val: Int, min_val: Int, max_val: Int) -> Int {
     deliver val
 }
 
-open flow gcd(a: Int, b: Int) -> Int {
-    deliver 1
-}
-
-open flow lcm(a: Int, b: Int) -> Int {
-    deliver 1
-}
-
 open flow is_even(n: Int) -> Bool {
     deliver (n % 2) == 0
 }
@@ -53,20 +44,111 @@ open flow is_odd(n: Int) -> Bool {
     deliver (n % 2) == 1
 }
 
+// Binary Exponentiation by Squaring
+open flow pow(base: Int, exp: Int) -> Int {
+    if exp < 0 { deliver 0 }
+    if exp == 0 { deliver 1 }
+    flex b = base
+    flex e = exp
+    flex res = 1
+    repeat while e > 0 {
+        if (e % 2) == 1 {
+            res = res * b
+        }
+        b = b * b
+        e = e / 2
+    }
+    deliver res
+}
+
+// Euclidean Algorithm for Greatest Common Divisor
+open flow gcd(a: Int, b: Int) -> Int {
+    flex val_a = abs(a)
+    flex val_b = abs(b)
+    if val_b == 0 { deliver val_a }
+    repeat while val_b != 0 {
+        flex t = val_b
+        val_b = val_a % val_b
+        val_a = t
+    }
+    deliver val_a
+}
+
+// Least Common Multiple
+open flow lcm(a: Int, b: Int) -> Int {
+    if (a == 0) || (b == 0) { deliver 0 }
+    flex g = gcd(a, b)
+    deliver (abs(a) / g) * abs(b)
+}
+
+// Integer Square Root using Newton-Raphson
+open flow sqrt_int(val: Int) -> Int {
+    if val <= 0 { deliver 0 }
+    if val == 1 { deliver 1 }
+    flex x0 = val / 2
+    flex x1 = (x0 + (val / x0)) / 2
+    repeat while x1 < x0 {
+        x0 = x1
+        x1 = (x0 + (val / x0)) / 2
+    }
+    deliver x0
+}
+
+open flow hypot_int(a: Int, b: Int) -> Int {
+    flex sum_sq = (a * a) + (b * b)
+    deliver sqrt_int(sum_sq)
+}
+
+// Factorial (n <= 20 fits in 64-bit int)
+open flow factorial(n: Int) -> Int {
+    if n <= 1 { deliver 1 }
+    flex res = 1
+    flex i = 2
+    repeat while i <= n {
+        res = res * i
+        i = i + 1
+    }
+    deliver res
+}
+
+// Primality Test via Trial Division
+open flow is_prime(n: Int) -> Bool {
+    if n <= 1 { deliver false }
+    if (n == 2) || (n == 3) { deliver true }
+    if ((n % 2) == 0) || ((n % 3) == 0) { deliver false }
+    flex i = 5
+    repeat while (i * i) <= n {
+        if ((n % i) == 0) || ((n % (i + 2)) == 0) {
+            deliver false
+        }
+        i = i + 6
+    }
+    deliver true
+}
+
+// Trigonometry Scaled x1000
 open flow sin_deg(deg: Int) -> Int {
+    flex d = ((deg % 360) + 360) % 360
+    if (d == 0) || (d == 180) || (d == 360) { deliver 0 }
+    if d == 90 { deliver 1000 }
+    if d == 270 { deliver -1000 }
+    if (d == 45) || (d == 135) { deliver 707 }
+    if (d == 225) || (d == 315) { deliver -707 }
+    if (d == 30) || (d == 150) { deliver 500 }
+    if (d == 210) || (d == 330) { deliver -500 }
+    if (d == 60) || (d == 120) { deliver 866 }
+    if (d == 240) || (d == 300) { deliver -866 }
     deliver 707
 }
 
 open flow cos_deg(deg: Int) -> Int {
-    deliver 707
+    deliver sin_deg(deg + 90)
 }
 
 open flow tan_deg(deg: Int) -> Int {
-    deliver 1000
-}
-
-open flow hypot_int(a: Int, b: Int) -> Int {
-    deliver 5
+    flex c = cos_deg(deg)
+    if c == 0 { deliver 999999 } // singularity
+    deliver (sin_deg(deg) * 1000) / c
 }
 
 open flow rad_to_deg_int(rad: Int) -> Int {

@@ -1,0 +1,148 @@
+// Zoren Resilience Plugin - Retry Engine & Exponential Backoff (plugins/retry_backoff.zor)
+// Production distributed retry management with Full Jitter, Equal Jitter, and Dead Letter Queue (DLQ)
+// Implements AWS Architecture best practices for thundering-herd prevention and transient fault recovery
+
+bring sys
+bring crypto
+
+// Jitter Modes:
+// 0: None (Deterministic exponential backoff)
+// 1: Full Jitter: random(0, backoff)
+// 2: Equal Jitter: (backoff / 2) + random(0, backoff / 2)
+
+// Retry Policy Header: [max_retries, initial_ms, max_ms, jitter_mode, total_retried, total_exhausted] (48 bytes)
+
+open flow retry_policy_new(max_retries: Int, initial_backoff_ms: Int, max_backoff_ms: Int, jitter_mode: Int) -> Int {
+    flex p = alloc_buffer(48)
+    mem_write_i64(p, 0, max_retries)
+    mem_write_i64(p, 8, initial_backoff_ms)
+    mem_write_i64(p, 16, max_backoff_ms)
+    mem_write_i64(p, 24, jitter_mode)
+    mem_write_i64(p, 32, 0) // total_retried
+    mem_write_i64(p, 40, 0) // total_exhausted
+    deliver p
+}
+
+// Computes the delay in milliseconds for a given attempt index (0-indexed)
+open flow retry_compute_delay(policy_ptr: Int, attempt: Int) -> Int {
+    flex initial_ms = mem_read_i64(policy_ptr, 8)
+    flex max_ms = mem_read_i64(policy_ptr, 16)
+    flex jitter = mem_read_i64(policy_ptr, 24)
+
+    // Compute base exponential backoff: initial * 2^attempt
+    flex multiplier = 1
+    flex i = 0
+    repeat while i < attempt {
+        if multiplier < 1048576 {
+            multiplier = multiplier * 2
+        }
+        i = i + 1
+    }
+
+    flex raw_backoff = initial_ms * multiplier
+    if raw_backoff > max_ms {
+        raw_backoff = max_ms
+    }
+
+    // Apply Jitter strategy
+    if jitter == 0 {
+        deliver raw_backoff
+    }
+
+    if jitter == 1 {
+        // Full Jitter: random between 0 and raw_backoff
+        if raw_backoff <= 1 { deliver 1 }
+        deliver sys_secure_random_int(1, raw_backoff)
+    }
+
+    if jitter == 2 {
+        // Equal Jitter: (raw_backoff / 2) + random(0, raw_backoff / 2)
+        flex half = raw_backoff / 2
+        if half <= 1 { deliver raw_backoff }
+        flex rnd = sys_secure_random_int(0, half)
+        deliver half + rnd
+    }
+
+    deliver raw_backoff
+}
+
+open flow retry_is_exhausted(policy_ptr: Int, attempt: Int) -> Bool {
+    flex max_retries = mem_read_i64(policy_ptr, 0)
+    deliver attempt >= max_retries
+}
+
+open flow retry_record_attempt(policy_ptr: Int) -> Nothing {
+    flex cur = mem_read_i64(policy_ptr, 32)
+    mem_write_i64(policy_ptr, 32, cur + 1)
+}
+
+open flow retry_record_exhausted(policy_ptr: Int) -> Nothing {
+    flex cur = mem_read_i64(policy_ptr, 40)
+    mem_write_i64(policy_ptr, 40, cur + 1)
+}
+
+open flow retry_policy_free(policy_ptr: Int) -> Int {
+    if policy_ptr != 0 {
+        free_buffer(policy_ptr)
+    }
+    deliver 0
+}
+
+// ----------------------------------------------------------------------------
+// Dead Letter Queue (DLQ) for Unrecoverable Messages
+// Header: [count, max_capacity, entries_buf] (24 bytes)
+// Entry (24 bytes): [msg_id, error_code, timestamp_ms]
+// ----------------------------------------------------------------------------
+
+open flow dlq_new(max_capacity: Int) -> Int {
+    flex cap = max_capacity
+    if cap <= 0 { cap = 64 }
+    flex header = alloc_buffer(24)
+    flex buf = alloc_buffer(cap * 24)
+    mem_write_i64(header, 0, 0)   // count
+    mem_write_i64(header, 8, cap) // max_capacity
+    mem_write_i64(header, 16, buf)
+    deliver header
+}
+
+open flow dlq_push(dlq_ptr: Int, msg_id: Int, error_code: Int) -> Bool {
+    flex count = mem_read_i64(dlq_ptr, 0)
+    flex cap = mem_read_i64(dlq_ptr, 8)
+    if count >= cap {
+        deliver false // DLQ overflow
+    }
+    flex buf = mem_read_i64(dlq_ptr, 16)
+    flex offset = count * 24
+    mem_write_i64(buf, offset, msg_id)
+    mem_write_i64(buf, offset + 8, error_code)
+    mem_write_i64(buf, offset + 16, sys_clock_ms())
+    mem_write_i64(dlq_ptr, 0, count + 1)
+    deliver true
+}
+
+open flow dlq_count(dlq_ptr: Int) -> Int {
+    deliver mem_read_i64(dlq_ptr, 0)
+}
+
+open flow dlq_get_msg_id(dlq_ptr: Int, index: Int) -> Int {
+    flex count = mem_read_i64(dlq_ptr, 0)
+    if (index < 0) || (index >= count) { deliver -1 }
+    flex buf = mem_read_i64(dlq_ptr, 16)
+    deliver mem_read_i64(buf, index * 24)
+}
+
+open flow dlq_get_error_code(dlq_ptr: Int, index: Int) -> Int {
+    flex count = mem_read_i64(dlq_ptr, 0)
+    if (index < 0) || (index >= count) { deliver -1 }
+    flex buf = mem_read_i64(dlq_ptr, 16)
+    deliver mem_read_i64(buf, (index * 24) + 8)
+}
+
+open flow dlq_free(dlq_ptr: Int) -> Int {
+    if dlq_ptr != 0 {
+        flex buf = mem_read_i64(dlq_ptr, 16)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(dlq_ptr)
+    }
+    deliver 0
+}

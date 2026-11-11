@@ -1,3 +1,9 @@
+// Zoren File System & Path Navigation Module (std/fs.zor)
+// Production file reading, writing, directory operations, path manipulation, and file utilities
+
+bring text
+bring crypto
+
 open flow read(path: Text) -> Text {
     deliver read_file_text(path)
 }
@@ -55,4 +61,92 @@ open flow list_dir_contents() -> Text {
 
 open flow list_dir_json() -> Text {
     deliver list_current_dir_json()
+}
+
+// ----------------------------------------------------------------------------
+// Path Manipulation & Parsing Utilities
+// ----------------------------------------------------------------------------
+
+open flow path_join(base_path: Text, sub_path: Text) -> Text {
+    if base_path == "" { deliver sub_path }
+    if sub_path == "" { deliver base_path }
+    flex len_b = length(base_path)
+    flex last_char = str_slice(base_path, len_b - 1, 1)
+    if constant_time_compare(last_char, "/") == true {
+        deliver concat(base_path, sub_path)
+    }
+    deliver concat(concat(base_path, "/"), sub_path)
+}
+
+open flow path_basename(full_path: Text) -> Text {
+    flex l = length(full_path)
+    if l == 0 { deliver "" }
+    flex last_slash = -1
+    flex i = 0
+    repeat while i < l {
+        flex ch = str_slice(full_path, i, 1)
+        if constant_time_compare(ch, "/") == true {
+            last_slash = i
+        }
+        i = i + 1
+    }
+    if last_slash < 0 { deliver full_path }
+    flex rem_len = l - (last_slash + 1)
+    deliver str_slice(full_path, last_slash + 1, rem_len)
+}
+
+open flow path_dirname(full_path: Text) -> Text {
+    flex l = length(full_path)
+    if l == 0 { deliver "." }
+    flex last_slash = -1
+    flex i = 0
+    repeat while i < l {
+        flex ch = str_slice(full_path, i, 1)
+        if constant_time_compare(ch, "/") == true {
+            last_slash = i
+        }
+        i = i + 1
+    }
+    if last_slash <= 0 { deliver "." }
+    deliver str_slice(full_path, 0, last_slash)
+}
+
+open flow path_extension(full_path: Text) -> Text {
+    flex base = path_basename(full_path)
+    flex l = length(base)
+    flex last_dot = -1
+    flex i = 0
+    repeat while i < l {
+        flex ch = str_slice(base, i, 1)
+        if constant_time_compare(ch, ".") == true {
+            last_dot = i
+        }
+        i = i + 1
+    }
+    if last_dot <= 0 { deliver "" }
+    flex ext_len = l - (last_dot + 1)
+    deliver str_slice(base, last_dot + 1, ext_len)
+}
+
+open flow file_copy(src_path: Text, dst_path: Text) -> Int {
+    if exists(src_path) == false { deliver -1 }
+    flex content = read(src_path)
+    deliver write(dst_path, content)
+}
+
+open flow file_is_empty(file_path: Text) -> Bool {
+    if exists(file_path) == false { deliver true }
+    deliver size(file_path) == 0
+}
+
+open flow format_file_size(size_bytes: Int) -> Text {
+    if size_bytes < 1024 {
+        deliver concat(int_to_str(size_bytes), " B")
+    }
+    if size_bytes < 1048576 {
+        flex kb = size_bytes / 1024
+        deliver concat(int_to_str(kb), " KiB")
+    }
+    flex mb = size_bytes / 1048576
+    deliver concat(int_to_str(mb), " MiB")
 }
