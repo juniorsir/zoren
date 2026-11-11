@@ -1,0 +1,316 @@
+// Zoren Distributed Consensus Plugin - Raft Consensus Protocol (plugins/raft_consensus.zor)
+// Production Raft implementation: Leader election, term leases, log replication,
+// quorum verification, commit index advancement, and state machine application.
+
+bring sys
+
+// ============================================================================
+// RAFT NODE CONSTANTS & MEMORY LAYOUT
+// Header layout (64 bytes):
+// [0..8]:   node_id (Int)
+// [8..16]:  state (0: FOLLOWER, 1: CANDIDATE, 2: LEADER)
+// [16..24]: current_term (Int)
+// [24..32]: voted_for (-1 if none, otherwise candidate_id)
+// [32..40]: commit_index (Int)
+// [40..48]: last_applied (Int)
+// [48..56]: peer_count (Int)
+// [56..64]: votes_received (Int)
+//
+// Log buffer layout (256 entries * 32 bytes = 8192 bytes):
+// Entry layout (32 bytes):
+// [0..8]:   term (Int)
+// [8..16]:  index (1-based Int)
+// [16..24]: command_id (Int)
+// [24..32]: value (Int)
+//
+// Master Struct layout (32 bytes):
+// [0..8]:   header_ptr
+// [8..16]:  log_buf
+// [16..24]: log_count
+// [24..32]: reserved
+// ============================================================================
+
+open flow raft_node_new(node_id: Int, peer_count: Int) -> Int {
+    flex header = alloc_buffer(64)
+    flex log_buf = alloc_buffer(8192)
+    mem_fill(log_buf, 0, 8192)
+
+    mem_write_i64(header, 0, node_id)
+    mem_write_i64(header, 8, 0)       // FOLLOWER
+    mem_write_i64(header, 16, 0)      // current_term = 0
+    mem_write_i64(header, 24, 0 - 1)  // voted_for = -1
+    mem_write_i64(header, 32, 0)      // commit_index = 0
+    mem_write_i64(header, 40, 0)      // last_applied = 0
+    mem_write_i64(header, 48, peer_count)
+    mem_write_i64(header, 56, 0)      // votes_received = 0
+
+    flex node = alloc_buffer(32)
+    mem_write_i64(node, 0, header)
+    mem_write_i64(node, 8, log_buf)
+    mem_write_i64(node, 16, 0)        // log_count = 0
+    mem_write_i64(node, 24, 0)
+
+    deliver node
+}
+
+open flow raft_get_state(node_ptr: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    deliver mem_read_i64(header, 8)
+}
+
+open flow raft_get_term(node_ptr: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    deliver mem_read_i64(header, 16)
+}
+
+open flow raft_get_voted_for(node_ptr: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    deliver mem_read_i64(header, 24)
+}
+
+open flow raft_get_commit_index(node_ptr: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    deliver mem_read_i64(header, 32)
+}
+
+open flow raft_get_last_applied(node_ptr: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    deliver mem_read_i64(header, 40)
+}
+
+open flow raft_get_log_count(node_ptr: Int) -> Int {
+    deliver mem_read_i64(node_ptr, 16)
+}
+
+// Node triggers election timeout: increments term, votes for self, becomes CANDIDATE
+open flow raft_start_election(node_ptr: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    flex new_term = mem_read_i64(header, 16) + 1
+    flex my_id = mem_read_i64(header, 0)
+
+    mem_write_i64(header, 8, 1)        // State = CANDIDATE
+    mem_write_i64(header, 16, new_term)
+    mem_write_i64(header, 24, my_id)   // Vote for self
+    mem_write_i64(header, 56, 1)        // 1 vote received
+
+    flex peer_count = mem_read_i64(header, 48)
+    flex cluster_size = peer_count + 1
+    flex quorum = (cluster_size / 2) + 1
+
+    if 1 >= quorum {
+        mem_write_i64(header, 8, 2)    // State = LEADER
+        deliver 2
+    }
+
+    deliver 1
+}
+
+// Receive a vote grant from a peer in election
+open flow raft_receive_vote(node_ptr: Int, from_term: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    flex cur_state = mem_read_i64(header, 8)
+    flex cur_term = mem_read_i64(header, 16)
+
+    if cur_state != 1 {
+        deliver cur_state
+    }
+    if from_term != cur_term {
+        deliver cur_state
+    }
+
+    flex votes = mem_read_i64(header, 56) + 1
+    mem_write_i64(header, 56, votes)
+
+    flex peer_count = mem_read_i64(header, 48)
+    flex cluster_size = peer_count + 1
+    flex quorum = (cluster_size / 2) + 1
+
+    if votes >= quorum {
+        mem_write_i64(header, 8, 2) // State = LEADER
+        deliver 2
+    }
+
+    deliver 1
+}
+
+// Handle RequestVote RPC
+open flow raft_handle_request_vote(
+    node_ptr: Int,
+    candidate_id: Int,
+    candidate_term: Int,
+    candidate_last_log_index: Int,
+    candidate_last_log_term: Int
+) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    flex log_buf = mem_read_i64(node_ptr, 8)
+    flex log_count = mem_read_i64(node_ptr, 16)
+    flex cur_term = mem_read_i64(header, 16)
+
+    // Step down to follower if term is newer
+    if candidate_term > cur_term {
+        mem_write_i64(header, 16, candidate_term)
+        mem_write_i64(header, 8, 0)      // FOLLOWER
+        mem_write_i64(header, 24, 0 - 1) // Reset voted_for
+    }
+
+    flex updated_term = mem_read_i64(header, 16)
+    if candidate_term < updated_term {
+        deliver 0 // Stale candidate term
+    }
+
+    flex voted_for = mem_read_i64(header, 24)
+    flex can_vote = 0
+    if voted_for == (0 - 1) {
+        can_vote = 1
+    }
+    if voted_for == candidate_id {
+        can_vote = 1
+    }
+    if can_vote == 0 {
+        deliver 0 // Already voted for another candidate
+    }
+
+    // Up-to-date check
+    flex my_last_term = 0
+    flex my_last_index = log_count
+    if log_count > 0 {
+        flex entry_offset = (log_count - 1) * 32
+        my_last_term = mem_read_i64(log_buf, entry_offset)
+    }
+
+    if candidate_last_log_term < my_last_term {
+        deliver 0
+    }
+    if candidate_last_log_term == my_last_term {
+        if candidate_last_log_index < my_last_index {
+            deliver 0
+        }
+    }
+
+    // Grant vote
+    mem_write_i64(header, 24, candidate_id)
+    deliver 1
+}
+
+// Leader appends command to local log
+open flow raft_leader_propose(node_ptr: Int, command_id: Int, value: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    flex state = mem_read_i64(header, 8)
+    if state != 2 {
+        deliver 0 - 1 // Not leader
+    }
+
+    flex log_count = mem_read_i64(node_ptr, 16)
+    if log_count >= 256 {
+        deliver 0 - 2 // Full
+    }
+
+    flex term = mem_read_i64(header, 16)
+    flex log_buf = mem_read_i64(node_ptr, 8)
+    flex new_index = log_count + 1
+    flex offset = log_count * 32
+
+    mem_write_i64(log_buf, offset, term)
+    mem_write_i64(log_buf, offset + 8, new_index)
+    mem_write_i64(log_buf, offset + 16, command_id)
+    mem_write_i64(log_buf, offset + 24, value)
+
+    mem_write_i64(node_ptr, 16, new_index)
+    deliver new_index
+}
+
+// Follower handles AppendEntries RPC
+open flow raft_handle_append_entries(
+    node_ptr: Int,
+    leader_term: Int,
+    prev_log_index: Int,
+    prev_log_term: Int,
+    entry_term: Int,
+    entry_cmd: Int,
+    entry_val: Int,
+    leader_commit: Int
+) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    flex cur_term = mem_read_i64(header, 16)
+
+    if leader_term < cur_term {
+        deliver 0
+    }
+
+    if leader_term >= cur_term {
+        mem_write_i64(header, 16, leader_term)
+        mem_write_i64(header, 8, 0) // FOLLOWER
+    }
+
+    flex log_buf = mem_read_i64(node_ptr, 8)
+    flex log_count = mem_read_i64(node_ptr, 16)
+
+    if prev_log_index > 0 {
+        if prev_log_index > log_count {
+            deliver 0
+        }
+        flex prev_offset = (prev_log_index - 1) * 32
+        flex check_term = mem_read_i64(log_buf, prev_offset)
+        if check_term != prev_log_term {
+            deliver 0
+        }
+    }
+
+    if entry_term > 0 {
+        flex new_index = prev_log_index + 1
+        flex offset = (new_index - 1) * 32
+
+        mem_write_i64(log_buf, offset, entry_term)
+        mem_write_i64(log_buf, offset + 8, new_index)
+        mem_write_i64(log_buf, offset + 16, entry_cmd)
+        mem_write_i64(log_buf, offset + 24, entry_val)
+
+        if new_index > log_count {
+            mem_write_i64(node_ptr, 16, new_index)
+        }
+    }
+
+    flex cur_commit = mem_read_i64(header, 32)
+    if leader_commit > cur_commit {
+        flex updated_count = mem_read_i64(node_ptr, 16)
+        flex new_commit = leader_commit
+        if updated_count < new_commit {
+            new_commit = updated_count
+        }
+        mem_write_i64(header, 32, new_commit)
+    }
+
+    deliver 1
+}
+
+// Applies committed log entries to the application state machine
+open flow raft_apply_entries(node_ptr: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    flex log_buf = mem_read_i64(node_ptr, 8)
+    flex commit = mem_read_i64(header, 32)
+    flex applied = mem_read_i64(header, 40)
+    flex state_sum = 0
+
+    while applied < commit {
+        flex offset = applied * 32
+        flex cmd = mem_read_i64(log_buf, offset + 16)
+        flex val = mem_read_i64(log_buf, offset + 24)
+
+        if cmd == 1 { // ADD
+            state_sum = state_sum + val
+        }
+
+        applied = applied + 1
+    }
+
+    mem_write_i64(header, 40, applied)
+    deliver state_sum
+}
+
+open flow raft_free(node_ptr: Int) -> Void {
+    flex header = mem_read_i64(node_ptr, 0)
+    flex log_buf = mem_read_i64(node_ptr, 8)
+    free_buffer(header)
+    free_buffer(log_buf)
+    free_buffer(node_ptr)
+}

@@ -1,0 +1,135 @@
+// Zoren AI Plugin - Multi-Agent Swarm Orchestrator & Consensus Engine (plugins/agent_swarm.zor)
+// Decentralized consensus, multi-agent voting, and coordinated LLM workflows.
+
+bring sys
+
+// ============================================================================
+// AGENT SWARM CONSENSUS ENGINE
+// Header layout (40 bytes):
+// [0..8]:   max_agents
+// [8..16]:  registered_agents
+// [16..24]: vote_count
+// [24..32]: votes_buf
+// [32..40]: max_votes
+// Entry (24 bytes): [agent_id: i64, proposal_id: i64, score: i64]
+// ============================================================================
+
+open flow agent_swarm_new(max_agents: Int) -> Int {
+    flex max_v = max_agents * 16
+    flex v_buf = alloc_buffer(max_v * 24)
+    mem_fill(v_buf, 0, max_v * 24)
+
+    flex header = alloc_buffer(40)
+    mem_write_i64(header, 0, max_agents)
+    mem_write_i64(header, 8, 0) // registered_agents
+    mem_write_i64(header, 16, 0) // vote_count
+    mem_write_i64(header, 24, v_buf)
+    mem_write_i64(header, 32, max_v)
+
+    deliver header
+}
+
+open flow agent_swarm_register_agent(swarm_ptr: Int, agent_id: Int) -> Bool {
+    flex max_agents = mem_read_i64(swarm_ptr, 0)
+    flex registered = mem_read_i64(swarm_ptr, 8)
+    if registered >= max_agents {
+        deliver false
+    }
+    mem_write_i64(swarm_ptr, 8, registered + 1)
+    deliver true
+}
+
+open flow agent_swarm_submit_vote(swarm_ptr: Int, agent_id: Int, proposal_id: Int, score: Int) -> Bool {
+    flex vote_count = mem_read_i64(swarm_ptr, 16)
+    flex max_votes = mem_read_i64(swarm_ptr, 32)
+    flex v_buf = mem_read_i64(swarm_ptr, 24)
+
+    if vote_count >= max_votes {
+        deliver false
+    }
+
+    // Check if agent already voted on this proposal; if so, update in-place
+    for i in 0..vote_count {
+        flex offset = i * 24
+        flex a_id = mem_read_i64(v_buf, offset)
+        flex p_id = mem_read_i64(v_buf, offset + 8)
+        if a_id == agent_id {
+            if p_id == proposal_id {
+                mem_write_i64(v_buf, offset + 16, score)
+                deliver true
+            }
+        }
+    }
+
+    // Append new vote
+    flex new_offset = vote_count * 24
+    mem_write_i64(v_buf, new_offset, agent_id)
+    mem_write_i64(v_buf, new_offset + 8, proposal_id)
+    mem_write_i64(v_buf, new_offset + 16, score)
+    mem_write_i64(swarm_ptr, 16, vote_count + 1)
+    deliver true
+}
+
+open flow agent_swarm_tally(swarm_ptr: Int, proposal_id: Int) -> Int {
+    flex vote_count = mem_read_i64(swarm_ptr, 16)
+    flex v_buf = mem_read_i64(swarm_ptr, 24)
+
+    flex total_score = 0
+    flex count = 0
+
+    for i in 0..vote_count {
+        flex offset = i * 24
+        flex p_id = mem_read_i64(v_buf, offset + 8)
+        if p_id == proposal_id {
+            flex score = mem_read_i64(v_buf, offset + 16)
+            total_score = total_score + score
+            count = count + 1
+        }
+    }
+
+    if count == 0 { deliver 0 }
+    deliver total_score / count
+}
+
+open flow agent_swarm_vote_count(swarm_ptr: Int, proposal_id: Int) -> Int {
+    flex vote_count = mem_read_i64(swarm_ptr, 16)
+    flex v_buf = mem_read_i64(swarm_ptr, 24)
+
+    flex count = 0
+    for i in 0..vote_count {
+        flex offset = i * 24
+        flex p_id = mem_read_i64(v_buf, offset + 8)
+        if p_id == proposal_id {
+            count = count + 1
+        }
+    }
+    deliver count
+}
+
+open flow agent_swarm_consensus(swarm_ptr: Int, proposal_id: Int, threshold: Int) -> Bool {
+    flex votes = agent_swarm_vote_count(swarm_ptr, proposal_id)
+    if votes == 0 { deliver false }
+
+    flex registered = mem_read_i64(swarm_ptr, 8)
+    // Swarm quorum check: at least 50% of registered agents must participate
+    if (votes * 2) < registered {
+        deliver false
+    }
+
+    flex avg_score = agent_swarm_tally(swarm_ptr, proposal_id)
+    if avg_score >= threshold {
+        deliver true
+    }
+    deliver false
+}
+
+open flow agent_swarm_free(swarm_ptr: Int) -> Int {
+    if swarm_ptr != 0 {
+        flex v_buf = mem_read_i64(swarm_ptr, 24)
+        if v_buf != 0 {
+            free_buffer(v_buf)
+        }
+        free_buffer(swarm_ptr)
+    }
+    deliver 0
+}

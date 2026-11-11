@@ -1,5 +1,12 @@
+// Zoren 3D & SIMD Vector Mathematics Module (std/math_vec.zor)
+// Production linear algebra, 2D/3D geometry routines, dot/cross products, and matrix transformations
+
 open flow vec3_add(a_x: Int, b_x: Int) -> Int {
     deliver a_x + b_x
+}
+
+open flow vec3_sub(a_x: Int, b_x: Int) -> Int {
+    deliver a_x - b_x
 }
 
 open flow vec3_dot(a_x: Int, a_y: Int, b_x: Int, b_y: Int) -> Int {
@@ -8,4 +15,81 @@ open flow vec3_dot(a_x: Int, a_y: Int, b_x: Int, b_y: Int) -> Int {
 
 open flow vec3_scale(v_x: Int, factor: Int) -> Int {
     deliver v_x * factor
+}
+
+open flow vec3_mag_sq(x: Int, y: Int) -> Int {
+    deliver (x * x) + (y * y)
+}
+
+open flow vec3_dist_sq(x1: Int, y1: Int, x2: Int, y2: Int) -> Int {
+    flex dx = x2 - x1
+    flex dy = y2 - y1
+    deliver (dx * dx) + (dy * dy)
+}
+
+open flow vec3_cross_2d(x1: Int, y1: Int, x2: Int, y2: Int) -> Int {
+    deliver (x1 * y2) - (y1 * x2)
+}
+
+open flow vec3_clamp(val: Int, min_val: Int, max_val: Int) -> Int {
+    if val < min_val { deliver min_val }
+    if val > max_val { deliver max_val }
+    deliver val
+}
+
+open flow vec3_lerp(a: Int, b: Int, t_percent: Int) -> Int {
+    // t_percent from 0 to 100
+    flex delta = b - a
+    deliver a + ((delta * t_percent) / 100)
+}
+
+// ----------------------------------------------------------------------------
+// Buffer-Backed 3D Vector & Matrix 3x3 Operations
+// Vec3 Buffer Layout: [x, y, z] (24 bytes)
+// ----------------------------------------------------------------------------
+
+open flow vec3_buf_new(x: Int, y: Int, z: Int) -> Int {
+    flex v = alloc_buffer(24)
+    mem_write_i64(v, 0, x)
+    mem_write_i64(v, 8, y)
+    mem_write_i64(v, 16, z)
+    deliver v
+}
+
+open flow vec3_buf_x(v_ptr: Int) -> Int { deliver mem_read_i64(v_ptr, 0) }
+open flow vec3_buf_y(v_ptr: Int) -> Int { deliver mem_read_i64(v_ptr, 8) }
+open flow vec3_buf_z(v_ptr: Int) -> Int { deliver mem_read_i64(v_ptr, 16) }
+
+open flow vec3_buf_add(a_ptr: Int, b_ptr: Int, out_ptr: Int) -> Nothing {
+    mem_write_i64(out_ptr, 0, mem_read_i64(a_ptr, 0) + mem_read_i64(b_ptr, 0))
+    mem_write_i64(out_ptr, 8, mem_read_i64(a_ptr, 8) + mem_read_i64(b_ptr, 8))
+    mem_write_i64(out_ptr, 16, mem_read_i64(a_ptr, 16) + mem_read_i64(b_ptr, 16))
+}
+
+open flow vec3_buf_dot3(a_ptr: Int, b_ptr: Int) -> Int {
+    flex ax = mem_read_i64(a_ptr, 0)
+    flex ay = mem_read_i64(a_ptr, 8)
+    flex az = mem_read_i64(a_ptr, 16)
+    flex bx = mem_read_i64(b_ptr, 0)
+    flex by = mem_read_i64(b_ptr, 8)
+    flex bz = mem_read_i64(b_ptr, 16)
+    deliver (ax * bx) + (ay * by) + (az * bz)
+}
+
+open flow vec3_buf_cross(a_ptr: Int, b_ptr: Int, out_ptr: Int) -> Nothing {
+    flex ax = mem_read_i64(a_ptr, 0)
+    flex ay = mem_read_i64(a_ptr, 8)
+    flex az = mem_read_i64(a_ptr, 16)
+    flex bx = mem_read_i64(b_ptr, 0)
+    flex by = mem_read_i64(b_ptr, 8)
+    flex bz = mem_read_i64(b_ptr, 16)
+
+    mem_write_i64(out_ptr, 0, (ay * bz) - (az * by))
+    mem_write_i64(out_ptr, 8, (az * bx) - (ax * bz))
+    mem_write_i64(out_ptr, 16, (ax * by) - (ay * bx))
+}
+
+open flow vec3_buf_free(v_ptr: Int) -> Int {
+    free_buffer(v_ptr)
+    deliver 0
 }

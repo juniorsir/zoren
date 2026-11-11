@@ -1,0 +1,258 @@
+// Zoren Storage Plugin - Ordered B+ Tree Index Engine (plugins/bptree_db.zor)
+// High-performance ordered B+ Tree storage engine for database indexing,
+// time-series partitioning, and contiguous leaf range scanning with zero re-seeks.
+
+bring sys
+
+// ============================================================================
+// B+ TREE MEMORY LAYOUT
+// Node layout (288 bytes):
+// [0..8]:   is_leaf (1: leaf, 0: internal)
+// [8..16]:  num_keys (0..16)
+// [16..24]: next_leaf_ptr (chain to next leaf node for O(1) range traversal)
+// [24..32]: parent_ptr
+// [32..160]:  keys array (16 keys * 8 bytes = 128 bytes)
+// [160..288]: values or child pointers array (16 slots * 8 bytes = 128 bytes)
+//
+// Master Tree struct (24 bytes):
+// [0..8]:   root_ptr
+// [8..16]:  node_count
+// [16..24]: item_count
+// ============================================================================
+
+open flow bptree_node_alloc(is_leaf: Int) -> Int {
+    flex ptr = alloc_buffer(288)
+    mem_fill(ptr, 0, 288)
+    mem_write_i64(ptr, 0, is_leaf)
+    mem_write_i64(ptr, 8, 0)
+    mem_write_i64(ptr, 16, 0)
+    mem_write_i64(ptr, 24, 0)
+    deliver ptr
+}
+
+open flow bptree_new() -> Int {
+    flex root = bptree_node_alloc(1) // Initial root is a leaf
+    flex tree = alloc_buffer(24)
+    mem_write_i64(tree, 0, root)
+    mem_write_i64(tree, 8, 1) // node_count
+    mem_write_i64(tree, 16, 0) // item_count
+    deliver tree
+}
+
+// Binary search inside a node for the given key
+open flow bptree_find_key_idx(node_ptr: Int, key: Int) -> Int {
+    flex num_keys = mem_read_i64(node_ptr, 8)
+    flex low = 0
+    flex high = num_keys
+
+    while low < high {
+        flex mid = (low + high) / 2
+        flex mid_key = mem_read_i64(node_ptr, 32 + (mid * 8))
+
+        if mid_key < key {
+            low = mid + 1
+        } else {
+            high = mid
+        }
+    }
+    deliver low
+}
+
+// Lookup a key in the B+ Tree
+// Returns value if found, or -1 if not found
+open flow bptree_get(tree_ptr: Int, key: Int) -> Int {
+    flex cur = mem_read_i64(tree_ptr, 0)
+
+    // Traverse down internal nodes until reaching leaf
+    while mem_read_i64(cur, 0) == 0 {
+        flex idx = bptree_find_key_idx(cur, key)
+        flex num_keys = mem_read_i64(cur, 8)
+        flex child_idx = idx
+        if idx < num_keys {
+            flex k = mem_read_i64(cur, 32 + (idx * 8))
+            if k == key {
+                child_idx = idx + 1
+            }
+        }
+        cur = mem_read_i64(cur, 160 + (child_idx * 8))
+        if cur == 0 {
+            deliver 0 - 1
+        }
+    }
+
+    // Now at leaf node
+    flex leaf_idx = bptree_find_key_idx(cur, key)
+    flex leaf_num = mem_read_i64(cur, 8)
+    if leaf_idx < leaf_num {
+        flex found_k = mem_read_i64(cur, 32 + (leaf_idx * 8))
+        if found_k == key {
+            deliver mem_read_i64(cur, 160 + (leaf_idx * 8))
+        }
+    }
+
+    deliver 0 - 1
+}
+
+// Insert or update key-value pair in leaf
+open flow bptree_put(tree_ptr: Int, key: Int, value: Int) -> Int {
+    flex cur = mem_read_i64(tree_ptr, 0)
+
+    // 1. Descend to the target leaf
+    while mem_read_i64(cur, 0) == 0 {
+        flex idx = bptree_find_key_idx(cur, key)
+        flex num_keys = mem_read_i64(cur, 8)
+        flex child_idx = idx
+        if idx < num_keys {
+            flex k = mem_read_i64(cur, 32 + (idx * 8))
+            if k == key {
+                child_idx = idx + 1
+            }
+        }
+        cur = mem_read_i64(cur, 160 + (child_idx * 8))
+    }
+
+    // 2. Check if key already exists in leaf
+    flex idx = bptree_find_key_idx(cur, key)
+    flex num_keys = mem_read_i64(cur, 8)
+
+    if idx < num_keys {
+        flex existing_k = mem_read_i64(cur, 32 + (idx * 8))
+        if existing_k == key {
+            mem_write_i64(cur, 160 + (idx * 8), value)
+            deliver 1
+        }
+    }
+
+    // 3. Insert new key if node has room (max 16)
+    if num_keys < 16 {
+        flex i = num_keys
+        while i > idx {
+            flex prev_k = mem_read_i64(cur, 32 + ((i - 1) * 8))
+            flex prev_v = mem_read_i64(cur, 160 + ((i - 1) * 8))
+            mem_write_i64(cur, 32 + (i * 8), prev_k)
+            mem_write_i64(cur, 160 + (i * 8), prev_v)
+            i = i - 1
+        }
+
+        mem_write_i64(cur, 32 + (idx * 8), key)
+        mem_write_i64(cur, 160 + (idx * 8), value)
+        mem_write_i64(cur, 8, num_keys + 1)
+
+        flex cur_items = mem_read_i64(tree_ptr, 16) + 1
+        mem_write_i64(tree_ptr, 16, cur_items)
+        deliver 1
+    }
+
+    // 4. Split leaf node when full
+    flex new_leaf = bptree_node_alloc(1)
+    flex cur_nodes = mem_read_i64(tree_ptr, 8) + 1
+    mem_write_i64(tree_ptr, 8, cur_nodes)
+
+    flex mid = 8
+    flex new_leaf_count = 8
+
+    flex j = 0
+    while j < new_leaf_count {
+        flex src_idx = mid + j
+        flex k = mem_read_i64(cur, 32 + (src_idx * 8))
+        flex v = mem_read_i64(cur, 160 + (src_idx * 8))
+        mem_write_i64(new_leaf, 32 + (j * 8), k)
+        mem_write_i64(new_leaf, 160 + (j * 8), v)
+        j = j + 1
+    }
+
+    mem_write_i64(cur, 8, mid)
+    mem_write_i64(new_leaf, 8, new_leaf_count)
+
+    // Chain leaves
+    flex old_next = mem_read_i64(cur, 16)
+    mem_write_i64(cur, 16, new_leaf)
+    mem_write_i64(new_leaf, 16, old_next)
+
+    flex split_key = mem_read_i64(new_leaf, 32)
+    if key < split_key {
+        bptree_put(tree_ptr, key, value)
+    } else {
+        flex n_idx = bptree_find_key_idx(new_leaf, key)
+        flex n_count = mem_read_i64(new_leaf, 8)
+        flex s = n_count
+        while s > n_idx {
+            flex pk = mem_read_i64(new_leaf, 32 + ((s - 1) * 8))
+            flex pv = mem_read_i64(new_leaf, 160 + ((s - 1) * 8))
+            mem_write_i64(new_leaf, 32 + (s * 8), pk)
+            mem_write_i64(new_leaf, 160 + (s * 8), pv)
+            s = s - 1
+        }
+        mem_write_i64(new_leaf, 32 + (n_idx * 8), key)
+        mem_write_i64(new_leaf, 160 + (n_idx * 8), value)
+        mem_write_i64(new_leaf, 8, n_count + 1)
+        flex updated_items = mem_read_i64(tree_ptr, 16) + 1
+        mem_write_i64(tree_ptr, 16, updated_items)
+    }
+
+    // Check if cur was root
+    if cur == mem_read_i64(tree_ptr, 0) {
+        flex new_root = bptree_node_alloc(0) // Internal node
+        mem_write_i64(new_root, 8, 1)          // 1 key
+        mem_write_i64(new_root, 32, split_key) // Divider key
+        mem_write_i64(new_root, 160, cur)      // Left child
+        mem_write_i64(new_root, 168, new_leaf) // Right child
+        mem_write_i64(tree_ptr, 0, new_root)
+        flex inc_nodes = mem_read_i64(tree_ptr, 8) + 1
+        mem_write_i64(tree_ptr, 8, inc_nodes)
+    }
+
+    deliver 1
+}
+
+// Range Scan between [min_key, max_key] inclusive
+open flow bptree_range_scan(tree_ptr: Int, min_key: Int, max_key: Int, out_buf: Int, max_out: Int) -> Int {
+    flex cur = mem_read_i64(tree_ptr, 0)
+
+    // Find starting leaf
+    while mem_read_i64(cur, 0) == 0 {
+        flex idx = bptree_find_key_idx(cur, min_key)
+        flex num_keys = mem_read_i64(cur, 8)
+        flex child_idx = idx
+        if idx < num_keys {
+            flex k = mem_read_i64(cur, 32 + (idx * 8))
+            if k == min_key {
+                child_idx = idx + 1
+            }
+        }
+        cur = mem_read_i64(cur, 160 + (child_idx * 8))
+        if cur == 0 {
+            deliver 0
+        }
+    }
+
+    flex matches = 0
+
+    // Linear sequential traversal across chained leaf nodes
+    while cur != 0 {
+        flex num_keys = mem_read_i64(cur, 8)
+        flex i = 0
+        while i < num_keys {
+            flex k = mem_read_i64(cur, 32 + (i * 8))
+            if k >= min_key {
+                if k <= max_key {
+                    if matches < max_out {
+                        flex v = mem_read_i64(cur, 160 + (i * 8))
+                        mem_write_i64(out_buf, matches * 8, v)
+                        matches = matches + 1
+                    }
+                } else {
+                    deliver matches
+                }
+            }
+            i = i + 1
+        }
+        cur = mem_read_i64(cur, 16) // Follow next leaf pointer
+    }
+
+    deliver matches
+}
+
+open flow bptree_free(tree_ptr: Int) -> Void {
+    free_buffer(tree_ptr)
+}

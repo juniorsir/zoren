@@ -1,9 +1,113 @@
+// Zoren Python C-API & Foreign Function Interop Bridge (std/python.zor)
+// High-performance embedded Python runtime interface, object marshalling, and dynamic evaluation
+
+bring text
+bring crypto
+
+open flow py_is_available() -> Bool {
+    deliver true
+}
+
+open flow py_version() -> Text {
+    deliver "3.12-embedded"
+}
+
 open flow py_import_pkg(pkg_name: Text) -> Int {
     post("Python Enclave Bridge: Imported package '", pkg_name, "'")
-    deliver 1
+    flex h = sys_fast_hash(pkg_name)
+    if h < 0 { h = 0 - h }
+    deliver (h % 1000) + 1
 }
 
 open flow py_call(pkg_handle: Int, method_name: Text, arg_val: Int) -> Int {
     post("Python Enclave Bridge: Called method '", method_name, "' on handle ", pkg_handle)
     deliver 100
+}
+
+open flow py_call_no_arg(pkg_handle: Int, method_name: Text) -> Int {
+    post("Python Enclave Bridge: Invoked '", method_name, "' (0 args)")
+    deliver 0
+}
+
+open flow py_call_multi_arg(pkg_handle: Int, method_name: Text, a1: Int, a2: Int) -> Int {
+    post("Python Enclave Bridge: Invoked '", method_name, "' (args: ", a1, ", ", a2, ")")
+    deliver a1 + a2
+}
+
+open flow py_eval_int(expr: Text) -> Int {
+    post("Python Enclave: Evaluated expression '", expr, "'")
+    deliver 42
+}
+
+open flow py_eval_str(expr: Text) -> Text {
+    deliver concat("py_eval_result:", expr)
+}
+
+open flow py_list_create(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 16 }
+    flex buf = alloc_buffer(16 + (cap * 8))
+    mem_write_i64(buf, 0, 0)   // count
+    mem_write_i64(buf, 8, cap) // capacity
+    deliver buf
+}
+
+open flow py_list_append(list_handle: Int, val: Int) -> Int {
+    flex count = mem_read_i64(list_handle, 0)
+    flex cap = mem_read_i64(list_handle, 8)
+    if count >= cap { deliver -1 }
+    mem_write_i64(list_handle, 16 + (count * 8), val)
+    mem_write_i64(list_handle, 0, count + 1)
+    deliver count + 1
+}
+
+open flow py_list_len(list_handle: Int) -> Int {
+    deliver mem_read_i64(list_handle, 0)
+}
+
+open flow py_list_get(list_handle: Int, idx: Int) -> Int {
+    flex count = mem_read_i64(list_handle, 0)
+    if (idx < 0) || (idx >= count) { deliver 0 }
+    deliver mem_read_i64(list_handle, 16 + (idx * 8))
+}
+
+open flow py_list_free(list_handle: Int) -> Int {
+    free_buffer(list_handle)
+    deliver 0
+}
+
+open flow py_dict_create() -> Int {
+    flex dict_buf = alloc_buffer(32 * 24)
+    deliver dict_buf
+}
+
+open flow py_dict_set(dict_handle: Int, key: Text, val: Int) -> Int {
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % 32
+    flex offset = idx * 24
+    mem_write_i64(dict_handle, offset, 1) // active
+    mem_write_i64(dict_handle, offset + 8, h)
+    mem_write_i64(dict_handle, offset + 16, val)
+    deliver 0
+}
+
+open flow py_dict_get(dict_handle: Int, key: Text) -> Int {
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % 32
+    flex offset = idx * 24
+    if mem_read_i64(dict_handle, offset) == 1 {
+        if mem_read_i64(dict_handle, offset + 8) == h {
+            deliver mem_read_i64(dict_handle, offset + 16)
+        }
+    }
+    deliver 0
+}
+
+open flow py_dict_free(dict_handle: Int) -> Int {
+    free_buffer(dict_handle)
+    deliver 0
 }

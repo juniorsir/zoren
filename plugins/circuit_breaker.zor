@@ -1,0 +1,133 @@
+// Zoren Resilience Plugin - Microservice Circuit Breaker (plugins/circuit_breaker.zor)
+// Netflix Hystrix / Resilience4j style fault tolerance for high-reliability backends.
+
+bring sys
+
+// ============================================================================
+// CIRCUIT BREAKER STATE MACHINE
+// Header layout (56 bytes):
+// [0..8]:   state (0: CLOSED, 1: OPEN, 2: HALF_OPEN)
+// [8..16]:  failure_threshold
+// [16..24]: consecutive_failures
+// [24..32]: recovery_timeout_ms
+// [32..40]: last_state_change (epoch ms)
+// [40..48]: probe_success_target (default 2)
+// [48..56]: consecutive_successes
+// ============================================================================
+
+open flow circuit_breaker_new(failure_threshold: Int, recovery_timeout_ms: Int) -> Int {
+    flex header = alloc_buffer(56)
+    flex now_ts = sys_clock_ms()
+
+    mem_write_i64(header, 0, 0) // CLOSED
+    mem_write_i64(header, 8, failure_threshold)
+    mem_write_i64(header, 16, 0) // consecutive_failures
+    mem_write_i64(header, 24, recovery_timeout_ms)
+    mem_write_i64(header, 32, now_ts)
+    mem_write_i64(header, 40, 2) // probe_success_target
+    mem_write_i64(header, 48, 0) // consecutive_successes
+
+    deliver header
+}
+
+open flow circuit_breaker_allow_request(cb_ptr: Int) -> Bool {
+    flex state = mem_read_i64(cb_ptr, 0)
+
+    // If CLOSED, permit all traffic
+    if state == 0 {
+        deliver true
+    }
+
+    // If OPEN, check if recovery timeout has elapsed to transition to HALF_OPEN
+    if state == 1 {
+        flex now_ts = sys_clock_ms()
+        flex last_change = mem_read_i64(cb_ptr, 32)
+        flex recovery_timeout = mem_read_i64(cb_ptr, 24)
+
+        if (now_ts - last_change) >= recovery_timeout {
+            // Transition to HALF_OPEN
+            mem_write_i64(cb_ptr, 0, 2)
+            mem_write_i64(cb_ptr, 32, now_ts)
+            mem_write_i64(cb_ptr, 48, 0) // reset consecutive_successes
+            deliver true
+        }
+        // Still OPEN: reject immediately (fail fast)
+        deliver false
+    }
+
+    // If HALF_OPEN, permit canary probe requests
+    if state == 2 {
+        deliver true
+    }
+
+    deliver false
+}
+
+open flow circuit_breaker_record_success(cb_ptr: Int) -> Int {
+    flex state = mem_read_i64(cb_ptr, 0)
+
+    if state == 2 {
+        // Probe in HALF_OPEN succeeded
+        flex succ = mem_read_i64(cb_ptr, 48) + 1
+        mem_write_i64(cb_ptr, 48, succ)
+        flex target = mem_read_i64(cb_ptr, 40)
+
+        if succ >= target {
+            // Service recovered: transition back to CLOSED
+            mem_write_i64(cb_ptr, 0, 0)
+            mem_write_i64(cb_ptr, 16, 0) // reset failures
+            mem_write_i64(cb_ptr, 48, 0)
+            mem_write_i64(cb_ptr, 32, sys_clock_ms())
+        }
+    } else {
+        if state == 0 {
+            // Reset transient failures
+            mem_write_i64(cb_ptr, 16, 0)
+        }
+    }
+    deliver 0
+}
+
+open flow circuit_breaker_record_failure(cb_ptr: Int) -> Int {
+    flex state = mem_read_i64(cb_ptr, 0)
+    flex now_ts = sys_clock_ms()
+
+    if state == 2 {
+        // Probe in HALF_OPEN failed immediately: trip back to OPEN
+        mem_write_i64(cb_ptr, 0, 1)
+        mem_write_i64(cb_ptr, 32, now_ts)
+        mem_write_i64(cb_ptr, 48, 0)
+    } else {
+        if state == 0 {
+            flex fails = mem_read_i64(cb_ptr, 16) + 1
+            mem_write_i64(cb_ptr, 16, fails)
+            flex threshold = mem_read_i64(cb_ptr, 8)
+
+            if fails >= threshold {
+                // Trip to OPEN
+                mem_write_i64(cb_ptr, 0, 1)
+                mem_write_i64(cb_ptr, 32, now_ts)
+            }
+        }
+    }
+    deliver 0
+}
+
+open flow circuit_breaker_state(cb_ptr: Int) -> Int {
+    deliver mem_read_i64(cb_ptr, 0)
+}
+
+open flow circuit_breaker_reset(cb_ptr: Int) -> Int {
+    mem_write_i64(cb_ptr, 0, 0)
+    mem_write_i64(cb_ptr, 16, 0)
+    mem_write_i64(cb_ptr, 48, 0)
+    mem_write_i64(cb_ptr, 32, sys_clock_ms())
+    deliver 0
+}
+
+open flow circuit_breaker_free(cb_ptr: Int) -> Int {
+    if cb_ptr != 0 {
+        free_buffer(cb_ptr)
+    }
+    deliver 0
+}

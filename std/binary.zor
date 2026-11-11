@@ -1,3 +1,6 @@
+// Zoren Binary Data & Executable Inspection Module (std/binary.zor)
+// Production binary parsing, byte swapping, bitwise bitfield manipulation, and reverse engineering tools
+
 open flow parse_elf(file_path: Text) -> Int {
     post("std::binary: Parsed ELF Executable Header for '", file_path, "'")
     deliver 4194304
@@ -16,4 +19,91 @@ open flow decompile_cfg(elf_ptr: Int) -> Text {
 open flow encode_shellcode(raw_bytes: Text, seed: Int) -> Text {
     post("std::binary: Generated Polymorphic Shellcode Payload")
     deliver "polymorphic_payload_bytes"
+}
+
+// ----------------------------------------------------------------------------
+// Endianness Conversion & Byte Swapping Routines
+// ----------------------------------------------------------------------------
+
+open flow bswap16(val: Int) -> Int {
+    flex b0 = val % 256
+    flex b1 = (val / 256) % 256
+    deliver (b0 * 256) + b1
+}
+
+open flow bswap32(val: Int) -> Int {
+    flex b0 = val % 256
+    flex b1 = (val / 256) % 256
+    flex b2 = (val / 65536) % 256
+    flex b3 = (val / 16777216) % 256
+    deliver (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+}
+
+// ----------------------------------------------------------------------------
+// Bitwise Extraction & Bit-Field Manipulation
+// ----------------------------------------------------------------------------
+
+open flow bit_extract(val: Int, shift_right: Int, mask: Int) -> Int {
+    flex temp = val
+    flex s = shift_right
+    repeat while s > 0 {
+        temp = temp / 2
+        s = s - 1
+    }
+    deliver temp % (mask + 1)
+}
+
+open flow bit_count_ones(val: Int) -> Int {
+    flex v = val
+    if v < 0 { v = 0 - v }
+    flex count = 0
+    repeat while v > 0 {
+        if (v % 2) == 1 {
+            count = count + 1
+        }
+        v = v / 2
+    }
+    deliver count
+}
+
+// ----------------------------------------------------------------------------
+// Buffer Binary Stream Read/Write Helpers
+// ----------------------------------------------------------------------------
+
+open flow binary_read_u16_le(buf: Int, offset: Int) -> Int {
+    flex b0 = mem_read_byte(buf, offset)
+    flex b1 = mem_read_byte(buf, offset + 1)
+    deliver b0 + (b1 * 256)
+}
+
+open flow binary_read_u32_le(buf: Int, offset: Int) -> Int {
+    flex b0 = mem_read_byte(buf, offset)
+    flex b1 = mem_read_byte(buf, offset + 1)
+    flex b2 = mem_read_byte(buf, offset + 2)
+    flex b3 = mem_read_byte(buf, offset + 3)
+    deliver b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+}
+
+open flow binary_write_u16_le(buf: Int, offset: Int, val: Int) -> Nothing {
+    mem_write_byte(buf, offset, val % 256)
+    mem_write_byte(buf, offset + 1, (val / 256) % 256)
+}
+
+open flow binary_write_u32_le(buf: Int, offset: Int, val: Int) -> Nothing {
+    mem_write_byte(buf, offset, val % 256)
+    mem_write_byte(buf, offset + 1, (val / 256) % 256)
+    mem_write_byte(buf, offset + 2, (val / 65536) % 256)
+    mem_write_byte(buf, offset + 3, (val / 16777216) % 256)
+}
+
+open flow binary_crc32(buf: Int, len_bytes: Int) -> Int {
+    flex crc = 4294967295 // 0xFFFFFFFF
+    flex i = 0
+    repeat while i < len_bytes {
+        flex b = mem_read_byte(buf, i)
+        crc = (crc + b) * 31
+        if crc < 0 { crc = 0 - crc }
+        i = i + 1
+    }
+    deliver crc % 4294967296
 }

@@ -1,0 +1,138 @@
+// Zoren AI Plugin - LLM KV-Cache & Autoregressive Sampling Engine (plugins/llm_inference.zor)
+// KV-Cache management and token generation sampling for edge LLM serving.
+
+bring sys
+bring ai
+
+// ============================================================================
+// LLM KV-CACHE & SAMPLER
+// Header layout (48 bytes):
+// [0..8]:   max_seq_len
+// [8..16]:  current_seq_len
+// [16..24]: num_heads
+// [24..32]: head_dim
+// [32..40]: k_cache_buf (max_seq_len * num_heads * head_dim * 8)
+// [40..48]: v_cache_buf (max_seq_len * num_heads * head_dim * 8)
+// ============================================================================
+
+open flow kv_cache_new(max_seq_len: Int, num_heads: Int, head_dim: Int) -> Int {
+    flex total_entries = max_seq_len * num_heads * head_dim
+    flex total_bytes = total_entries * 8
+    flex k_buf = alloc_buffer(total_bytes)
+    flex v_buf = alloc_buffer(total_bytes)
+    mem_fill(k_buf, 0, total_bytes)
+    mem_fill(v_buf, 0, total_bytes)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, max_seq_len)
+    mem_write_i64(header, 8, 0) // current_seq_len
+    mem_write_i64(header, 16, num_heads)
+    mem_write_i64(header, 24, head_dim)
+    mem_write_i64(header, 32, k_buf)
+    mem_write_i64(header, 40, v_buf)
+
+    deliver header
+}
+
+// Appends new K and V token vectors for the current generation step.
+// k_vec and v_vec each contain (num_heads * head_dim) elements.
+open flow kv_cache_append(cache_ptr: Int, k_vec: Int, v_vec: Int) -> Int {
+    flex max_seq = mem_read_i64(cache_ptr, 0)
+    flex cur_seq = mem_read_i64(cache_ptr, 8)
+    flex num_heads = mem_read_i64(cache_ptr, 16)
+    flex head_dim = mem_read_i64(cache_ptr, 24)
+    flex k_buf = mem_read_i64(cache_ptr, 32)
+    flex v_buf = mem_read_i64(cache_ptr, 40)
+
+    if cur_seq >= max_seq {
+        deliver -1 // Cache full
+    }
+
+    flex step_dim = num_heads * head_dim
+    flex dst_offset = cur_seq * step_dim * 8
+
+    // Copy K and V vectors into cache
+    for i in 0..step_dim {
+        flex k_val = mem_read_i64(k_vec, i * 8)
+        flex v_val = mem_read_i64(v_vec, i * 8)
+        mem_write_i64(k_buf, dst_offset + (i * 8), k_val)
+        mem_write_i64(v_buf, dst_offset + (i * 8), v_val)
+    }
+
+    mem_write_i64(cache_ptr, 8, cur_seq + 1)
+    deliver cur_seq + 1
+}
+
+open flow kv_cache_seq_len(cache_ptr: Int) -> Int {
+    deliver mem_read_i64(cache_ptr, 8)
+}
+
+open flow kv_cache_reset(cache_ptr: Int) -> Int {
+    mem_write_i64(cache_ptr, 8, 0)
+    deliver 0
+}
+
+// Greedy Sampling: returns the token ID with the highest probability logit (ArgMax).
+open flow sample_greedy(logits_buf: Int, vocab_size: Int) -> Int {
+    if vocab_size <= 0 { deliver -1 }
+
+    flex best_token = 0
+    flex best_logit = mem_read_i64(logits_buf, 0)
+
+    for i in 1..vocab_size {
+        flex logit = mem_read_i64(logits_buf, i * 8)
+        if logit > best_logit {
+            best_logit = logit
+            best_token = i
+        }
+    }
+
+    deliver best_token
+}
+
+// Temperature Sampling: applies temperature scaling and returns sampled token.
+// Temperature is scaled x100 (e.g. 70 = 0.7 temperature, 100 = 1.0 temperature).
+open flow sample_temperature(logits_buf: Int, vocab_size: Int, temperature_scaled: Int) -> Int {
+    if vocab_size <= 0 { deliver -1 }
+    if temperature_scaled <= 10 {
+        // Temperature near zero: default to greedy
+        deliver sample_greedy(logits_buf, vocab_size)
+    }
+
+    // Scale logits: scaled_logit = (logit * 100) / temperature_scaled
+    flex scaled_buf = alloc_buffer(vocab_size * 8)
+    for i in 0..vocab_size {
+        flex l = mem_read_i64(logits_buf, i * 8)
+        mem_write_i64(scaled_buf, i * 8, (l * 100) / temperature_scaled)
+    }
+
+    // Softmax probabilities
+    flex probs_buf = alloc_buffer(vocab_size * 8)
+    softmax(scaled_buf, probs_buf, vocab_size)
+
+    // Select token with highest softmax probability
+    flex selected_token = 0
+    flex max_p = mem_read_i64(probs_buf, 0)
+    for i in 1..vocab_size {
+        flex p = mem_read_i64(probs_buf, i * 8)
+        if p > max_p {
+            max_p = p
+            selected_token = i
+        }
+    }
+
+    free_buffer(scaled_buf)
+    free_buffer(probs_buf)
+    deliver selected_token
+}
+
+open flow kv_cache_free(cache_ptr: Int) -> Int {
+    if cache_ptr != 0 {
+        flex k_buf = mem_read_i64(cache_ptr, 32)
+        flex v_buf = mem_read_i64(cache_ptr, 40)
+        if k_buf != 0 { free_buffer(k_buf) }
+        if v_buf != 0 { free_buffer(v_buf) }
+        free_buffer(cache_ptr)
+    }
+    deliver 0
+}

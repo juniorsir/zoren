@@ -1,0 +1,162 @@
+// Zoren Backend Systems Plugin - In-Memory Event Streaming Bus (plugins/event_bus.zor)
+// High-throughput Pub/Sub message broker with independent subscriber consumer offsets (Kafka-style).
+
+bring sys
+
+// ============================================================================
+// EVENT STREAMING BUS
+// Header layout (40 bytes):
+// [0..8]:   max_events (capacity per bus)
+// [8..16]:  event_count (total published events, high watermark)
+// [16..24]: events_buf
+// [24..32]: max_subs
+// [32..40]: subs_buf
+//
+// Event entry layout (24 bytes):
+// [0..8]:   topic_hash (fast_hash of topic)
+// [8..16]:  payload_int (event data / message pointer)
+// [16..24]: timestamp_ms
+//
+// Subscriber entry layout (24 bytes):
+// [0..8]:   sub_id
+// [8..16]:  topic_hash
+// [16..24]: current_offset
+// ============================================================================
+
+open flow event_bus_new(max_events: Int, max_subs: Int) -> Int {
+    flex e_buf = alloc_buffer(max_events * 24)
+    mem_fill(e_buf, 0, max_events * 24)
+
+    flex s_buf = alloc_buffer(max_subs * 24)
+    mem_fill(s_buf, 0, max_subs * 24)
+
+    flex header = alloc_buffer(40)
+    mem_write_i64(header, 0, max_events)
+    mem_write_i64(header, 8, 0) // event_count
+    mem_write_i64(header, 16, e_buf)
+    mem_write_i64(header, 24, max_subs)
+    mem_write_i64(header, 32, s_buf)
+
+    deliver header
+}
+
+open flow event_bus_subscribe(bus_ptr: Int, sub_id: Int, topic: Text) -> Bool {
+    flex max_subs = mem_read_i64(bus_ptr, 24)
+    flex s_buf = mem_read_i64(bus_ptr, 32)
+    flex t_hash = sys_fast_hash(topic)
+
+    // Check if slot available
+    for i in 0..max_subs {
+        flex offset = i * 24
+        flex existing_id = mem_read_i64(s_buf, offset)
+        if existing_id == 0 {
+            // Empty slot found: register subscriber
+            mem_write_i64(s_buf, offset, sub_id)
+            mem_write_i64(s_buf, offset + 8, t_hash)
+            // Start offset at current high watermark (pub-sub semantics)
+            flex cur_events = mem_read_i64(bus_ptr, 8)
+            mem_write_i64(s_buf, offset + 16, cur_events)
+            deliver true
+        }
+    }
+    deliver false
+}
+
+open flow event_bus_publish(bus_ptr: Int, topic: Text, payload: Int) -> Int {
+    flex max_events = mem_read_i64(bus_ptr, 0)
+    flex count = mem_read_i64(bus_ptr, 8)
+    flex e_buf = mem_read_i64(bus_ptr, 16)
+    flex t_hash = sys_fast_hash(topic)
+
+    if count >= max_events {
+        deliver -1 // Storage full
+    }
+
+    flex offset = count * 24
+    mem_write_i64(e_buf, offset, t_hash)
+    mem_write_i64(e_buf, offset + 8, payload)
+    mem_write_i64(e_buf, offset + 16, sys_clock_ms())
+
+    mem_write_i64(bus_ptr, 8, count + 1)
+    deliver count + 1
+}
+
+// Polls the next unread event for this subscriber matching their subscribed topic.
+// Returns the event payload, or -1 if no pending events.
+open flow event_bus_poll(bus_ptr: Int, sub_id: Int) -> Int {
+    flex count = mem_read_i64(bus_ptr, 8)
+    flex e_buf = mem_read_i64(bus_ptr, 16)
+    flex max_subs = mem_read_i64(bus_ptr, 24)
+    flex s_buf = mem_read_i64(bus_ptr, 32)
+
+    // Find subscriber
+    flex sub_slot = -1
+    for i in 0..max_subs {
+        if mem_read_i64(s_buf, i * 24) == sub_id {
+            sub_slot = i
+            escape
+        }
+    }
+
+    if sub_slot == -1 { deliver -1 }
+
+    flex s_offset = sub_slot * 24
+    flex t_hash = mem_read_i64(s_buf, s_offset + 8)
+    flex cur_offset = mem_read_i64(s_buf, s_offset + 16)
+
+    // Scan forward from cur_offset for matching topic
+    for idx in cur_offset..count {
+        flex event_offset = idx * 24
+        flex event_topic = mem_read_i64(e_buf, event_offset)
+        if event_topic == t_hash {
+            // Found matching event! Advance subscriber offset to next index
+            mem_write_i64(s_buf, s_offset + 16, idx + 1)
+            deliver mem_read_i64(e_buf, event_offset + 8)
+        }
+    }
+
+    // No unread matching events; update offset to latest watermark
+    mem_write_i64(s_buf, s_offset + 16, count)
+    deliver -1
+}
+
+open flow event_bus_pending(bus_ptr: Int, sub_id: Int) -> Int {
+    flex count = mem_read_i64(bus_ptr, 8)
+    flex e_buf = mem_read_i64(bus_ptr, 16)
+    flex max_subs = mem_read_i64(bus_ptr, 24)
+    flex s_buf = mem_read_i64(bus_ptr, 32)
+
+    flex sub_slot = -1
+    for i in 0..max_subs {
+        if mem_read_i64(s_buf, i * 24) == sub_id {
+            sub_slot = i
+            escape
+        }
+    }
+
+    if sub_slot == -1 { deliver 0 }
+
+    flex s_offset = sub_slot * 24
+    flex t_hash = mem_read_i64(s_buf, s_offset + 8)
+    flex cur_offset = mem_read_i64(s_buf, s_offset + 16)
+
+    flex pending_count = 0
+    for idx in cur_offset..count {
+        if mem_read_i64(e_buf, idx * 24) == t_hash {
+            pending_count = pending_count + 1
+        }
+    }
+
+    deliver pending_count
+}
+
+open flow event_bus_free(bus_ptr: Int) -> Int {
+    if bus_ptr != 0 {
+        flex e_buf = mem_read_i64(bus_ptr, 16)
+        flex s_buf = mem_read_i64(bus_ptr, 32)
+        if e_buf != 0 { free_buffer(e_buf) }
+        if s_buf != 0 { free_buffer(s_buf) }
+        free_buffer(bus_ptr)
+    }
+    deliver 0
+}

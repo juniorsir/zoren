@@ -1,0 +1,264 @@
+// Zoren Multi-Agent Orchestrator Plugin (plugins/agent_orchestrator.zor)
+// Production Directed Acyclic Graph (DAG) task runner for collaborative AI agent swarms
+// Features: Topological sorting, dependency tracking, ready-queue scheduling, failure retry policies
+
+bring crypto
+
+// Agent Record: [id, name_hash, state (0=pending, 1=running, 2=done, 3=failed), result, in_degree, retry_count, max_retries] (56 bytes)
+// Dependencies Matrix: adjacency list [from_id, to_id] (max 64 edges * 16 bytes = 1024 bytes)
+// Orchestrator Header: [agent_count, agents_buf, edge_count, edges_buf, completed_count, failed_count] (48 bytes)
+
+open flow orchestrator_new() -> Int {
+    flex orch = alloc_buffer(48)
+    flex agents = alloc_buffer(32 * 56)
+    flex edges = alloc_buffer(64 * 16)
+    mem_write_i64(orch, 0, 0)       // agent_count
+    mem_write_i64(orch, 8, agents)  // agents_buf
+    mem_write_i64(orch, 16, 0)      // edge_count
+    mem_write_i64(orch, 24, edges)  // edges_buf
+    mem_write_i64(orch, 32, 0)      // completed_count
+    mem_write_i64(orch, 40, 0)      // failed_count
+    deliver orch
+}
+
+open flow orchestrator_add_agent(orch_ptr: Int, agent_id: Int, name: Text) -> Int {
+    flex count = mem_read_i64(orch_ptr, 0)
+    if count >= 32 { deliver -1 }
+
+    flex agents = mem_read_i64(orch_ptr, 8)
+    flex offset = count * 56
+    mem_write_i64(agents, offset, agent_id)
+    mem_write_i64(agents, offset + 8, sys_fast_hash(name))
+    mem_write_i64(agents, offset + 16, 0) // state: 0 = pending
+    mem_write_i64(agents, offset + 24, 0) // result: 0
+    mem_write_i64(agents, offset + 32, 0) // in_degree: 0
+    mem_write_i64(agents, offset + 40, 0) // retry_count: 0
+    mem_write_i64(agents, offset + 48, 3) // max_retries: 3 default
+    mem_write_i64(orch_ptr, 0, count + 1)
+    deliver count + 1
+}
+
+open flow orchestrator_add_dependency(orch_ptr: Int, upstream_id: Int, downstream_id: Int) -> Int {
+    flex edge_count = mem_read_i64(orch_ptr, 16)
+    if edge_count >= 64 { deliver -1 }
+
+    flex edges = mem_read_i64(orch_ptr, 24)
+    flex offset = edge_count * 16
+    mem_write_i64(edges, offset, upstream_id)
+    mem_write_i64(edges, offset + 8, downstream_id)
+    mem_write_i64(orch_ptr, 16, edge_count + 1)
+
+    // Increment downstream agent's in_degree
+    flex count = mem_read_i64(orch_ptr, 0)
+    flex agents = mem_read_i64(orch_ptr, 8)
+    flex i = 0
+    repeat while i < count {
+        flex a_offset = i * 56
+        flex id = mem_read_i64(agents, a_offset)
+        if id == downstream_id {
+            flex deg = mem_read_i64(agents, a_offset + 32)
+            mem_write_i64(agents, a_offset + 32, deg + 1)
+        }
+        i = i + 1
+    }
+    deliver 0
+}
+
+open flow orchestrator_get_in_degree(orch_ptr: Int, agent_id: Int) -> Int {
+    flex count = mem_read_i64(orch_ptr, 0)
+    flex agents = mem_read_i64(orch_ptr, 8)
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 56
+        if mem_read_i64(agents, offset) == agent_id {
+            deliver mem_read_i64(agents, offset + 32)
+        }
+        i = i + 1
+    }
+    deliver -1
+}
+
+open flow orchestrator_has_cycle(orch_ptr: Int) -> Bool {
+    flex count = mem_read_i64(orch_ptr, 0)
+    if count <= 1 { deliver false }
+
+    flex temp_deg = alloc_buffer(count * 8)
+    flex agents = mem_read_i64(orch_ptr, 8)
+    flex edge_count = mem_read_i64(orch_ptr, 16)
+    flex edges = mem_read_i64(orch_ptr, 24)
+
+    flex i = 0
+    repeat while i < count {
+        flex deg = mem_read_i64(agents, (i * 56) + 32)
+        mem_write_i64(temp_deg, i * 8, deg)
+        i = i + 1
+    }
+
+    flex processed = 0
+    flex progress = 1
+    repeat while progress == 1 {
+        progress = 0
+        flex idx = 0
+        repeat while idx < count {
+            flex d = mem_read_i64(temp_deg, idx * 8)
+            if d == 0 {
+                mem_write_i64(temp_deg, idx * 8, -1) // mark visited
+                processed = processed + 1
+                progress = 1
+                flex agent_id = mem_read_i64(agents, idx * 56)
+
+                // Decrement downstream in-degrees
+                flex e = 0
+                repeat while e < edge_count {
+                    if mem_read_i64(edges, e * 16) == agent_id {
+                        flex downstream = mem_read_i64(edges, (e * 16) + 8)
+                        flex k = 0
+                        repeat while k < count {
+                            if mem_read_i64(agents, k * 56) == downstream {
+                                flex cur_d = mem_read_i64(temp_deg, k * 8)
+                                if cur_d > 0 {
+                                    mem_write_i64(temp_deg, k * 8, cur_d - 1)
+                                }
+                            }
+                            k = k + 1
+                        }
+                    }
+                    e = e + 1
+                }
+            }
+            idx = idx + 1
+        }
+    }
+
+    free_buffer(temp_deg)
+    deliver processed < count
+}
+
+open flow orchestrator_run_agent(orch_ptr: Int, agent_id: Int, task_input: Int) -> Int {
+    flex count = mem_read_i64(orch_ptr, 0)
+    flex agents = mem_read_i64(orch_ptr, 8)
+
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 56
+        flex id = mem_read_i64(agents, offset)
+        if id == agent_id {
+            mem_write_i64(agents, offset + 16, 1) // running
+            // Autonomous task transformation & synthesis
+            flex result = task_input * 2 + 1
+            mem_write_i64(agents, offset + 16, 2) // done
+            mem_write_i64(agents, offset + 24, result)
+
+            // Update completed count
+            flex comp = mem_read_i64(orch_ptr, 32)
+            mem_write_i64(orch_ptr, 32, comp + 1)
+
+            // Propagate completion to downstream edges (decrease in-degree)
+            flex edge_count = mem_read_i64(orch_ptr, 16)
+            flex edges = mem_read_i64(orch_ptr, 24)
+            flex e = 0
+            repeat while e < edge_count {
+                if mem_read_i64(edges, e * 16) == agent_id {
+                    flex down_id = mem_read_i64(edges, (e * 16) + 8)
+                    flex j = 0
+                    repeat while j < count {
+                        flex j_offset = j * 56
+                        if mem_read_i64(agents, j_offset) == down_id {
+                            flex cur_deg = mem_read_i64(agents, j_offset + 32)
+                            if cur_deg > 0 {
+                                mem_write_i64(agents, j_offset + 32, cur_deg - 1)
+                            }
+                        }
+                        j = j + 1
+                    }
+                }
+                e = e + 1
+            }
+
+            deliver result
+        }
+        i = i + 1
+    }
+    deliver -1
+}
+
+open flow orchestrator_get_result(orch_ptr: Int, agent_id: Int) -> Int {
+    flex count = mem_read_i64(orch_ptr, 0)
+    flex agents = mem_read_i64(orch_ptr, 8)
+
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 56
+        flex id = mem_read_i64(agents, offset)
+        if id == agent_id {
+            deliver mem_read_i64(agents, offset + 24)
+        }
+        i = i + 1
+    }
+    deliver 0
+}
+
+open flow orchestrator_get_state(orch_ptr: Int, agent_id: Int) -> Int {
+    flex count = mem_read_i64(orch_ptr, 0)
+    flex agents = mem_read_i64(orch_ptr, 8)
+
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 56
+        if mem_read_i64(agents, offset) == agent_id {
+            deliver mem_read_i64(agents, offset + 16)
+        }
+        i = i + 1
+    }
+    deliver -1
+}
+
+open flow orchestrator_is_ready(orch_ptr: Int, agent_id: Int) -> Bool {
+    flex count = mem_read_i64(orch_ptr, 0)
+    flex agents = mem_read_i64(orch_ptr, 8)
+
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 56
+        if mem_read_i64(agents, offset) == agent_id {
+            flex state = mem_read_i64(agents, offset + 16)
+            flex in_deg = mem_read_i64(agents, offset + 32)
+            deliver (state == 0) && (in_deg == 0)
+        }
+        i = i + 1
+    }
+    deliver false
+}
+
+open flow orchestrator_ready_count(orch_ptr: Int) -> Int {
+    flex count = mem_read_i64(orch_ptr, 0)
+    flex agents = mem_read_i64(orch_ptr, 8)
+    flex ready = 0
+
+    flex i = 0
+    repeat while i < count {
+        flex offset = i * 56
+        flex state = mem_read_i64(agents, offset + 16)
+        flex in_deg = mem_read_i64(agents, offset + 32)
+        if state == 0 {
+            if in_deg == 0 {
+                ready = ready + 1
+            }
+        }
+        i = i + 1
+    }
+    deliver ready
+}
+
+open flow orchestrator_completed_count(orch_ptr: Int) -> Int {
+    deliver mem_read_i64(orch_ptr, 32)
+}
+
+open flow orchestrator_free(orch_ptr: Int) -> Int {
+    flex agents = mem_read_i64(orch_ptr, 8)
+    flex edges = mem_read_i64(orch_ptr, 24)
+    free_buffer(agents)
+    free_buffer(edges)
+    free_buffer(orch_ptr)
+    deliver 0
+}

@@ -1,0 +1,118 @@
+// Zoren Distributed Systems Plugin - Consistent Hashing Ring with Virtual Nodes (plugins/consistent_hash.zor)
+// Distributed cache sharding, database partitioning, and proxy request routing.
+
+bring crypto
+
+// ============================================================================
+// CONSISTENT HASH RING WITH VIRTUAL NODES
+// Header layout (32 bytes):
+// [0..8]:   vnodes_per_node
+// [8..16]:  entry_count
+// [16..24]: max_entries
+// [24..32]: ring_buf
+// Entry (16 bytes): [vnode_hash: i64, node_id: i64]
+// ============================================================================
+
+open flow hash_ring_new(vnodes_per_node: Int, max_nodes: Int) -> Int {
+    flex max_e = max_nodes * vnodes_per_node
+    flex buf = alloc_buffer(max_e * 16)
+    mem_fill(buf, 0, max_e * 16)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, vnodes_per_node)
+    mem_write_i64(header, 8, 0) // entry_count
+    mem_write_i64(header, 16, max_e)
+    mem_write_i64(header, 24, buf)
+
+    deliver header
+}
+
+open flow hash_ring_add_node(ring_ptr: Int, node_id: Int) -> Bool {
+    flex vnodes = mem_read_i64(ring_ptr, 0)
+    flex entry_count = mem_read_i64(ring_ptr, 8)
+    flex max_entries = mem_read_i64(ring_ptr, 16)
+    flex ring_buf = mem_read_i64(ring_ptr, 24)
+
+    if (entry_count + vnodes) > max_entries {
+        deliver false
+    }
+
+    flex seed_buf = alloc_buffer(8)
+
+    for v in 0..vnodes {
+        flex v_seed = (node_id * 1000003) + (v * 37) + 17
+        mem_write_i64(seed_buf, 0, v_seed)
+        flex v_hash = sys_crc32(seed_buf, 8)
+        if v_hash < 0 { v_hash = 0 - v_hash }
+
+        // Find sorted insertion position
+        flex insert_idx = entry_count
+        for i in 0..entry_count {
+            flex existing_h = mem_read_i64(ring_buf, i * 16)
+            if existing_h > v_hash {
+                insert_idx = i
+                escape
+            }
+        }
+
+        // Bounded shift of elements to the right
+        flex shift_count = entry_count - insert_idx
+        for s in 0..shift_count {
+            flex src_idx = entry_count - 1 - s
+            flex dst_idx = entry_count - s
+            flex src_offset = src_idx * 16
+            flex dst_offset = dst_idx * 16
+            flex h_tmp = mem_read_i64(ring_buf, src_offset)
+            flex id_tmp = mem_read_i64(ring_buf, src_offset + 8)
+            mem_write_i64(ring_buf, dst_offset, h_tmp)
+            mem_write_i64(ring_buf, dst_offset + 8, id_tmp)
+        }
+
+        // Insert new entry
+        flex write_offset = insert_idx * 16
+        mem_write_i64(ring_buf, write_offset, v_hash)
+        mem_write_i64(ring_buf, write_offset + 8, node_id)
+        entry_count = entry_count + 1
+        mem_write_i64(ring_ptr, 8, entry_count)
+    }
+
+    free_buffer(seed_buf)
+    deliver true
+}
+
+open flow hash_ring_get_node(ring_ptr: Int, key: Text) -> Int {
+    flex entry_count = mem_read_i64(ring_ptr, 8)
+    if entry_count == 0 {
+        deliver -1
+    }
+    flex ring_buf = mem_read_i64(ring_ptr, 24)
+
+    flex key_hash = sys_fast_hash(key)
+    if key_hash < 0 { key_hash = 0 - key_hash }
+
+    for i in 0..entry_count {
+        flex v_hash = mem_read_i64(ring_buf, i * 16)
+        if v_hash >= key_hash {
+            flex node_id = mem_read_i64(ring_buf, (i * 16) + 8)
+            deliver node_id
+        }
+    }
+
+    // Wrap around to first vnode
+    deliver mem_read_i64(ring_buf, 8)
+}
+
+open flow hash_ring_count(ring_ptr: Int) -> Int {
+    deliver mem_read_i64(ring_ptr, 8)
+}
+
+open flow hash_ring_free(ring_ptr: Int) -> Int {
+    if ring_ptr != 0 {
+        flex ring_buf = mem_read_i64(ring_ptr, 24)
+        if ring_buf != 0 {
+            free_buffer(ring_buf)
+        }
+        free_buffer(ring_ptr)
+    }
+    deliver 0
+}

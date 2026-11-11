@@ -1,3 +1,6 @@
+// Zoren Game Engine & Simulation Framework (std/game.zor)
+// Production frame chamber arenas, fixed-timestep physics loops, AABB collision solvers, and spatial hashing
+
 open flow create_frame_chamber(size_bytes: Int) -> Int {
     deliver size_bytes
 }
@@ -10,4 +13,101 @@ open flow reset_frame_chamber(chamber_id: Int) -> Int {
 open flow calculate_delta_time(current_ticks: Int, previous_ticks: Int) -> F64 {
     bind elapsed: Int = current_ticks - previous_ticks
     deliver elapsed / 1000.0
+}
+
+// Fixed timestep accumulator for deterministic physics simulations
+open flow game_fixed_step_accumulator(acc_ms: Int, delta_ms: Int, step_ms: Int) -> Int {
+    if step_ms <= 0 { deliver 0 }
+    flex total = acc_ms + delta_ms
+    deliver total / step_ms
+}
+
+open flow game_calc_fps(delta_ms: Int) -> Int {
+    if delta_ms <= 0 { deliver 60 }
+    deliver 1000 / delta_ms
+}
+
+// 2D Axis-Aligned Bounding Box (AABB) intersection check
+open flow game_aabb_overlap(
+    min1_x: Int, min1_y: Int, max1_x: Int, max1_y: Int,
+    min2_x: Int, min2_y: Int, max2_x: Int, max2_y: Int
+) -> Bool {
+    if max1_x < min2_x { deliver false }
+    if min1_x > max2_x { deliver false }
+    if max1_y < min2_y { deliver false }
+    if min1_y > max2_y { deliver false }
+    deliver true
+}
+
+// Circle to circle distance squared collision check
+open flow game_circle_overlap(x1: Int, y1: Int, r1: Int, x2: Int, y2: Int, r2: Int) -> Bool {
+    flex dx = x2 - x1
+    flex dy = y2 - y1
+    flex dist_sq = (dx * dx) + (dy * dy)
+    flex rad_sum = r1 + r2
+    deliver dist_sq <= (rad_sum * rad_sum)
+}
+
+// Spatial Hash 2D Grid Cell Index
+open flow game_spatial_hash(x: Int, y: Int, cell_size: Int) -> Int {
+    if cell_size <= 0 { deliver 0 }
+    flex cell_x = x / cell_size
+    flex cell_y = y / cell_size
+    // Cantor pairing hash
+    flex sum = cell_x + cell_y
+    deliver ((sum * (sum + 1)) / 2) + cell_y
+}
+
+// Entity Component System (ECS) ID Allocator
+// Pool Header: [count, capacity, active_mask_ptr]
+open flow game_entity_pool_new(max_entities: Int) -> Int {
+    flex pool = alloc_buffer(24)
+    flex active_mask = alloc_buffer(max_entities * 8)
+    mem_write_i64(pool, 0, 0)
+    mem_write_i64(pool, 8, max_entities)
+    mem_write_i64(pool, 16, active_mask)
+    deliver pool
+}
+
+open flow game_entity_spawn(pool_ptr: Int) -> Int {
+    flex count = mem_read_i64(pool_ptr, 0)
+    flex max_e = mem_read_i64(pool_ptr, 8)
+    flex mask = mem_read_i64(pool_ptr, 16)
+
+    flex i = 0
+    repeat while i < max_e {
+        if mem_read_i64(mask, i * 8) == 0 {
+            mem_write_i64(mask, i * 8, 1) // active
+            mem_write_i64(pool_ptr, 0, count + 1)
+            deliver i + 1 // entity ID 1-indexed
+        }
+        i = i + 1
+    }
+    deliver -1 // Pool exhausted
+}
+
+open flow game_entity_kill(pool_ptr: Int, entity_id: Int) -> Int {
+    if entity_id <= 0 { deliver -1 }
+    flex idx = entity_id - 1
+    flex count = mem_read_i64(pool_ptr, 0)
+    flex max_e = mem_read_i64(pool_ptr, 8)
+    if idx >= max_e { deliver -1 }
+    flex mask = mem_read_i64(pool_ptr, 16)
+    if mem_read_i64(mask, idx * 8) == 1 {
+        mem_write_i64(mask, idx * 8, 0)
+        mem_write_i64(pool_ptr, 0, count - 1)
+        deliver 0
+    }
+    deliver -1
+}
+
+open flow game_entity_count(pool_ptr: Int) -> Int {
+    deliver mem_read_i64(pool_ptr, 0)
+}
+
+open flow game_entity_pool_free(pool_ptr: Int) -> Int {
+    flex mask = mem_read_i64(pool_ptr, 16)
+    free_buffer(mask)
+    free_buffer(pool_ptr)
+    deliver 0
 }

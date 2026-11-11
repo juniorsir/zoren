@@ -1,3 +1,106 @@
+// Zoren Standard I/O Module (std/io.zor)
+// Production terminal formatting, ANSI color rendering, progress indicators, and binary hex dumping
+
+bring text
+
 open flow print_line(msg: Text) -> Nothing {
     post(msg)
+}
+
+open flow print_raw(msg: Text) -> Nothing {
+    post(msg)
+}
+
+open flow print_int(val: Int) -> Nothing {
+    post(val)
+}
+
+open flow print_hex(val: Int) -> Nothing {
+    post("0x", hex_str(val))
+}
+
+// ANSI 256/16 Color Codes: 31=Red, 32=Green, 33=Yellow, 34=Blue, 35=Magenta, 36=Cyan
+open flow print_color(color_code: Int, msg: Text) -> Nothing {
+    post("\u001b[", color_code, "m", msg, "\u001b[0m")
+}
+
+open flow print_success(msg: Text) -> Nothing {
+    post("\u001b[32m✔ ", msg, "\u001b[0m")
+}
+
+open flow print_error(msg: Text) -> Nothing {
+    post("\u001b[31m✖ Error: ", msg, "\u001b[0m")
+}
+
+open flow print_warning(msg: Text) -> Nothing {
+    post("\u001b[33m⚠ Warning: ", msg, "\u001b[0m")
+}
+
+open flow print_info(msg: Text) -> Nothing {
+    post("\u001b[34mℹ Info: ", msg, "\u001b[0m")
+}
+
+open flow print_bold(msg: Text) -> Nothing {
+    post("\u001b[1m", msg, "\u001b[0m")
+}
+
+open flow print_divider(char_symbol: Text, count: Int) -> Nothing {
+    flex line = ""
+    flex i = 0
+    repeat while i < count {
+        line = concat(line, char_symbol)
+        i = i + 1
+    }
+    post(line)
+}
+
+open flow print_banner(title: Text, width: Int) -> Nothing {
+    print_divider("=", width)
+    post("  ", title)
+    print_divider("=", width)
+}
+
+open flow print_key_value(key: Text, val_text: Text) -> Nothing {
+    post("  ", key, ": ", val_text)
+}
+
+open flow print_progress(current: Int, total: Int, label: Text) -> Nothing {
+    if total <= 0 {
+        post("[PROGRESS] ", current, " units (", label, ")")
+        deliver
+    }
+    flex pct = (current * 100) / total
+    flex bar_len = 20
+    flex filled = (pct * bar_len) / 100
+    flex bar = "["
+    flex i = 0
+    repeat while i < bar_len {
+        if i < filled {
+            bar = concat(bar, "#")
+        } else {
+            bar = concat(bar, "-")
+        }
+        i = i + 1
+    }
+    bar = concat(bar, "] ")
+    post(bar, pct, "% - ", label)
+}
+
+open flow print_hexdump(buf_ptr: Int, len_bytes: Int) -> Nothing {
+    post("--- HEX DUMP (", len_bytes, " bytes) ---")
+    flex offset = 0
+    repeat while offset < len_bytes {
+        flex chunk_hex = ""
+        flex i = 0
+        repeat while i < 8 {
+            if (offset + i) < len_bytes {
+                flex b = mem_read_byte(buf_ptr, offset + i)
+                chunk_hex = concat(chunk_hex, hex_str(b))
+                chunk_hex = concat(chunk_hex, " ")
+            }
+            i = i + 1
+        }
+        post("0x", hex_str(offset), ": ", chunk_hex)
+        offset = offset + 8
+    }
 }

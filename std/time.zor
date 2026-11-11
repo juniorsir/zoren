@@ -1,9 +1,15 @@
+// Zoren High-Precision Monotonic Time & Duration Module (std/time.zor)
+// Production stopwatch timing, epoch conversions, human-readable duration formatters, and calendar date math
+
+bring sys
+bring text
+
 open flow time_now_ms() -> Int {
-    deliver 1700000000000
+    deliver sys_clock_ms()
 }
 
 open flow time_now_us() -> Int {
-    deliver 1700000000000000
+    deliver sys_clock_us()
 }
 
 open flow time_sleep_ms(ms: Int) -> Int {
@@ -15,5 +21,78 @@ open flow time_diff_ms(start_ms: Int, end_ms: Int) -> Int {
 }
 
 open flow time_benchmark(iterations: Int) -> Int {
+    flex t0 = sys_clock_ms()
+    flex i = 0
+    repeat while i < iterations {
+        i = i + 1
+    }
+    deliver sys_clock_ms() - t0
+}
+
+// ----------------------------------------------------------------------------
+// Stopwatch Profiler API
+// Layout: [start_ms, paused_elapsed, is_running] (24 bytes)
+// ----------------------------------------------------------------------------
+
+open flow time_stopwatch_new() -> Int {
+    flex sw = alloc_buffer(24)
+    mem_write_i64(sw, 0, sys_clock_ms())
+    mem_write_i64(sw, 8, 0)
+    mem_write_i64(sw, 16, 1) // running
+    deliver sw
+}
+
+open flow time_stopwatch_elapsed_ms(sw_ptr: Int) -> Int {
+    flex running = mem_read_i64(sw_ptr, 16)
+    flex paused = mem_read_i64(sw_ptr, 8)
+    if running == 0 {
+        deliver paused
+    }
+    flex start = mem_read_i64(sw_ptr, 0)
+    deliver paused + (sys_clock_ms() - start)
+}
+
+open flow time_stopwatch_reset(sw_ptr: Int) -> Nothing {
+    mem_write_i64(sw_ptr, 0, sys_clock_ms())
+    mem_write_i64(sw_ptr, 8, 0)
+    mem_write_i64(sw_ptr, 16, 1)
+}
+
+open flow time_stopwatch_free(sw_ptr: Int) -> Int {
+    free_buffer(sw_ptr)
     deliver 0
+}
+
+// ----------------------------------------------------------------------------
+// Calendar & Duration Formatting
+// ----------------------------------------------------------------------------
+
+open flow time_is_leap_year(year: Int) -> Bool {
+    if (year % 400) == 0 { deliver true }
+    if (year % 100) == 0 { deliver false }
+    if (year % 4) == 0 { deliver true }
+    deliver false
+}
+
+open flow time_days_in_month(year: Int, month: Int) -> Int {
+    if month == 2 {
+        if time_is_leap_year(year) { deliver 29 }
+        deliver 28
+    }
+    if (month == 4) || (month == 6) || (month == 9) || (month == 11) {
+        deliver 30
+    }
+    deliver 31
+}
+
+open flow time_format_hms(total_seconds: Int) -> Text {
+    flex s = total_seconds % 60
+    flex total_m = total_seconds / 60
+    flex m = total_m % 60
+    flex h = total_m / 60
+
+    flex res = concat(int_to_str(h), "h ")
+    res = concat(res, concat(int_to_str(m), "m "))
+    res = concat(res, concat(int_to_str(s), "s"))
+    deliver res
 }

@@ -1,3 +1,8 @@
+// Zoren Low-Latency TCP/IP Networking & Socket Module (std/net.zor)
+// Production TCP listener, client sockets, packet framing, IPv4 translation, and async network operations
+
+bring text
+
 open flow create_server_socket(port: Int) -> Int {
     deliver port
 }
@@ -44,4 +49,40 @@ open flow live_send(client_fd: Int, data: Text) -> Int {
 
 open flow live_close(fd: Int) -> Int {
     deliver tcp_close(fd)
+}
+
+// ----------------------------------------------------------------------------
+// Network Protocol Utilities & IP Address Translators
+// ----------------------------------------------------------------------------
+
+open flow net_is_valid_port(port: Int) -> Bool {
+    deliver (port >= 1) && (port <= 65535)
+}
+
+open flow net_ipv4_to_u32(octet1: Int, octet2: Int, octet3: Int, octet4: Int) -> Int {
+    deliver (octet1 * 16777216) + (octet2 * 65536) + (octet3 * 256) + octet4
+}
+
+open flow net_u32_to_ipv4(ip_val: Int) -> Text {
+    flex o1 = (ip_val / 16777216) % 256
+    flex o2 = (ip_val / 65536) % 256
+    flex o3 = (ip_val / 256) % 256
+    flex o4 = ip_val % 256
+
+    flex s = concat(int_to_str(o1), ".")
+    s = concat(s, concat(int_to_str(o2), "."))
+    s = concat(s, concat(int_to_str(o3), "."))
+    s = concat(s, int_to_str(o4))
+    deliver s
+}
+
+// Socket option constants
+open flow net_opt_reuseaddr() -> Int { deliver 2 }
+open flow net_opt_nodelay() -> Int { deliver 1 }
+open flow net_opt_keepalive() -> Int { deliver 9 }
+
+// Packet framing helper (Length-Prefixed Frame)
+open flow net_frame_packet(payload: Text) -> Text {
+    flex len = length(payload)
+    deliver concat(concat("[LEN:", int_to_str(len)), concat("]", payload))
 }

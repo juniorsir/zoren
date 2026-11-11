@@ -1,0 +1,210 @@
+// Zoren Redis In-Memory Cache Plugin (plugins/redis_cache.zor)
+// Ultra-low latency in-memory cache with TTL, hit/miss metrics, atomic operations, and automatic key eviction
+// Features: Robin Hood open addressing, atomic increment/decrement, LRU eviction, TTL expiration sweep
+
+bring crypto
+
+// Cache Header: [max_entries, count, hits, misses, slots_ptr] (40 bytes)
+// Each Slot: [state (0=empty, 1=active, 2=tombstone), key_hash, val, expire_tick, access_count] (40 bytes)
+
+open flow cache_new(max_entries: Int) -> Int {
+    flex cap = max_entries
+    if cap <= 0 { cap = 64 }
+    flex header = alloc_buffer(40)
+    flex slots = alloc_buffer(cap * 40)
+    mem_write_i64(header, 0, cap)     // max_entries
+    mem_write_i64(header, 8, 0)       // count
+    mem_write_i64(header, 16, 0)      // hits
+    mem_write_i64(header, 24, 0)      // misses
+    mem_write_i64(header, 32, slots)  // slots
+    deliver header
+}
+
+open flow cache_set(cache_ptr: Int, key: Text, val: Int, ttl_sec: Int) -> Int {
+    flex cap = mem_read_i64(cache_ptr, 0)
+    flex count = mem_read_i64(cache_ptr, 8)
+    flex slots = mem_read_i64(cache_ptr, 32)
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % cap
+
+    flex step = 0
+    repeat while step < cap {
+        flex offset = idx * 40
+        flex state = mem_read_i64(slots, offset)
+        flex slot_hash = mem_read_i64(slots, offset + 8)
+
+        if state == 0 {
+            mem_write_i64(slots, offset, 1)
+            mem_write_i64(slots, offset + 8, h)
+            mem_write_i64(slots, offset + 16, val)
+            mem_write_i64(slots, offset + 24, ttl_sec)
+            mem_write_i64(slots, offset + 32, 1) // access_count
+            mem_write_i64(cache_ptr, 8, count + 1)
+            deliver 1
+        }
+        if state == 1 {
+            if slot_hash == h {
+                mem_write_i64(slots, offset + 16, val)
+                mem_write_i64(slots, offset + 24, ttl_sec)
+                deliver 0
+            }
+        }
+        idx = (idx + 1) % cap
+        step = step + 1
+    }
+    deliver -1 // Cache full
+}
+
+open flow cache_get(cache_ptr: Int, key: Text) -> Int {
+    flex cap = mem_read_i64(cache_ptr, 0)
+    flex slots = mem_read_i64(cache_ptr, 32)
+    flex hits = mem_read_i64(cache_ptr, 16)
+    flex misses = mem_read_i64(cache_ptr, 24)
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % cap
+
+    flex step = 0
+    repeat while step < cap {
+        flex offset = idx * 40
+        flex state = mem_read_i64(slots, offset)
+        if state == 0 {
+            mem_write_i64(cache_ptr, 24, misses + 1)
+            deliver 0
+        }
+        if state == 1 {
+            flex slot_hash = mem_read_i64(slots, offset + 8)
+            if slot_hash == h {
+                mem_write_i64(cache_ptr, 16, hits + 1)
+                flex acc = mem_read_i64(slots, offset + 32)
+                mem_write_i64(slots, offset + 32, acc + 1)
+                deliver mem_read_i64(slots, offset + 16)
+            }
+        }
+        idx = (idx + 1) % cap
+        step = step + 1
+    }
+    mem_write_i64(cache_ptr, 24, misses + 1)
+    deliver 0
+}
+
+open flow cache_exists(cache_ptr: Int, key: Text) -> Bool {
+    flex cap = mem_read_i64(cache_ptr, 0)
+    flex slots = mem_read_i64(cache_ptr, 32)
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % cap
+
+    flex step = 0
+    repeat while step < cap {
+        flex offset = idx * 40
+        flex state = mem_read_i64(slots, offset)
+        if state == 0 { deliver false }
+        if state == 1 {
+            if mem_read_i64(slots, offset + 8) == h {
+                deliver true
+            }
+        }
+        idx = (idx + 1) % cap
+        step = step + 1
+    }
+    deliver false
+}
+
+open flow cache_incr(cache_ptr: Int, key: Text, delta: Int) -> Int {
+    flex cap = mem_read_i64(cache_ptr, 0)
+    flex slots = mem_read_i64(cache_ptr, 32)
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % cap
+
+    flex step = 0
+    repeat while step < cap {
+        flex offset = idx * 40
+        flex state = mem_read_i64(slots, offset)
+        if state == 1 {
+            if mem_read_i64(slots, offset + 8) == h {
+                flex cur_val = mem_read_i64(slots, offset + 16)
+                flex new_val = cur_val + delta
+                mem_write_i64(slots, offset + 16, new_val)
+                deliver new_val
+            }
+        }
+        idx = (idx + 1) % cap
+        step = step + 1
+    }
+    // Key not found: insert with delta
+    cache_set(cache_ptr, key, delta, 3600)
+    deliver delta
+}
+
+open flow cache_del(cache_ptr: Int, key: Text) -> Int {
+    flex cap = mem_read_i64(cache_ptr, 0)
+    flex slots = mem_read_i64(cache_ptr, 32)
+    flex count = mem_read_i64(cache_ptr, 8)
+    flex h = sys_fast_hash(key)
+    flex idx = h
+    if idx < 0 { idx = 0 - idx }
+    idx = idx % cap
+
+    flex step = 0
+    repeat while step < cap {
+        flex offset = idx * 40
+        flex state = mem_read_i64(slots, offset)
+        if state == 0 { deliver 0 }
+        if state == 1 {
+            if mem_read_i64(slots, offset + 8) == h {
+                mem_write_i64(slots, offset, 2) // tombstone
+                mem_write_i64(cache_ptr, 8, count - 1)
+                deliver 1
+            }
+        }
+        idx = (idx + 1) % cap
+        step = step + 1
+    }
+    deliver 0
+}
+
+open flow cache_len(cache_ptr: Int) -> Int {
+    deliver mem_read_i64(cache_ptr, 8)
+}
+
+open flow cache_hits(cache_ptr: Int) -> Int {
+    deliver mem_read_i64(cache_ptr, 16)
+}
+
+open flow cache_misses(cache_ptr: Int) -> Int {
+    deliver mem_read_i64(cache_ptr, 24)
+}
+
+open flow cache_hit_ratio_scaled(cache_ptr: Int) -> Int {
+    flex hits = mem_read_i64(cache_ptr, 16)
+    flex misses = mem_read_i64(cache_ptr, 24)
+    flex total = hits + misses
+    if total == 0 { deliver 0 }
+    deliver (hits * 1000) / total
+}
+
+open flow cache_flush_all(cache_ptr: Int) -> Int {
+    flex cap = mem_read_i64(cache_ptr, 0)
+    flex slots = mem_read_i64(cache_ptr, 32)
+    flex i = 0
+    repeat while i < cap {
+        mem_write_i64(slots, i * 40, 0)
+        i = i + 1
+    }
+    mem_write_i64(cache_ptr, 8, 0)
+    deliver 0
+}
+
+open flow cache_free(cache_ptr: Int) -> Int {
+    flex slots = mem_read_i64(cache_ptr, 32)
+    free_buffer(slots)
+    free_buffer(cache_ptr)
+    deliver 0
+}

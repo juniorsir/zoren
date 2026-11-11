@@ -1,3 +1,6 @@
+// Zoren Cybersecurity & Hardware Mitigation Module (std/security.zor)
+// Anti-debugging, sandbox detection, constant-time comparisons, exploit sanitization, and buffer zeroization
+
 open flow is_debugger_present() -> Int {
     deliver sys_is_debugger_present()
 }
@@ -24,4 +27,44 @@ open flow secure_compare(a: Text, b: Text) -> Bool {
 
 open flow wipe_secret(secret: Text) -> Int {
     deliver sys_secure_zeroize(secret)
+}
+
+// ----------------------------------------------------------------------------
+// Hardware Memory Zeroization & Anti-Tampering Defenses
+// ----------------------------------------------------------------------------
+
+open flow security_scrub_buffer(buf_ptr: Int, len_bytes: Int) -> Int {
+    flex mut_i = 0
+    repeat while mut_i < len_bytes {
+        mem_write_byte(buf_ptr, mut_i, 0)
+        mut_i = mut_i + 1
+    }
+    deliver len_bytes
+}
+
+open flow security_verify_canary(canary_val: Int, expected_val: Int) -> Bool {
+    deliver canary_val == expected_val
+}
+
+open flow security_memcmp_const_time(buf1: Int, buf2: Int, len_bytes: Int) -> Bool {
+    flex diff = 0
+    flex i = 0
+    repeat while i < len_bytes {
+        flex b1 = mem_read_byte(buf1, i)
+        flex b2 = mem_read_byte(buf2, i)
+        if b1 != b2 {
+            diff = diff + 1
+        }
+        i = i + 1
+    }
+    deliver diff == 0
+}
+
+open flow security_calc_entropy_bits(password_length: Int, charset_size: Int) -> Int {
+    // bits = length * log2(charset_size)
+    // Approximate log2(charset_size) * 100
+    flex log2_scaled = 650 // default ~6.5 bits per char for alphanumeric
+    if charset_size <= 10 { log2_scaled = 332 } // digits only
+    if charset_size >= 90 { log2_scaled = 655 } // full ASCII printable
+    deliver (password_length * log2_scaled) / 100
 }

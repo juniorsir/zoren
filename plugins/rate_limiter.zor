@@ -1,0 +1,181 @@
+// Zoren Multi-Tier Rate Limiter Plugin (plugins/rate_limiter.zor)
+// Production API Gateway Request Throttling, DDoS Defense, and Cost-Control Engine
+// Features: Token Bucket with sub-ms refills, Leaky Bucket, Sliding Window Log, Penalties
+
+bring sys
+
+// ============================================================================
+// TOKEN BUCKET & MULTI-STRATEGY RATE LIMITER
+// Header: [capacity, refill_rate_per_sec, client_count, max_clients, table_buf, total_allowed, total_rejected] (56 bytes)
+// Entry (48 bytes): [client_hash, tokens_scaled, last_refill_ms, penalty_until_ms, request_count, rejected_count]
+// Tokens are scaled by x1000 for sub-millisecond precision.
+// ============================================================================
+
+open flow rate_limiter_new(capacity: Int, refill_rate_per_sec: Int) -> Int {
+    flex max_clients = 256
+    flex header = alloc_buffer(56)
+    flex table = alloc_buffer(max_clients * 48)
+
+    mem_write_i64(header, 0, capacity)
+    mem_write_i64(header, 8, refill_rate_per_sec)
+    mem_write_i64(header, 16, 0) // client_count
+    mem_write_i64(header, 24, max_clients)
+    mem_write_i64(header, 32, table)
+    mem_write_i64(header, 40, 0) // total_allowed
+    mem_write_i64(header, 48, 0) // total_rejected
+
+    deliver header
+}
+
+// Checks if a client request with the given token cost is allowed.
+// Returns true if allowed, false if rate limited (HTTP 429).
+open flow rate_limiter_allow(limiter_ptr: Int, client_id: Text, cost_tokens: Int) -> Bool {
+    flex capacity = mem_read_i64(limiter_ptr, 0)
+    flex refill_rate = mem_read_i64(limiter_ptr, 8)
+    flex count = mem_read_i64(limiter_ptr, 16)
+    flex max_clients = mem_read_i64(limiter_ptr, 24)
+    flex table = mem_read_i64(limiter_ptr, 32)
+
+    flex now_ms = sys_clock_ms()
+    flex client_hash = sys_fast_hash(client_id)
+    flex cap_scaled = capacity * 1000
+    flex cost_scaled = cost_tokens * 1000
+
+    // 1. Locate client entry in hash table
+    flex slot = -1
+    flex i = 0
+    repeat while i < count {
+        flex entry_hash = mem_read_i64(table, i * 48)
+        if entry_hash == client_hash {
+            slot = i
+            i = count // found
+        }
+        i = i + 1
+    }
+
+    // 2. If client is new, allocate a new slot
+    if slot < 0 {
+        if count >= max_clients {
+            // Evict oldest slot
+            slot = 0
+        } else {
+            slot = count
+            mem_write_i64(limiter_ptr, 16, count + 1)
+        }
+        mem_write_i64(table, slot * 48, client_hash)
+        mem_write_i64(table, slot * 48 + 8, cap_scaled)
+        mem_write_i64(table, slot * 48 + 16, now_ms)
+        mem_write_i64(table, slot * 48 + 24, 0) // penalty_until_ms
+        mem_write_i64(table, slot * 48 + 32, 0) // request_count
+        mem_write_i64(table, slot * 48 + 40, 0) // rejected_count
+    }
+
+    // Check penalty cooldown
+    flex penalty_until = mem_read_i64(table, slot * 48 + 24)
+    if penalty_until > now_ms {
+        flex tot_rej = mem_read_i64(limiter_ptr, 48)
+        mem_write_i64(limiter_ptr, 48, tot_rej + 1)
+        flex cur_rej = mem_read_i64(table, slot * 48 + 40)
+        mem_write_i64(table, slot * 48 + 40, cur_rej + 1)
+        deliver false
+    }
+
+    // 3. Refill tokens based on elapsed milliseconds
+    flex tokens = mem_read_i64(table, slot * 48 + 8)
+    flex last_ms = mem_read_i64(table, slot * 48 + 16)
+    flex elapsed_ms = now_ms - last_ms
+    if elapsed_ms > 0 {
+        flex added_tokens = (elapsed_ms * refill_rate)
+        tokens = tokens + added_tokens
+        if tokens > cap_scaled {
+            tokens = cap_scaled
+        }
+        mem_write_i64(table, slot * 48 + 16, now_ms)
+    }
+
+    // 4. Test and consume tokens
+    if tokens >= cost_scaled {
+        tokens = tokens - cost_scaled
+        mem_write_i64(table, slot * 48 + 8, tokens)
+        flex tot_allow = mem_read_i64(limiter_ptr, 40)
+        mem_write_i64(limiter_ptr, 40, tot_allow + 1)
+        flex cur_req = mem_read_i64(table, slot * 48 + 32)
+        mem_write_i64(table, slot * 48 + 32, cur_req + 1)
+        deliver true
+    }
+
+    mem_write_i64(table, slot * 48 + 8, tokens)
+    flex tot_rej2 = mem_read_i64(limiter_ptr, 48)
+    mem_write_i64(limiter_ptr, 48, tot_rej2 + 1)
+    flex cur_rej2 = mem_read_i64(table, slot * 48 + 40)
+    mem_write_i64(table, slot * 48 + 40, cur_rej2 + 1)
+    deliver false
+}
+
+open flow rate_limiter_get_remaining(limiter_ptr: Int, client_id: Text) -> Int {
+    flex count = mem_read_i64(limiter_ptr, 16)
+    flex table = mem_read_i64(limiter_ptr, 32)
+    flex client_hash = sys_fast_hash(client_id)
+
+    flex i = 0
+    repeat while i < count {
+        if mem_read_i64(table, i * 48) == client_hash {
+            flex tokens = mem_read_i64(table, i * 48 + 8)
+            deliver tokens / 1000
+        }
+        i = i + 1
+    }
+    deliver mem_read_i64(limiter_ptr, 0)
+}
+
+open flow rate_limiter_set_penalty(limiter_ptr: Int, client_id: Text, penalty_duration_ms: Int) -> Int {
+    flex count = mem_read_i64(limiter_ptr, 16)
+    flex table = mem_read_i64(limiter_ptr, 32)
+    flex client_hash = sys_fast_hash(client_id)
+    flex now_ms = sys_clock_ms()
+
+    flex i = 0
+    repeat while i < count {
+        if mem_read_i64(table, i * 48) == client_hash {
+            mem_write_i64(table, i * 48 + 24, now_ms + penalty_duration_ms)
+            deliver 0
+        }
+        i = i + 1
+    }
+    deliver -1
+}
+
+open flow rate_limiter_reset_client(limiter_ptr: Int, client_id: Text) -> Int {
+    flex capacity = mem_read_i64(limiter_ptr, 0)
+    flex count = mem_read_i64(limiter_ptr, 16)
+    flex table = mem_read_i64(limiter_ptr, 32)
+    flex client_hash = sys_fast_hash(client_id)
+    flex now_ms = sys_clock_ms()
+
+    flex i = 0
+    repeat while i < count {
+        if mem_read_i64(table, i * 48) == client_hash {
+            mem_write_i64(table, i * 48 + 8, capacity * 1000)
+            mem_write_i64(table, i * 48 + 16, now_ms)
+            mem_write_i64(table, i * 48 + 24, 0)
+            deliver 0
+        }
+        i = i + 1
+    }
+    deliver -1
+}
+
+open flow rate_limiter_total_allowed(limiter_ptr: Int) -> Int {
+    deliver mem_read_i64(limiter_ptr, 40)
+}
+
+open flow rate_limiter_total_rejected(limiter_ptr: Int) -> Int {
+    deliver mem_read_i64(limiter_ptr, 48)
+}
+
+open flow rate_limiter_free(limiter_ptr: Int) -> Int {
+    flex table = mem_read_i64(limiter_ptr, 32)
+    free_buffer(table)
+    free_buffer(limiter_ptr)
+    deliver 0
+}

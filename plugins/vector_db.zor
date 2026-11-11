@@ -1,0 +1,167 @@
+// Zoren AI Vector Database Plugin (plugins/vector_db.zor)
+// Production Embedded Vector Store & Nearest Neighbor Search for LLM Semantic Memory & RAG
+
+bring sys
+
+// Similarity Metrics
+// 1 = Cosine Similarity (Normalized, [-1000, 1000])
+// 2 = Euclidean Distance Squared (L2, lower is closer)
+// 3 = Dot Product (Inner Product)
+
+model VectorDB {
+    open dimension: Int
+    open capacity: Int
+    open count: Int
+    open metric: Int
+    open vectors_buf: Int
+    open ids_buf: Int
+}
+
+open flow vector_db_new(dimension: Int, capacity: Int, metric: Int) -> Int {
+    flex header = alloc_buffer(48)
+    flex v_buf = alloc_buffer(capacity * dimension * 8)
+    flex id_buf = alloc_buffer(capacity * 8)
+
+    mem_write_i64(header, 0, dimension)
+    mem_write_i64(header, 8, capacity)
+    mem_write_i64(header, 16, 0) // count
+    mem_write_i64(header, 24, metric)
+    mem_write_i64(header, 32, v_buf)
+    mem_write_i64(header, 40, id_buf)
+
+    deliver header
+}
+
+open flow vector_db_insert(db_ptr: Int, doc_id: Int, embedding_ptr: Int) -> Int {
+    flex dim = mem_read_i64(db_ptr, 0)
+    flex cap = mem_read_i64(db_ptr, 8)
+    flex count = mem_read_i64(db_ptr, 16)
+    if count >= cap {
+        deliver -1 // Storage Full
+    }
+
+    flex v_buf = mem_read_i64(db_ptr, 32)
+    flex id_buf = mem_read_i64(db_ptr, 40)
+
+    // Store vector bytes
+    flex dest_offset = count * dim * 8
+    mem_copy(v_buf + dest_offset, embedding_ptr, dim * 8)
+
+    // Store document ID
+    mem_write_i64(id_buf, count * 8, doc_id)
+
+    // Increment count
+    mem_write_i64(db_ptr, 16, count + 1)
+    deliver count
+}
+
+open flow vector_db_count(db_ptr: Int) -> Int {
+    deliver mem_read_i64(db_ptr, 16)
+}
+
+// Searches the index for the Top-K closest embeddings to query_vec.
+// Populates out_ids_buf and out_scores_buf.
+// Returns the actual number of matches returned.
+open flow vector_db_search(db_ptr: Int, query_vec_ptr: Int, top_k: Int, out_ids_buf: Int, out_scores_buf: Int) -> Int {
+    flex dim = mem_read_i64(db_ptr, 0)
+    flex count = mem_read_i64(db_ptr, 16)
+    flex metric = mem_read_i64(db_ptr, 24)
+    flex v_buf = mem_read_i64(db_ptr, 32)
+    flex id_buf = mem_read_i64(db_ptr, 40)
+
+    if count <= 0 {
+        deliver 0
+    }
+
+    flex k = top_k
+    if k > count {
+        k = count
+    }
+
+    // Initialize top-k buffers with minimum scores
+    flex init_score = -2000000000
+    if metric == 2 {
+        init_score = 2000000000 // For L2, lower distance is better
+    }
+
+    flex ki = 0
+    repeat while ki < k {
+        mem_write_i64(out_ids_buf, ki * 8, -1)
+        mem_write_i64(out_scores_buf, ki * 8, init_score)
+        ki = ki + 1
+    }
+
+    // Scan all stored vectors
+    flex idx = 0
+    repeat while idx < count {
+        flex candidate_vec = v_buf + (idx * dim * 8)
+        flex candidate_id = mem_read_i64(id_buf, idx * 8)
+
+        flex score = 0
+        if metric == 1 {
+            score = sys_vec_cosine(query_vec_ptr, candidate_vec, dim)
+        }
+        if metric == 2 {
+            // Euclidean distance squared
+            flex dist_sq = 0
+            flex d = 0
+            repeat while d < dim {
+                flex q_val = mem_read_i64(query_vec_ptr, d * 8)
+                flex c_val = mem_read_i64(candidate_vec, d * 8)
+                flex diff = q_val - c_val
+                dist_sq = dist_sq + (diff * diff)
+                d = d + 1
+            }
+            score = dist_sq
+        }
+        if metric == 3 {
+            score = sys_vec_dot(query_vec_ptr, candidate_vec, dim)
+        }
+
+        // Top-K insertion sort
+        flex p = 0
+        flex inserted = false
+        repeat while p < k {
+            flex current_score = mem_read_i64(out_scores_buf, p * 8)
+            flex is_better = false
+            if metric == 2 {
+                if score < current_score {
+                    is_better = true
+                }
+            } else {
+                if score > current_score {
+                    is_better = true
+                }
+            }
+
+            if is_better == true {
+                // Shift elements down
+                flex shift_idx = k - 1
+                repeat while shift_idx > p {
+                    flex prev_id = mem_read_i64(out_ids_buf, (shift_idx - 1) * 8)
+                    flex prev_sc = mem_read_i64(out_scores_buf, (shift_idx - 1) * 8)
+                    mem_write_i64(out_ids_buf, shift_idx * 8, prev_id)
+                    mem_write_i64(out_scores_buf, shift_idx * 8, prev_sc)
+                    shift_idx = shift_idx - 1
+                }
+                mem_write_i64(out_ids_buf, p * 8, candidate_id)
+                mem_write_i64(out_scores_buf, p * 8, score)
+                p = k // break loop
+            }
+            p = p + 1
+        }
+
+        idx = idx + 1
+    }
+
+    deliver k
+}
+
+open flow vector_db_free(db_ptr: Int) -> Int {
+    flex v_buf = mem_read_i64(db_ptr, 32)
+    flex id_buf = mem_read_i64(db_ptr, 40)
+    free_buffer(v_buf)
+    free_buffer(id_buf)
+    free_buffer(db_ptr)
+    deliver 0
+}

@@ -1,5 +1,8 @@
-// Zoren Web & WebAssembly Standard Library Module
-// Provides high-level browser interop, DOM manipulation, and web platform APIs
+// Zoren Web & WebAssembly Standard Library Module (std/web.zor)
+// Production browser interop, DOM interfaces, HTTP status mappings, MIME type detection, and URL/HTML utilities
+
+bring text
+bring sys
 
 open flow web_log(message: Text) -> Nothing {
     post(message)
@@ -19,4 +22,48 @@ open flow web_now_ms() -> Int {
 
 open flow web_is_browser() -> Bool {
     deliver true
+}
+
+// ----------------------------------------------------------------------------
+// HTTP Status Codes & Headers
+// ----------------------------------------------------------------------------
+
+open flow web_http_status_text(status_code: Int) -> Text {
+    if status_code == 200 { deliver "OK" }
+    if status_code == 201 { deliver "Created" }
+    if status_code == 204 { deliver "No Content" }
+    if status_code == 301 { deliver "Moved Permanently" }
+    if status_code == 302 { deliver "Found" }
+    if status_code == 304 { deliver "Not Modified" }
+    if status_code == 400 { deliver "Bad Request" }
+    if status_code == 401 { deliver "Unauthorized" }
+    if status_code == 403 { deliver "Forbidden" }
+    if status_code == 404 { deliver "Not Found" }
+    if status_code == 429 { deliver "Too Many Requests" }
+    if status_code == 500 { deliver "Internal Server Error" }
+    if status_code == 502 { deliver "Bad Gateway" }
+    if status_code == 503 { deliver "Service Unavailable" }
+    deliver "Unknown Status"
+}
+
+open flow web_mime_type(file_ext: Text) -> Text {
+    if file_ext == "html" { deliver "text/html; charset=utf-8" }
+    if file_ext == "json" { deliver "application/json" }
+    if file_ext == "js" { deliver "application/javascript" }
+    if file_ext == "css" { deliver "text/css" }
+    if file_ext == "wasm" { deliver "application/wasm" }
+    if file_ext == "svg" { deliver "image/svg+xml" }
+    if file_ext == "png" { deliver "image/png" }
+    if file_ext == "txt" { deliver "text/plain; charset=utf-8" }
+    deliver "application/octet-stream"
+}
+
+open flow web_format_cookie(name: Text, value: Text, max_age_seconds: Int) -> Text {
+    flex c = concat(concat(name, "="), value)
+    flex attr = concat("; Path=/; SameSite=Strict; Max-Age=", int_to_str(max_age_seconds))
+    deliver concat(c, attr)
+}
+
+open flow web_query_param(key: Text, val: Text) -> Text {
+    deliver concat(concat(key, "="), val)
 }

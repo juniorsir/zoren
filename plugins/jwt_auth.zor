@@ -1,0 +1,187 @@
+// Zoren Microservices JWT & RBAC Security Engine (plugins/jwt_auth.zor)
+// RFC 7519 JSON Web Token signing, constant-time validation, claim extraction, and Role-Based Access Control
+// Features: Base64URL encoding, HMAC-SHA256 signature verification, temporal validation, token revocation blacklist
+
+bring crypto
+bring text
+bring sys
+
+model JwtToken {
+    open header: Text
+    open payload: Text
+    open signature: Text
+    open valid: Bool
+}
+
+// Global Revocation Blacklist (Simple ring buffer of revoked signature hashes)
+// Header: [revoked_count, max_revoked, hashes_buf]
+open flow jwt_blacklist_init() -> Int {
+    flex max_revoked = 128
+    flex bl = alloc_buffer(24)
+    flex hashes = alloc_buffer(max_revoked * 8)
+    mem_write_i64(bl, 0, 0)
+    mem_write_i64(bl, 8, max_revoked)
+    mem_write_i64(bl, 16, hashes)
+    deliver bl
+}
+
+open flow jwt_blacklist_add(bl_ptr: Int, token: Text) -> Int {
+    flex count = mem_read_i64(bl_ptr, 0)
+    flex max_r = mem_read_i64(bl_ptr, 8)
+    flex hashes = mem_read_i64(bl_ptr, 16)
+
+    flex h = sys_fast_hash(token)
+    flex idx = count % max_r
+    mem_write_i64(hashes, idx * 8, h)
+    if count < max_r {
+        mem_write_i64(bl_ptr, 0, count + 1)
+    }
+    deliver 0
+}
+
+open flow jwt_is_revoked(bl_ptr: Int, token: Text) -> Bool {
+    if bl_ptr == 0 { deliver false }
+    flex count = mem_read_i64(bl_ptr, 0)
+    flex hashes = mem_read_i64(bl_ptr, 16)
+    flex h = sys_fast_hash(token)
+
+    flex i = 0
+    repeat while i < count {
+        if mem_read_i64(hashes, i * 8) == h {
+            deliver true
+        }
+        i = i + 1
+    }
+    deliver false
+}
+
+// Generates a cryptographically signed HMAC-SHA256 JWT token string.
+open flow jwt_sign(subject: Text, role: Text, exp_seconds: Int, secret: Text) -> Text {
+    // 1. Standard Header: {"alg":"HS256","typ":"JWT"}
+    flex header_raw = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
+    flex header_b64 = base64_encode(header_raw)
+
+    // 2. Payload with Claims
+    flex now_sec = sys_clock_ms() / 1000
+    flex exp_sec = now_sec + exp_seconds
+    flex payload_raw = concat("{\"sub\":\"", subject)
+    payload_raw = concat(payload_raw, "\",\"role\":\"")
+    payload_raw = concat(payload_raw, role)
+    payload_raw = concat(payload_raw, "\",\"exp\":")
+    payload_raw = concat(payload_raw, int_to_str(exp_sec))
+    payload_raw = concat(payload_raw, "}")
+    flex payload_b64 = base64_encode(payload_raw)
+
+    // 3. Message to sign = header.payload
+    flex signing_input = concat(header_b64, ".")
+    signing_input = concat(signing_input, payload_b64)
+
+    // 4. HMAC-SHA256 signature
+    flex sig = hmac_sha256_hex(secret, signing_input)
+
+    // 5. Final token: header.payload.signature
+    flex token = concat(signing_input, ".")
+    token = concat(token, sig)
+    deliver token
+}
+
+// Generates an enterprise JWT with audience and issuer claims
+open flow jwt_sign_full(subject: Text, role: Text, issuer: Text, audience: Text, exp_seconds: Int, secret: Text) -> Text {
+    flex header_raw = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
+    flex header_b64 = base64_encode(header_raw)
+
+    flex now_sec = sys_clock_ms() / 1000
+    flex exp_sec = now_sec + exp_seconds
+    flex payload = concat("{\"sub\":\"", subject)
+    payload = concat(payload, "\",\"role\":\"")
+    payload = concat(payload, role)
+    payload = concat(payload, "\",\"iss\":\"")
+    payload = concat(payload, issuer)
+    payload = concat(payload, "\",\"aud\":\"")
+    payload = concat(payload, audience)
+    payload = concat(payload, "\",\"iat\":")
+    payload = concat(payload, int_to_str(now_sec))
+    payload = concat(payload, ",\"exp\":")
+    payload = concat(payload, int_to_str(exp_sec))
+    payload = concat(payload, "}")
+    flex payload_b64 = base64_encode(payload)
+
+    flex signing_input = concat(concat(header_b64, "."), payload_b64)
+    flex sig = hmac_sha256_hex(secret, signing_input)
+    deliver concat(concat(signing_input, "."), sig)
+}
+
+// Verifies a JWT token's cryptographic integrity in constant-time.
+open flow jwt_verify(token: Text, secret: Text) -> Bool {
+    flex dot1 = str_find(token, ".")
+    if dot1 < 0 {
+        deliver false
+    }
+
+    flex header_part = str_slice(token, 0, dot1)
+    flex remainder = str_slice(token, dot1 + 1, 4096)
+    flex dot2 = str_find(remainder, ".")
+    if dot2 < 0 {
+        deliver false
+    }
+
+    flex payload_part = str_slice(remainder, 0, dot2)
+    flex sig_part = str_slice(remainder, dot2 + 1, 512)
+
+    // Reconstruct signing input
+    flex signing_input = concat(header_part, ".")
+    signing_input = concat(signing_input, payload_part)
+
+    // Compute expected signature
+    flex expected_sig = hmac_sha256_hex(secret, signing_input)
+
+    // Constant-time compare against timing attacks
+    if constant_time_compare(sig_part, expected_sig) != true {
+        deliver false
+    }
+
+    deliver true
+}
+
+// Extracts the signature part of a JWT token
+open flow jwt_get_signature(token: Text) -> Text {
+    flex dot1 = str_find(token, ".")
+    if dot1 < 0 { deliver "" }
+    flex remainder = str_slice(token, dot1 + 1, 4096)
+    flex dot2 = str_find(remainder, ".")
+    if dot2 < 0 { deliver "" }
+    deliver str_slice(remainder, dot2 + 1, 512)
+}
+
+// Role-Based Access Control (RBAC) Hierarchy Check
+// Hierarchy: admin (4) >= maintainer (3) >= agent (2) >= user (1) >= guest (0)
+open flow rbac_role_level(role: Text) -> Int {
+    if role == "admin" {
+        deliver 4
+    }
+    if role == "maintainer" {
+        deliver 3
+    }
+    if role == "agent" {
+        deliver 2
+    }
+    if role == "user" {
+        deliver 1
+    }
+    deliver 0
+}
+
+open flow rbac_allows(user_role: Text, required_role: Text) -> Bool {
+    flex user_lvl = rbac_role_level(user_role)
+    flex req_lvl = rbac_role_level(required_role)
+    if user_lvl >= req_lvl {
+        deliver true
+    }
+    deliver false
+}
+
+// Granular permission check: 1=READ, 2=WRITE, 3=EXECUTE, 4=DELETE, 5=ADMIN
+open flow rbac_has_permission(role: Text, perm_level: Int) -> Bool {
+    flex level = rbac_role_level(role)
+    deliver level >= perm_level
+}

@@ -1,0 +1,123 @@
+// Zoren Distributed Systems Plugin - Distributed Lock with Fencing Tokens (plugins/distributed_lock.zor)
+// Redlock-style distributed mutual exclusion with TTL auto-expiration and monotonically increasing fencing tokens.
+
+bring sys
+
+// ============================================================================
+// DISTRIBUTED MUTEX & LEASE MANAGER
+// Header layout (48 bytes):
+// [0..8]:   state (0: UNLOCKED, 1: LOCKED)
+// [8..16]:  owner_hash (fast_hash of owner ID)
+// [16..24]: lease_duration_ms
+// [24..32]: acquired_at_ms
+// [32..40]: fencing_token (monotonically increasing integer)
+// [40..48]: lock_name_hash
+// ============================================================================
+
+open flow dist_lock_new(lock_name: Text, lease_duration_ms: Int) -> Int {
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0) // UNLOCKED
+    mem_write_i64(header, 8, 0) // owner_hash
+    mem_write_i64(header, 16, lease_duration_ms)
+    mem_write_i64(header, 24, 0) // acquired_at_ms
+    mem_write_i64(header, 32, 100) // Initial fencing token
+    mem_write_i64(header, 40, sys_fast_hash(lock_name))
+
+    deliver header
+}
+
+// Attempts to acquire the lock.
+// Returns the monotonically increasing fencing token (> 0) on success, or 0 on failure.
+open flow dist_lock_acquire(lock_ptr: Int, owner_id: Text) -> Int {
+    flex state = mem_read_i64(lock_ptr, 0)
+    flex now_ts = sys_clock_ms()
+    flex owner_h = sys_fast_hash(owner_id)
+
+    // Check if currently locked
+    if state == 1 {
+        flex acquired_at = mem_read_i64(lock_ptr, 24)
+        flex lease_dur = mem_read_i64(lock_ptr, 16)
+        // Check if lease has expired (auto-recovery from crashed owner)
+        if (now_ts - acquired_at) < lease_dur {
+            // Still actively held: check if already held by same owner
+            if mem_read_i64(lock_ptr, 8) == owner_h {
+                // Re-entrant: extend lease and return current fencing token
+                mem_write_i64(lock_ptr, 24, now_ts)
+                deliver mem_read_i64(lock_ptr, 32)
+            }
+            deliver 0 // Lock busy
+        }
+    }
+
+    // Acquire lock and bump fencing token
+    flex new_token = mem_read_i64(lock_ptr, 32) + 1
+    mem_write_i64(lock_ptr, 0, 1) // LOCKED
+    mem_write_i64(lock_ptr, 8, owner_h)
+    mem_write_i64(lock_ptr, 24, now_ts)
+    mem_write_i64(lock_ptr, 32, new_token)
+
+    deliver new_token
+}
+
+// Extends the lease duration if called by the current valid owner.
+open flow dist_lock_renew(lock_ptr: Int, owner_id: Text, extend_ms: Int) -> Bool {
+    flex state = mem_read_i64(lock_ptr, 0)
+    if state == 0 { deliver false }
+
+    flex now_ts = sys_clock_ms()
+    flex acquired_at = mem_read_i64(lock_ptr, 24)
+    flex lease_dur = mem_read_i64(lock_ptr, 16)
+
+    // Verify lease has not already expired
+    if (now_ts - acquired_at) >= lease_dur {
+        deliver false
+    }
+
+    // Verify caller is the owner
+    if mem_read_i64(lock_ptr, 8) != sys_fast_hash(owner_id) {
+        deliver false
+    }
+
+    mem_write_i64(lock_ptr, 16, lease_dur + extend_ms)
+    deliver true
+}
+
+// Releases the lock if called by current owner.
+open flow dist_lock_release(lock_ptr: Int, owner_id: Text) -> Bool {
+    flex state = mem_read_i64(lock_ptr, 0)
+    if state == 0 { deliver true }
+
+    // Verify caller is the owner
+    if mem_read_i64(lock_ptr, 8) != sys_fast_hash(owner_id) {
+        deliver false
+    }
+
+    mem_write_i64(lock_ptr, 0, 0) // UNLOCKED
+    mem_write_i64(lock_ptr, 8, 0)
+    mem_write_i64(lock_ptr, 24, 0)
+    deliver true
+}
+
+open flow dist_lock_is_locked(lock_ptr: Int) -> Bool {
+    flex state = mem_read_i64(lock_ptr, 0)
+    if state == 0 { deliver false }
+
+    flex now_ts = sys_clock_ms()
+    flex acquired_at = mem_read_i64(lock_ptr, 24)
+    flex lease_dur = mem_read_i64(lock_ptr, 16)
+    if (now_ts - acquired_at) >= lease_dur {
+        deliver false // Expired
+    }
+    deliver true
+}
+
+open flow dist_lock_fencing_token(lock_ptr: Int) -> Int {
+    deliver mem_read_i64(lock_ptr, 32)
+}
+
+open flow dist_lock_free(lock_ptr: Int) -> Int {
+    if lock_ptr != 0 {
+        free_buffer(lock_ptr)
+    }
+    deliver 0
+}
