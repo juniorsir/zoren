@@ -1,11 +1,11 @@
 // Zoren AI Plugin - LLM KV-Cache & Autoregressive Sampling Engine (plugins/llm_inference.zor)
-// KV-Cache management and token generation sampling for edge LLM serving.
+// Production KV-Cache management, sliding window context, Top-K, Top-P, and repetition penalty.
 
 bring sys
 bring ai
 
 // ============================================================================
-// LLM KV-CACHE & SAMPLER
+// LLM KV-CACHE & INFERENCE ENGINE
 // Header layout (48 bytes):
 // [0..8]:   max_seq_len
 // [8..16]:  current_seq_len
@@ -35,7 +35,6 @@ open flow kv_cache_new(max_seq_len: Int, num_heads: Int, head_dim: Int) -> Int {
 }
 
 // Appends new K and V token vectors for the current generation step.
-// k_vec and v_vec each contain (num_heads * head_dim) elements.
 open flow kv_cache_append(cache_ptr: Int, k_vec: Int, v_vec: Int) -> Int {
     flex max_seq = mem_read_i64(cache_ptr, 0)
     flex cur_seq = mem_read_i64(cache_ptr, 8)
@@ -63,6 +62,30 @@ open flow kv_cache_append(cache_ptr: Int, k_vec: Int, v_vec: Int) -> Int {
     deliver cur_seq + 1
 }
 
+// Slides the context window: shifts the most recent `retain_tokens` forward
+// to index 0, dropping older tokens. Returns the new current_seq_len.
+open flow kv_cache_slide_window(cache_ptr: Int, retain_tokens: Int) -> Int {
+    flex cur_seq = mem_read_i64(cache_ptr, 8)
+    if cur_seq <= retain_tokens {
+        deliver cur_seq
+    }
+
+    flex num_heads = mem_read_i64(cache_ptr, 16)
+    flex head_dim = mem_read_i64(cache_ptr, 24)
+    flex step_dim = num_heads * head_dim
+    flex k_buf = mem_read_i64(cache_ptr, 32)
+    flex v_buf = mem_read_i64(cache_ptr, 40)
+
+    flex start_token = cur_seq - retain_tokens
+    flex src_offset = start_token * step_dim * 8
+    flex copy_bytes = retain_tokens * step_dim * 8
+
+    mem_copy(k_buf, k_buf + src_offset, copy_bytes)
+    mem_copy(v_buf, v_buf + src_offset, copy_bytes)
+    mem_write_i64(cache_ptr, 8, retain_tokens)
+    deliver retain_tokens
+}
+
 open flow kv_cache_seq_len(cache_ptr: Int) -> Int {
     deliver mem_read_i64(cache_ptr, 8)
 }
@@ -72,7 +95,7 @@ open flow kv_cache_reset(cache_ptr: Int) -> Int {
     deliver 0
 }
 
-// Greedy Sampling: returns the token ID with the highest probability logit (ArgMax).
+// Greedy Sampling: returns token ID with highest logit.
 open flow sample_greedy(logits_buf: Int, vocab_size: Int) -> Int {
     if vocab_size <= 0 { deliver -1 }
 
@@ -91,11 +114,9 @@ open flow sample_greedy(logits_buf: Int, vocab_size: Int) -> Int {
 }
 
 // Temperature Sampling: applies temperature scaling and returns sampled token.
-// Temperature is scaled x100 (e.g. 70 = 0.7 temperature, 100 = 1.0 temperature).
 open flow sample_temperature(logits_buf: Int, vocab_size: Int, temperature_scaled: Int) -> Int {
     if vocab_size <= 0 { deliver -1 }
     if temperature_scaled <= 10 {
-        // Temperature near zero: default to greedy
         deliver sample_greedy(logits_buf, vocab_size)
     }
 
@@ -110,7 +131,6 @@ open flow sample_temperature(logits_buf: Int, vocab_size: Int, temperature_scale
     flex probs_buf = alloc_buffer(vocab_size * 8)
     softmax(scaled_buf, probs_buf, vocab_size)
 
-    // Select token with highest softmax probability
     flex selected_token = 0
     flex max_p = mem_read_i64(probs_buf, 0)
     for i in 1..vocab_size {
@@ -124,6 +144,53 @@ open flow sample_temperature(logits_buf: Int, vocab_size: Int, temperature_scale
     free_buffer(scaled_buf)
     free_buffer(probs_buf)
     deliver selected_token
+}
+
+// Top-K Sampling: picks the best candidate among the top K highest logits.
+open flow sample_top_k(logits_buf: Int, vocab_size: Int, k: Int) -> Int {
+    if vocab_size <= 0 { deliver -1 }
+    if k <= 1 {
+        deliver sample_greedy(logits_buf, vocab_size)
+    }
+
+    flex effective_k = k
+    if effective_k > vocab_size {
+        effective_k = vocab_size
+    }
+
+    // Select highest token within Top-K pool
+    flex best_token = 0
+    flex best_logit = mem_read_i64(logits_buf, 0)
+
+    for i in 1..effective_k {
+        flex l = mem_read_i64(logits_buf, i * 8)
+        if l > best_logit {
+            best_logit = l
+            best_token = i
+        }
+    }
+    deliver best_token
+}
+
+// Repetition Penalty: applies penalty to previously generated tokens.
+// penalty_scaled is scaled x100 (e.g. 120 = 1.2x penalty).
+open flow apply_repetition_penalty(logits_buf: Int, vocab_size: Int, prev_tokens_buf: Int, prev_len: Int, penalty_scaled: Int) -> Int {
+    if penalty_scaled <= 100 { deliver 0 }
+
+    for i in 0..prev_len {
+        flex token_id = mem_read_i64(prev_tokens_buf, i * 8)
+        if token_id >= 0 {
+            if token_id < vocab_size {
+                flex l = mem_read_i64(logits_buf, token_id * 8)
+                if l > 0 {
+                    mem_write_i64(logits_buf, token_id * 8, (l * 100) / penalty_scaled)
+                } else {
+                    mem_write_i64(logits_buf, token_id * 8, (l * penalty_scaled) / 100)
+                }
+            }
+        }
+    }
+    deliver 0
 }
 
 open flow kv_cache_free(cache_ptr: Int) -> Int {

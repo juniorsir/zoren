@@ -1,17 +1,21 @@
-// Zoren AI Plugin - Multi-Agent Swarm Orchestrator & Consensus Engine (plugins/agent_swarm.zor)
-// Decentralized consensus, multi-agent voting, and coordinated LLM workflows.
+// Zoren AI Plugin - Multi-Agent Swarm Orchestrator & BFT Consensus Engine (plugins/agent_swarm.zor)
+// Byzantine fault-tolerant quorum, agent reputation weighting, and proposal lifecycle.
 
 bring sys
 
 // ============================================================================
-// AGENT SWARM CONSENSUS ENGINE
-// Header layout (40 bytes):
+// AGENT SWARM CONSENSUS & GOVERNANCE ENGINE
+// Header layout (72 bytes):
 // [0..8]:   max_agents
 // [8..16]:  registered_agents
 // [16..24]: vote_count
-// [24..32]: votes_buf
+// [24..32]: votes_buf (entry 24 bytes: [agent_id: i64, proposal_id: i64, score: i64])
 // [32..40]: max_votes
-// Entry (24 bytes): [agent_id: i64, proposal_id: i64, score: i64]
+// [40..48]: weights_buf (entry 16 bytes: [agent_id: i64, weight: i64])
+// [48..56]: proposals_buf (entry 16 bytes: [proposal_id: i64, status: i64])
+// [56..64]: proposal_count
+// [64..72]: max_proposals
+// Status: 0=PROPOSED, 1=VOTING, 2=COMMITTED, 3=REJECTED
 // ============================================================================
 
 open flow agent_swarm_new(max_agents: Int) -> Int {
@@ -19,12 +23,23 @@ open flow agent_swarm_new(max_agents: Int) -> Int {
     flex v_buf = alloc_buffer(max_v * 24)
     mem_fill(v_buf, 0, max_v * 24)
 
-    flex header = alloc_buffer(40)
+    flex w_buf = alloc_buffer(max_agents * 16)
+    mem_fill(w_buf, 0, max_agents * 16)
+
+    flex max_p = 64
+    flex p_buf = alloc_buffer(max_p * 16)
+    mem_fill(p_buf, 0, max_p * 16)
+
+    flex header = alloc_buffer(72)
     mem_write_i64(header, 0, max_agents)
     mem_write_i64(header, 8, 0) // registered_agents
     mem_write_i64(header, 16, 0) // vote_count
     mem_write_i64(header, 24, v_buf)
     mem_write_i64(header, 32, max_v)
+    mem_write_i64(header, 40, w_buf)
+    mem_write_i64(header, 48, p_buf)
+    mem_write_i64(header, 56, 0) // proposal_count
+    mem_write_i64(header, 64, max_p)
 
     deliver header
 }
@@ -35,8 +50,42 @@ open flow agent_swarm_register_agent(swarm_ptr: Int, agent_id: Int) -> Bool {
     if registered >= max_agents {
         deliver false
     }
+
+    // Initialize default agent weight to 100
+    flex w_buf = mem_read_i64(swarm_ptr, 40)
+    flex w_offset = registered * 16
+    mem_write_i64(w_buf, w_offset, agent_id)
+    mem_write_i64(w_buf, w_offset + 8, 100) // Default weight 100%
+
     mem_write_i64(swarm_ptr, 8, registered + 1)
     deliver true
+}
+
+open flow agent_swarm_set_agent_weight(swarm_ptr: Int, agent_id: Int, weight: Int) -> Bool {
+    flex registered = mem_read_i64(swarm_ptr, 8)
+    flex w_buf = mem_read_i64(swarm_ptr, 40)
+
+    for i in 0..registered {
+        flex offset = i * 16
+        if mem_read_i64(w_buf, offset) == agent_id {
+            mem_write_i64(w_buf, offset + 8, weight)
+            deliver true
+        }
+    }
+    deliver false
+}
+
+open flow agent_swarm_get_agent_weight(swarm_ptr: Int, agent_id: Int) -> Int {
+    flex registered = mem_read_i64(swarm_ptr, 8)
+    flex w_buf = mem_read_i64(swarm_ptr, 40)
+
+    for i in 0..registered {
+        flex offset = i * 16
+        if mem_read_i64(w_buf, offset) == agent_id {
+            deliver mem_read_i64(w_buf, offset + 8)
+        }
+    }
+    deliver 100 // default weight
 }
 
 open flow agent_swarm_submit_vote(swarm_ptr: Int, agent_id: Int, proposal_id: Int, score: Int) -> Bool {
@@ -91,6 +140,33 @@ open flow agent_swarm_tally(swarm_ptr: Int, proposal_id: Int) -> Int {
     deliver total_score / count
 }
 
+open flow agent_swarm_weighted_tally(swarm_ptr: Int, proposal_id: Int) -> Int {
+    flex vote_count = mem_read_i64(swarm_ptr, 16)
+    flex v_buf = mem_read_i64(swarm_ptr, 24)
+
+    flex dyn_zero = sys_fast_hash("dyn_zero") * 0
+    flex weighted_sum = dyn_zero
+    flex total_weights = dyn_zero
+
+    for i in 0..vote_count {
+        flex offset = i * 24
+        flex p_id = mem_read_i64(v_buf, offset + 8)
+        if p_id == proposal_id {
+            flex a_id = mem_read_i64(v_buf, offset)
+            flex score = mem_read_i64(v_buf, offset + 16)
+            flex weight = agent_swarm_get_agent_weight(swarm_ptr, a_id)
+
+            weighted_sum = weighted_sum + (score * weight)
+            total_weights = total_weights + weight
+        }
+    }
+
+    if total_weights > 0 {
+        deliver weighted_sum / total_weights
+    }
+    deliver 0
+}
+
 open flow agent_swarm_vote_count(swarm_ptr: Int, proposal_id: Int) -> Int {
     flex vote_count = mem_read_i64(swarm_ptr, 16)
     flex v_buf = mem_read_i64(swarm_ptr, 24)
@@ -123,12 +199,61 @@ open flow agent_swarm_consensus(swarm_ptr: Int, proposal_id: Int, threshold: Int
     deliver false
 }
 
+// PBFT / Raft style Byzantine fault tolerant quorum check.
+// Requires >= (2 * faulty_nodes + 1) votes to guarantee non-faulty consensus.
+open flow agent_swarm_bft_quorum(swarm_ptr: Int, proposal_id: Int, faulty_nodes: Int) -> Bool {
+    flex votes = agent_swarm_vote_count(swarm_ptr, proposal_id)
+    flex required = (2 * faulty_nodes) + 1
+    if votes >= required {
+        deliver true
+    }
+    deliver false
+}
+
+open flow agent_swarm_commit_proposal(swarm_ptr: Int, proposal_id: Int) -> Bool {
+    flex p_buf = mem_read_i64(swarm_ptr, 48)
+    flex p_cnt = mem_read_i64(swarm_ptr, 56)
+    flex max_p = mem_read_i64(swarm_ptr, 64)
+
+    for i in 0..p_cnt {
+        flex offset = i * 16
+        if mem_read_i64(p_buf, offset) == proposal_id {
+            mem_write_i64(p_buf, offset + 8, 2) // COMMITTED
+            deliver true
+        }
+    }
+
+    if p_cnt < max_p {
+        flex new_offset = p_cnt * 16
+        mem_write_i64(p_buf, new_offset, proposal_id)
+        mem_write_i64(p_buf, new_offset + 8, 2) // COMMITTED
+        mem_write_i64(swarm_ptr, 56, p_cnt + 1)
+        deliver true
+    }
+    deliver false
+}
+
+open flow agent_swarm_proposal_status(swarm_ptr: Int, proposal_id: Int) -> Int {
+    flex p_buf = mem_read_i64(swarm_ptr, 48)
+    flex p_cnt = mem_read_i64(swarm_ptr, 56)
+
+    for i in 0..p_cnt {
+        flex offset = i * 16
+        if mem_read_i64(p_buf, offset) == proposal_id {
+            deliver mem_read_i64(p_buf, offset + 8)
+        }
+    }
+    deliver 0 // default PROPOSED
+}
+
 open flow agent_swarm_free(swarm_ptr: Int) -> Int {
     if swarm_ptr != 0 {
         flex v_buf = mem_read_i64(swarm_ptr, 24)
-        if v_buf != 0 {
-            free_buffer(v_buf)
-        }
+        if v_buf != 0 { free_buffer(v_buf) }
+        flex w_buf = mem_read_i64(swarm_ptr, 40)
+        if w_buf != 0 { free_buffer(w_buf) }
+        flex p_buf = mem_read_i64(swarm_ptr, 48)
+        if p_buf != 0 { free_buffer(p_buf) }
         free_buffer(swarm_ptr)
     }
     deliver 0

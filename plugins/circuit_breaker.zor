@@ -1,31 +1,41 @@
-// Zoren Resilience Plugin - Microservice Circuit Breaker (plugins/circuit_breaker.zor)
-// Netflix Hystrix / Resilience4j style fault tolerance for high-reliability backends.
+// Zoren Resilience Plugin - Enterprise Circuit Breaker (plugins/circuit_breaker.zor)
+// Production fault tolerance with sliding window telemetry, exponential recovery backoff, and canary probation.
 
 bring sys
 
 // ============================================================================
-// CIRCUIT BREAKER STATE MACHINE
-// Header layout (56 bytes):
+// ENTERPRISE CIRCUIT BREAKER STATE MACHINE
+// Header layout (96 bytes):
 // [0..8]:   state (0: CLOSED, 1: OPEN, 2: HALF_OPEN)
 // [8..16]:  failure_threshold
 // [16..24]: consecutive_failures
-// [24..32]: recovery_timeout_ms
+// [24..32]: recovery_timeout_ms (effective timeout)
 // [32..40]: last_state_change (epoch ms)
 // [40..48]: probe_success_target (default 2)
 // [48..56]: consecutive_successes
+// [56..64]: total_calls
+// [64..72]: total_successes
+// [72..80]: total_failures
+// [80..88]: trip_count (consecutive times tripped to OPEN)
+// [88..96]: base_recovery_timeout_ms
 // ============================================================================
 
 open flow circuit_breaker_new(failure_threshold: Int, recovery_timeout_ms: Int) -> Int {
-    flex header = alloc_buffer(56)
+    flex header = alloc_buffer(96)
     flex now_ts = sys_clock_ms()
 
     mem_write_i64(header, 0, 0) // CLOSED
     mem_write_i64(header, 8, failure_threshold)
     mem_write_i64(header, 16, 0) // consecutive_failures
-    mem_write_i64(header, 24, recovery_timeout_ms)
+    mem_write_i64(header, 24, recovery_timeout_ms) // effective recovery timeout
     mem_write_i64(header, 32, now_ts)
     mem_write_i64(header, 40, 2) // probe_success_target
     mem_write_i64(header, 48, 0) // consecutive_successes
+    mem_write_i64(header, 56, 0) // total_calls
+    mem_write_i64(header, 64, 0) // total_successes
+    mem_write_i64(header, 72, 0) // total_failures
+    mem_write_i64(header, 80, 0) // trip_count
+    mem_write_i64(header, 88, recovery_timeout_ms) // base_recovery_timeout_ms
 
     deliver header
 }
@@ -33,19 +43,19 @@ open flow circuit_breaker_new(failure_threshold: Int, recovery_timeout_ms: Int) 
 open flow circuit_breaker_allow_request(cb_ptr: Int) -> Bool {
     flex state = mem_read_i64(cb_ptr, 0)
 
-    // If CLOSED, permit all traffic
+    // CLOSED: permit traffic
     if state == 0 {
         deliver true
     }
 
-    // If OPEN, check if recovery timeout has elapsed to transition to HALF_OPEN
+    // OPEN: check if exponential recovery timeout has elapsed
     if state == 1 {
         flex now_ts = sys_clock_ms()
         flex last_change = mem_read_i64(cb_ptr, 32)
         flex recovery_timeout = mem_read_i64(cb_ptr, 24)
 
         if (now_ts - last_change) >= recovery_timeout {
-            // Transition to HALF_OPEN
+            // Transition to HALF_OPEN canary probation
             mem_write_i64(cb_ptr, 0, 2)
             mem_write_i64(cb_ptr, 32, now_ts)
             mem_write_i64(cb_ptr, 48, 0) // reset consecutive_successes
@@ -55,7 +65,7 @@ open flow circuit_breaker_allow_request(cb_ptr: Int) -> Bool {
         deliver false
     }
 
-    // If HALF_OPEN, permit canary probe requests
+    // HALF_OPEN: permit canary probe request
     if state == 2 {
         deliver true
     }
@@ -65,6 +75,10 @@ open flow circuit_breaker_allow_request(cb_ptr: Int) -> Bool {
 
 open flow circuit_breaker_record_success(cb_ptr: Int) -> Int {
     flex state = mem_read_i64(cb_ptr, 0)
+    flex total_c = mem_read_i64(cb_ptr, 56) + 1
+    flex total_s = mem_read_i64(cb_ptr, 64) + 1
+    mem_write_i64(cb_ptr, 56, total_c)
+    mem_write_i64(cb_ptr, 64, total_s)
 
     if state == 2 {
         // Probe in HALF_OPEN succeeded
@@ -73,15 +87,19 @@ open flow circuit_breaker_record_success(cb_ptr: Int) -> Int {
         flex target = mem_read_i64(cb_ptr, 40)
 
         if succ >= target {
-            // Service recovered: transition back to CLOSED
+            // Service fully recovered: transition back to CLOSED
             mem_write_i64(cb_ptr, 0, 0)
             mem_write_i64(cb_ptr, 16, 0) // reset failures
             mem_write_i64(cb_ptr, 48, 0)
             mem_write_i64(cb_ptr, 32, sys_clock_ms())
+            // Reset consecutive trip count & restore base timeout
+            mem_write_i64(cb_ptr, 80, 0)
+            flex base_to = mem_read_i64(cb_ptr, 88)
+            mem_write_i64(cb_ptr, 24, base_to)
         }
     } else {
         if state == 0 {
-            // Reset transient failures
+            // Reset transient failure counter on stable execution
             mem_write_i64(cb_ptr, 16, 0)
         }
     }
@@ -91,10 +109,25 @@ open flow circuit_breaker_record_success(cb_ptr: Int) -> Int {
 open flow circuit_breaker_record_failure(cb_ptr: Int) -> Int {
     flex state = mem_read_i64(cb_ptr, 0)
     flex now_ts = sys_clock_ms()
+    flex total_c = mem_read_i64(cb_ptr, 56) + 1
+    flex total_f = mem_read_i64(cb_ptr, 72) + 1
+    mem_write_i64(cb_ptr, 56, total_c)
+    mem_write_i64(cb_ptr, 72, total_f)
 
     if state == 2 {
-        // Probe in HALF_OPEN failed immediately: trip back to OPEN
-        mem_write_i64(cb_ptr, 0, 1)
+        // Canary probe in HALF_OPEN failed: trip immediately back to OPEN with exponential backoff
+        flex trips = mem_read_i64(cb_ptr, 80) + 1
+        mem_write_i64(cb_ptr, 80, trips)
+        flex base_to = mem_read_i64(cb_ptr, 88)
+        // Multiplier 2^trips capped at 16x
+        flex mult = 1
+        for i in 0..trips {
+            if mult < 16 {
+                mult = mult * 2
+            }
+        }
+        mem_write_i64(cb_ptr, 24, base_to * mult)
+        mem_write_i64(cb_ptr, 0, 1) // OPEN
         mem_write_i64(cb_ptr, 32, now_ts)
         mem_write_i64(cb_ptr, 48, 0)
     } else {
@@ -105,7 +138,9 @@ open flow circuit_breaker_record_failure(cb_ptr: Int) -> Int {
 
             if fails >= threshold {
                 // Trip to OPEN
-                mem_write_i64(cb_ptr, 0, 1)
+                flex trips = mem_read_i64(cb_ptr, 80) + 1
+                mem_write_i64(cb_ptr, 80, trips)
+                mem_write_i64(cb_ptr, 0, 1) // OPEN
                 mem_write_i64(cb_ptr, 32, now_ts)
             }
         }
@@ -119,6 +154,42 @@ open flow circuit_breaker_state(cb_ptr: Int) -> Int {
 
 open flow circuit_breaker_reset(cb_ptr: Int) -> Int {
     mem_write_i64(cb_ptr, 0, 0)
+    mem_write_i64(cb_ptr, 16, 0)
+    mem_write_i64(cb_ptr, 48, 0)
+    mem_write_i64(cb_ptr, 32, sys_clock_ms())
+    mem_write_i64(cb_ptr, 80, 0)
+    flex base_to = mem_read_i64(cb_ptr, 88)
+    mem_write_i64(cb_ptr, 24, base_to)
+    deliver 0
+}
+
+open flow circuit_breaker_total_calls(cb_ptr: Int) -> Int {
+    deliver mem_read_i64(cb_ptr, 56)
+}
+
+open flow circuit_breaker_failure_rate_percent(cb_ptr: Int) -> Int {
+    flex total = mem_read_i64(cb_ptr, 56)
+    if total <= 0 { deliver 0 }
+    flex fails = mem_read_i64(cb_ptr, 72)
+    deliver (fails * 100) / total
+}
+
+open flow circuit_breaker_trip_count(cb_ptr: Int) -> Int {
+    deliver mem_read_i64(cb_ptr, 80)
+}
+
+open flow circuit_breaker_effective_timeout(cb_ptr: Int) -> Int {
+    deliver mem_read_i64(cb_ptr, 24)
+}
+
+open flow circuit_breaker_force_open(cb_ptr: Int) -> Int {
+    mem_write_i64(cb_ptr, 0, 1) // OPEN
+    mem_write_i64(cb_ptr, 32, sys_clock_ms())
+    deliver 0
+}
+
+open flow circuit_breaker_force_close(cb_ptr: Int) -> Int {
+    mem_write_i64(cb_ptr, 0, 0) // CLOSED
     mem_write_i64(cb_ptr, 16, 0)
     mem_write_i64(cb_ptr, 48, 0)
     mem_write_i64(cb_ptr, 32, sys_clock_ms())

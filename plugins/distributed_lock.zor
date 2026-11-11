@@ -1,33 +1,41 @@
-// Zoren Distributed Systems Plugin - Distributed Lock with Fencing Tokens (plugins/distributed_lock.zor)
-// Redlock-style distributed mutual exclusion with TTL auto-expiration and monotonically increasing fencing tokens.
+// Zoren Distributed Systems Plugin - Distributed Lock with Reentrancy & Fencing (plugins/distributed_lock.zor)
+// Redlock mutual exclusion, TTL leases, reentrant locking depth, and monotonic fencing validation.
 
 bring sys
 
 // ============================================================================
-// DISTRIBUTED MUTEX & LEASE MANAGER
-// Header layout (48 bytes):
+// ENTERPRISE DISTRIBUTED MUTEX & LEASE MANAGER
+// Header layout (80 bytes):
 // [0..8]:   state (0: UNLOCKED, 1: LOCKED)
 // [8..16]:  owner_hash (fast_hash of owner ID)
 // [16..24]: lease_duration_ms
 // [24..32]: acquired_at_ms
 // [32..40]: fencing_token (monotonically increasing integer)
 // [40..48]: lock_name_hash
+// [48..56]: reentrancy_depth
+// [56..64]: acquire_count
+// [64..72]: preempt_count
+// [72..80]: reserved
 // ============================================================================
 
 open flow dist_lock_new(lock_name: Text, lease_duration_ms: Int) -> Int {
-    flex header = alloc_buffer(48)
+    flex header = alloc_buffer(80)
     mem_write_i64(header, 0, 0) // UNLOCKED
     mem_write_i64(header, 8, 0) // owner_hash
     mem_write_i64(header, 16, lease_duration_ms)
     mem_write_i64(header, 24, 0) // acquired_at_ms
     mem_write_i64(header, 32, 100) // Initial fencing token
     mem_write_i64(header, 40, sys_fast_hash(lock_name))
+    mem_write_i64(header, 48, 0) // reentrancy_depth
+    mem_write_i64(header, 56, 0) // acquire_count
+    mem_write_i64(header, 64, 0) // preempt_count
+    mem_write_i64(header, 72, 0)
 
     deliver header
 }
 
 // Attempts to acquire the lock.
-// Returns the monotonically increasing fencing token (> 0) on success, or 0 on failure.
+// Returns monotonic fencing token (> 0) on success, or 0 on failure.
 open flow dist_lock_acquire(lock_ptr: Int, owner_id: Text) -> Int {
     flex state = mem_read_i64(lock_ptr, 0)
     flex now_ts = sys_clock_ms()
@@ -37,24 +45,29 @@ open flow dist_lock_acquire(lock_ptr: Int, owner_id: Text) -> Int {
     if state == 1 {
         flex acquired_at = mem_read_i64(lock_ptr, 24)
         flex lease_dur = mem_read_i64(lock_ptr, 16)
+
         // Check if lease has expired (auto-recovery from crashed owner)
         if (now_ts - acquired_at) < lease_dur {
-            // Still actively held: check if already held by same owner
+            // Still actively held: check if already held by same owner (reentrancy)
             if mem_read_i64(lock_ptr, 8) == owner_h {
-                // Re-entrant: extend lease and return current fencing token
-                mem_write_i64(lock_ptr, 24, now_ts)
+                flex depth = mem_read_i64(lock_ptr, 48) + 1
+                mem_write_i64(lock_ptr, 48, depth)
+                mem_write_i64(lock_ptr, 24, now_ts) // extend lease timestamp
                 deliver mem_read_i64(lock_ptr, 32)
             }
             deliver 0 // Lock busy
         }
     }
 
-    // Acquire lock and bump fencing token
+    // Acquire lock fresh and bump fencing token
     flex new_token = mem_read_i64(lock_ptr, 32) + 1
+    flex total_acq = mem_read_i64(lock_ptr, 56) + 1
     mem_write_i64(lock_ptr, 0, 1) // LOCKED
     mem_write_i64(lock_ptr, 8, owner_h)
     mem_write_i64(lock_ptr, 24, now_ts)
     mem_write_i64(lock_ptr, 32, new_token)
+    mem_write_i64(lock_ptr, 48, 1) // reentrancy depth 1
+    mem_write_i64(lock_ptr, 56, total_acq)
 
     deliver new_token
 }
@@ -82,7 +95,7 @@ open flow dist_lock_renew(lock_ptr: Int, owner_id: Text, extend_ms: Int) -> Bool
     deliver true
 }
 
-// Releases the lock if called by current owner.
+// Releases the lock or decrements reentrancy depth.
 open flow dist_lock_release(lock_ptr: Int, owner_id: Text) -> Bool {
     flex state = mem_read_i64(lock_ptr, 0)
     if state == 0 { deliver true }
@@ -92,9 +105,18 @@ open flow dist_lock_release(lock_ptr: Int, owner_id: Text) -> Bool {
         deliver false
     }
 
+    flex depth = mem_read_i64(lock_ptr, 48) - 1
+    if depth > 0 {
+        // Still held in an outer reentrant frame
+        mem_write_i64(lock_ptr, 48, depth)
+        deliver true
+    }
+
+    // Fully unlocked
     mem_write_i64(lock_ptr, 0, 0) // UNLOCKED
     mem_write_i64(lock_ptr, 8, 0)
     mem_write_i64(lock_ptr, 24, 0)
+    mem_write_i64(lock_ptr, 48, 0)
     deliver true
 }
 
@@ -113,6 +135,54 @@ open flow dist_lock_is_locked(lock_ptr: Int) -> Bool {
 
 open flow dist_lock_fencing_token(lock_ptr: Int) -> Int {
     deliver mem_read_i64(lock_ptr, 32)
+}
+
+open flow dist_lock_reentrancy_depth(lock_ptr: Int) -> Int {
+    if dist_lock_is_locked(lock_ptr) {
+        deliver mem_read_i64(lock_ptr, 48)
+    }
+    deliver 0
+}
+
+open flow dist_lock_time_remaining_ms(lock_ptr: Int) -> Int {
+    flex state = mem_read_i64(lock_ptr, 0)
+    if state == 0 { deliver 0 }
+
+    flex now_ts = sys_clock_ms()
+    flex acquired_at = mem_read_i64(lock_ptr, 24)
+    flex lease_dur = mem_read_i64(lock_ptr, 16)
+    flex elapsed = now_ts - acquired_at
+    if elapsed >= lease_dur {
+        deliver 0
+    }
+    deliver lease_dur - elapsed
+}
+
+// Dead-man switch emergency preemption to break stuck or orphaned locks
+open flow dist_lock_force_break(lock_ptr: Int) -> Bool {
+    flex preempts = mem_read_i64(lock_ptr, 64) + 1
+    flex new_token = mem_read_i64(lock_ptr, 32) + 1
+    mem_write_i64(lock_ptr, 0, 0) // UNLOCKED
+    mem_write_i64(lock_ptr, 8, 0)
+    mem_write_i64(lock_ptr, 24, 0)
+    mem_write_i64(lock_ptr, 32, new_token)
+    mem_write_i64(lock_ptr, 48, 0)
+    mem_write_i64(lock_ptr, 64, preempts)
+    deliver true
+}
+
+// Monotonic fencing verification: downstream databases/storage engines use this
+// to reject stale writes from lagging zombie workers.
+open flow dist_lock_verify_fence(lock_ptr: Int, token: Int) -> Bool {
+    flex current_token = mem_read_i64(lock_ptr, 32)
+    if token == current_token {
+        deliver true
+    }
+    deliver false
+}
+
+open flow dist_lock_acquire_count(lock_ptr: Int) -> Int {
+    deliver mem_read_i64(lock_ptr, 56)
 }
 
 open flow dist_lock_free(lock_ptr: Int) -> Int {
