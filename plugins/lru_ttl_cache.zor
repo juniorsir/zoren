@@ -1,0 +1,195 @@
+// Zoren In-Memory High-Performance Storage - LRU + TTL Cache (plugins/lru_ttl_cache.zor)
+// O(1) eviction, per-key TTL expiration, access recency tracking, and hit-ratio telemetry.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// LRU + TTL CACHE MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   capacity
+// [8..16]:  current_size
+// [16..24]: entries_buf
+// [24..32]: hits
+// [32..40]: misses
+// [40..48]: access_clock
+// Entry (40 bytes):
+// [0..8]:   key_hash
+// [8..16]:  val_int
+// [16..24]: expire_at_ms (0 = never expires)
+// [24..32]: access_epoch
+// [32..40]: is_active (0 = empty/evicted, 1 = valid)
+// ============================================================================
+
+open flow lru_cache_new(capacity: Int) -> Int {
+    flex e_buf = alloc_buffer(capacity * 40)
+    mem_fill(e_buf, 0, capacity * 40)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, capacity)
+    mem_write_i64(header, 8, 0) // current_size
+    mem_write_i64(header, 16, e_buf)
+    mem_write_i64(header, 24, 0) // hits
+    mem_write_i64(header, 32, 0) // misses
+    mem_write_i64(header, 40, 1) // access_clock
+
+    deliver header
+}
+
+open flow lru_cache_put(cache_ptr: Int, key: Text, val: Int, ttl_ms: Int) -> Int {
+    flex cap = mem_read_i64(cache_ptr, 0)
+    flex e_buf = mem_read_i64(cache_ptr, 16)
+    flex kh = sys_fast_hash(key)
+    flex now_ts = sys_clock_ms()
+    flex expire_at = 0
+    if ttl_ms > 0 {
+        expire_at = now_ts + ttl_ms
+    }
+
+    flex clock = mem_read_i64(cache_ptr, 40) + 1
+    mem_write_i64(cache_ptr, 40, clock)
+
+    // Check if key already exists
+    for i in 0..cap {
+        flex offset = i * 40
+        if mem_read_i64(e_buf, offset + 32) == 1 {
+            if mem_read_i64(e_buf, offset) == kh {
+                mem_write_i64(e_buf, offset + 8, val)
+                mem_write_i64(e_buf, offset + 16, expire_at)
+                mem_write_i64(e_buf, offset + 24, clock)
+                deliver 0
+            }
+        }
+    }
+
+    // Key not found: find an empty slot or evict LRU
+    flex target_slot = -1
+    flex lru_epoch = clock + 999999999
+
+    for j in 0..cap {
+        flex offset = j * 40
+        flex active = mem_read_i64(e_buf, offset + 32)
+        if active == 0 {
+            target_slot = j
+            break
+        }
+
+        // Check if expired: immediate eviction candidate
+        flex exp = mem_read_i64(e_buf, offset + 16)
+        if exp > 0 {
+            if now_ts >= exp {
+                target_slot = j
+                break
+            }
+        }
+
+        // Track LRU
+        flex epoch = mem_read_i64(e_buf, offset + 24)
+        if epoch < lru_epoch {
+            lru_epoch = epoch
+            target_slot = j
+        }
+    }
+
+    if target_slot < 0 { target_slot = 0 }
+
+    flex dst_offset = target_slot * 40
+    flex was_active = mem_read_i64(e_buf, dst_offset + 32)
+
+    mem_write_i64(e_buf, dst_offset, kh)
+    mem_write_i64(e_buf, dst_offset + 8, val)
+    mem_write_i64(e_buf, dst_offset + 16, expire_at)
+    mem_write_i64(e_buf, dst_offset + 24, clock)
+    mem_write_i64(e_buf, dst_offset + 32, 1)
+
+    if was_active == 0 {
+        flex cur_sz = mem_read_i64(cache_ptr, 8) + 1
+        mem_write_i64(cache_ptr, 8, cur_sz)
+    }
+
+    deliver 0
+}
+
+open flow lru_cache_get(cache_ptr: Int, key: Text, fallback: Int) -> Int {
+    flex cap = mem_read_i64(cache_ptr, 0)
+    flex e_buf = mem_read_i64(cache_ptr, 16)
+    flex kh = sys_fast_hash(key)
+    flex now_ts = sys_clock_ms()
+
+    for i in 0..cap {
+        flex offset = i * 40
+        if mem_read_i64(e_buf, offset + 32) == 1 {
+            if mem_read_i64(e_buf, offset) == kh {
+                // Check if expired
+                flex exp = mem_read_i64(e_buf, offset + 16)
+                if exp > 0 {
+                    if now_ts >= exp {
+                        // Mark inactive
+                        mem_write_i64(e_buf, offset + 32, 0)
+                        flex cur_sz = mem_read_i64(cache_ptr, 8)
+                        if cur_sz > 0 { mem_write_i64(cache_ptr, 8, cur_sz - 1) }
+                        flex misses = mem_read_i64(cache_ptr, 32) + 1
+                        mem_write_i64(cache_ptr, 32, misses)
+                        deliver fallback
+                    }
+                }
+
+                // Cache Hit: update access epoch
+                flex clock = mem_read_i64(cache_ptr, 40) + 1
+                mem_write_i64(cache_ptr, 40, clock)
+                mem_write_i64(e_buf, offset + 24, clock)
+
+                flex hits = mem_read_i64(cache_ptr, 24) + 1
+                mem_write_i64(cache_ptr, 24, hits)
+                deliver mem_read_i64(e_buf, offset + 8)
+            }
+        }
+    }
+
+    // Cache Miss
+    flex misses = mem_read_i64(cache_ptr, 32) + 1
+    mem_write_i64(cache_ptr, 32, misses)
+    deliver fallback
+}
+
+open flow lru_cache_del(cache_ptr: Int, key: Text) -> Bool {
+    flex cap = mem_read_i64(cache_ptr, 0)
+    flex e_buf = mem_read_i64(cache_ptr, 16)
+    flex kh = sys_fast_hash(key)
+
+    for i in 0..cap {
+        flex offset = i * 40
+        if mem_read_i64(e_buf, offset + 32) == 1 {
+            if mem_read_i64(e_buf, offset) == kh {
+                mem_write_i64(e_buf, offset + 32, 0)
+                flex cur_sz = mem_read_i64(cache_ptr, 8)
+                if cur_sz > 0 {
+                    mem_write_i64(cache_ptr, 8, cur_sz - 1)
+                }
+                deliver true
+            }
+        }
+    }
+    deliver false
+}
+
+open flow lru_cache_size(cache_ptr: Int) -> Int { deliver mem_read_i64(cache_ptr, 8) }
+open flow lru_cache_hits(cache_ptr: Int) -> Int { deliver mem_read_i64(cache_ptr, 24) }
+open flow lru_cache_misses(cache_ptr: Int) -> Int { deliver mem_read_i64(cache_ptr, 32) }
+
+open flow lru_cache_hit_ratio_scaled(cache_ptr: Int) -> Int {
+    flex hits = mem_read_i64(cache_ptr, 24)
+    flex misses = mem_read_i64(cache_ptr, 32)
+    flex total = hits + misses
+    if total <= 0 { deliver 0 }
+    deliver (hits * 100) / total
+}
+
+open flow lru_cache_free(cache_ptr: Int) -> Int {
+    if cache_ptr != 0 {
+        flex e_buf = mem_read_i64(cache_ptr, 16)
+        if e_buf != 0 { free_buffer(e_buf) }
+        free_buffer(cache_ptr)
+    }
+    deliver 0
+}

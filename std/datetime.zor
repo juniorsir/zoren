@@ -1,0 +1,213 @@
+// Zoren Standard Date, Time & Calendar Module (std/datetime.zor)
+// Unix epoch timestamp decomposition, leap year computation, day-of-week, and ISO-8601 formatting.
+
+bring sys
+
+// ============================================================================
+// DATETIME HEADER (56 bytes)
+// [0..8]:   year
+// [8..16]:  month (1..12)
+// [16..24]: day (1..31)
+// [24..32]: hour (0..23)
+// [32..40]: minute (0..59)
+// [40..48]: second (0..59)
+// [48..56]: millisecond (0..999)
+// ============================================================================
+
+open flow is_leap_year(year: Int) -> Bool {
+    if (year % 400) == 0 { deliver true }
+    if (year % 100) == 0 { deliver false }
+    if (year % 4) == 0 { deliver true }
+    deliver false
+}
+
+open flow days_in_month(year: Int, month: Int) -> Int {
+    if month == 2 {
+        if is_leap_year(year) { deliver 29 }
+        deliver 28
+    }
+    if month == 4 { deliver 30 }
+    if month == 6 { deliver 30 }
+    if month == 9 { deliver 30 }
+    if month == 11 { deliver 30 }
+    deliver 31
+}
+
+// Tomohiko Sakamoto's Algorithm for Day of Week
+// Returns 0 = Sunday, 1 = Monday, 2 = Tuesday, ..., 6 = Saturday
+open flow day_of_week(y: Int, m: Int, d: Int) -> Int {
+    flex year = y
+    if m < 3 {
+        year = year - 1
+    }
+
+    flex t0 = 0
+    flex t1 = 3
+    flex t2 = 2
+    flex t3 = 5
+    flex t4 = 0
+    flex t5 = 3
+    flex t6 = 5
+    flex t7 = 1
+    flex t8 = 4
+    flex t9 = 6
+    flex t10 = 2
+    flex t11 = 4
+
+    flex t_val = 0
+    if m == 1 { t_val = t0 }
+    if m == 2 { t_val = t1 }
+    if m == 3 { t_val = t2 }
+    if m == 4 { t_val = t3 }
+    if m == 5 { t_val = t4 }
+    if m == 6 { t_val = t5 }
+    if m == 7 { t_val = t6 }
+    if m == 8 { t_val = t7 }
+    if m == 9 { t_val = t8 }
+    if m == 10 { t_val = t9 }
+    if m == 11 { t_val = t10 }
+    if m == 12 { t_val = t11 }
+
+    flex res = (year + (year / 4) - (year / 100) + (year / 400) + t_val + d) % 7
+    deliver res
+}
+
+open flow pad_zero2(val: Int) -> Text {
+    flex s = int_to_str(val)
+    if val < 10 {
+        deliver str_concat("0", s)
+    }
+    deliver s
+}
+
+open flow pad_zero4(val: Int) -> Text {
+    flex s = int_to_str(val)
+    if val < 10 { deliver str_concat("000", s) }
+    if val < 100 { deliver str_concat("00", s) }
+    if val < 1000 { deliver str_concat("0", s) }
+    deliver s
+}
+
+open flow datetime_from_epoch_ms(epoch_ms: Int) -> Int {
+    flex total_sec = epoch_ms / 1000
+    flex ms = epoch_ms % 1000
+
+    flex sec_in_day = total_sec % 86400
+    flex days = total_sec / 86400
+
+    flex hour = sec_in_day / 3600
+    flex minute = (sec_in_day % 3600) / 60
+    flex second = sec_in_day % 60
+
+    // Epoch starts at 1970-01-01
+    flex y = 1970
+    for step in 1970..2100 {
+        flex days_in_y = 365
+        if is_leap_year(y) {
+            days_in_y = 366
+        }
+        if days >= days_in_y {
+            days = days - days_in_y
+            y = y + 1
+        }
+    }
+
+    flex m = 1
+    flex m_done = false
+    for step in 1..13 {
+        if m_done != true {
+            flex dim = days_in_month(y, m)
+            if days >= dim {
+                days = days - dim
+                m = m + 1
+            } else {
+                m_done = true
+            }
+        }
+    }
+    flex d = days + 1
+
+    flex header = alloc_buffer(56)
+    mem_write_i64(header, 0, y)
+    mem_write_i64(header, 8, m)
+    mem_write_i64(header, 16, d)
+    mem_write_i64(header, 24, hour)
+    mem_write_i64(header, 32, minute)
+    mem_write_i64(header, 40, second)
+    mem_write_i64(header, 48, ms)
+    deliver header
+}
+
+open flow datetime_now_utc() -> Int {
+    flex now_ms = sys_clock_ms()
+    deliver datetime_from_epoch_ms(now_ms)
+}
+
+open flow datetime_year(dt: Int) -> Int { deliver mem_read_i64(dt, 0) }
+open flow datetime_month(dt: Int) -> Int { deliver mem_read_i64(dt, 8) }
+open flow datetime_day(dt: Int) -> Int { deliver mem_read_i64(dt, 16) }
+open flow datetime_hour(dt: Int) -> Int { deliver mem_read_i64(dt, 24) }
+open flow datetime_minute(dt: Int) -> Int { deliver mem_read_i64(dt, 32) }
+open flow datetime_second(dt: Int) -> Int { deliver mem_read_i64(dt, 40) }
+open flow datetime_ms(dt: Int) -> Int { deliver mem_read_i64(dt, 48) }
+
+open flow datetime_format_date(y: Int, m: Int, d: Int) -> Text {
+    flex sy = pad_zero4(y)
+    flex sm = pad_zero2(m)
+    flex sd = pad_zero2(d)
+    flex res = str_concat(sy, "-")
+    res = str_concat(res, sm)
+    res = str_concat(res, "-")
+    deliver str_concat(res, sd)
+}
+
+open flow datetime_format_iso(dt: Int) -> Text {
+    flex y = mem_read_i64(dt, 0)
+    flex m = mem_read_i64(dt, 8)
+    flex d = mem_read_i64(dt, 16)
+    flex h = mem_read_i64(dt, 24)
+    flex min = mem_read_i64(dt, 32)
+    flex s = mem_read_i64(dt, 40)
+
+    flex date_str = datetime_format_date(y, m, d)
+    flex time_str = pad_zero2(h)
+    time_str = str_concat(time_str, ":")
+    time_str = str_concat(time_str, pad_zero2(min))
+    time_str = str_concat(time_str, ":")
+    time_str = str_concat(time_str, pad_zero2(s))
+
+    flex res = str_concat(date_str, "T")
+    res = str_concat(res, time_str)
+    deliver str_concat(res, "Z")
+}
+
+open flow datetime_format_duration(ms: Int) -> Text {
+    if ms < 1000 {
+        deliver str_concat(int_to_str(ms), "ms")
+    }
+    flex total_sec = ms / 1000
+    if total_sec < 60 {
+        deliver str_concat(int_to_str(total_sec), "s")
+    }
+    flex minutes = total_sec / 60
+    flex sec = total_sec % 60
+    if minutes < 60 {
+        flex r = str_concat(int_to_str(minutes), "m ")
+        r = str_concat(r, int_to_str(sec))
+        deliver str_concat(r, "s")
+    }
+    flex hours = minutes / 60
+    flex min_rem = minutes % 60
+    flex r = str_concat(int_to_str(hours), "h ")
+    r = str_concat(r, int_to_str(min_rem))
+    r = str_concat(r, "m ")
+    r = str_concat(r, int_to_str(sec))
+    deliver str_concat(r, "s")
+}
+
+open flow datetime_free(dt: Int) -> Int {
+    if dt != 0 {
+        free_buffer(dt)
+    }
+    deliver 0
+}

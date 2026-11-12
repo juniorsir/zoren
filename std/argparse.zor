@@ -1,0 +1,217 @@
+// Zoren Standard Command-Line Argument Parser Module (std/argparse.zor)
+// Production CLI option parsing, boolean flags, key-value options, and positional parameters.
+
+bring sys
+bring crypto
+bring pattern
+
+// ============================================================================
+// ARGPARSER MEMORY LAYOUT (32 bytes)
+// [0..8]:   token_count
+// [8..16]:  max_tokens
+// [16..24]: tokens_buf (entry 16 bytes: [start_pos: i64, len: i64])
+// [24..32]: reserved
+// ============================================================================
+
+open flow arg_parser_new(max_tokens: Int) -> Int {
+    flex t_buf = alloc_buffer(max_tokens * 16)
+    mem_fill(t_buf, 0, max_tokens * 16)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0)
+    mem_write_i64(header, 8, max_tokens)
+    mem_write_i64(header, 16, t_buf)
+    mem_write_i64(header, 24, 0)
+
+    deliver header
+}
+
+// Tokenizes command-line string into tokens buffer (handles spaces)
+open flow arg_parser_feed(parser: Int, cli_str: Text) -> Int {
+    flex s_len = length(cli_str)
+    if s_len == 0 { deliver 0 }
+
+    flex max_t = mem_read_i64(parser, 8)
+    flex t_buf = mem_read_i64(parser, 16)
+    flex token_idx = 0
+    flex in_token = false
+    flex t_start = 0
+
+    for i in 0..s_len {
+        flex ch = str_slice(cli_str, i, 1)
+        flex is_space = constant_time_compare(ch, " ")
+
+        if is_space {
+            if in_token {
+                if token_idx < max_t {
+                    flex offset = token_idx * 16
+                    mem_write_i64(t_buf, offset, t_start)
+                    mem_write_i64(t_buf, offset + 8, i - t_start)
+                    token_idx = token_idx + 1
+                }
+                in_token = false
+            }
+        } else {
+            if in_token != true {
+                in_token = true
+                t_start = i
+            }
+        }
+    }
+
+    if in_token {
+        if token_idx < max_t {
+            flex offset = token_idx * 16
+            mem_write_i64(t_buf, offset, t_start)
+            mem_write_i64(t_buf, offset + 8, s_len - t_start)
+            token_idx = token_idx + 1
+        }
+    }
+
+    mem_write_i64(parser, 0, token_idx)
+    deliver token_idx
+}
+
+open flow arg_token_at(parser: Int, cli_str: Text, index: Int) -> Text {
+    flex count = mem_read_i64(parser, 0)
+    if index >= count { deliver "" }
+
+    flex t_buf = mem_read_i64(parser, 16)
+    flex offset = index * 16
+    flex start = mem_read_i64(t_buf, offset)
+    flex clen = mem_read_i64(t_buf, offset + 8)
+    if clen <= 0 { deliver "" }
+    deliver str_slice(cli_str, start, clen)
+}
+
+open flow arg_has_flag(parser: Int, cli_str: Text, flag: Text) -> Bool {
+    flex count = mem_read_i64(parser, 0)
+    for i in 0..count {
+        flex tok = arg_token_at(parser, cli_str, i)
+        if constant_time_compare(tok, flag) {
+            deliver true
+        }
+    }
+    deliver false
+}
+
+// Searches for --opt=val or --opt val
+open flow arg_get_str(parser: Int, cli_str: Text, opt_name: Text, default_val: Text) -> Text {
+    flex count = mem_read_i64(parser, 0)
+    flex eq_needle = str_concat(opt_name, "=")
+
+    for i in 0..count {
+        flex tok = arg_token_at(parser, cli_str, i)
+
+        // Check format: --key=value
+        if pattern_starts_with(tok, eq_needle) {
+            flex n_len = length(eq_needle)
+            flex t_len = length(tok)
+            if t_len > n_len {
+                deliver str_slice(tok, n_len, t_len - n_len)
+            }
+            deliver ""
+        }
+
+        // Check format: --key value (space separated)
+        if constant_time_compare(tok, opt_name) {
+            if (i + 1) < count {
+                flex next_tok = arg_token_at(parser, cli_str, i + 1)
+                // If next_tok is not a flag, it is the value
+                if pattern_starts_with(next_tok, "-") != true {
+                    deliver next_tok
+                }
+            }
+        }
+    }
+    deliver default_val
+}
+
+open flow arg_get_int(parser: Int, cli_str: Text, opt_name: Text, default_val: Int) -> Int {
+    flex str_val = arg_get_str(parser, cli_str, opt_name, "")
+    if length(str_val) == 0 { deliver default_val }
+
+    flex res = 0
+    flex is_neg = false
+    flex start = 0
+    if pattern_starts_with(str_val, "-") {
+        is_neg = true
+        start = 1
+    }
+
+    flex v_len = length(str_val)
+    for i in start..v_len {
+        flex ch = str_slice(str_val, i, 1)
+        flex digit = 0
+        if constant_time_compare(ch, "1") { digit = 1 }
+        if constant_time_compare(ch, "2") { digit = 2 }
+        if constant_time_compare(ch, "3") { digit = 3 }
+        if constant_time_compare(ch, "4") { digit = 4 }
+        if constant_time_compare(ch, "5") { digit = 5 }
+        if constant_time_compare(ch, "6") { digit = 6 }
+        if constant_time_compare(ch, "7") { digit = 7 }
+        if constant_time_compare(ch, "8") { digit = 8 }
+        if constant_time_compare(ch, "9") { digit = 9 }
+        res = (res * 10) + digit
+    }
+    if is_neg { deliver 0 - res }
+    deliver res
+}
+
+open flow arg_get_bool(parser: Int, cli_str: Text, opt_name: Text, default_val: Bool) -> Bool {
+    if arg_has_flag(parser, cli_str, opt_name) {
+        deliver true
+    }
+    flex v = arg_get_str(parser, cli_str, opt_name, "")
+    if length(v) == 0 { deliver default_val }
+    flex v_low = str_lower(v)
+    if constant_time_compare(v_low, "true") { deliver true }
+    if constant_time_compare(v_low, "1") { deliver true }
+    if constant_time_compare(v_low, "yes") { deliver true }
+    if constant_time_compare(v_low, "false") { deliver false }
+    if constant_time_compare(v_low, "0") { deliver false }
+    if constant_time_compare(v_low, "no") { deliver false }
+    deliver default_val
+}
+
+// Returns the N-th positional argument (ignoring options and flags starting with -)
+open flow arg_positional(parser: Int, cli_str: Text, target_idx: Int) -> Text {
+    flex count = mem_read_i64(parser, 0)
+    flex pos_count = 0
+
+    flex i = 0
+    for step in 0..count {
+        if i >= count { break }
+        flex tok = arg_token_at(parser, cli_str, i)
+
+        if pattern_starts_with(tok, "-") {
+            // If it's an option without '=', skip the next token if it's the option's value
+            if pattern_contains(tok, "=") != true {
+                if (i + 1) < count {
+                    flex next_tok = arg_token_at(parser, cli_str, i + 1)
+                    if pattern_starts_with(next_tok, "-") != true {
+                        i = i + 2
+                        continue
+                    }
+                }
+            }
+            i = i + 1
+        } else {
+            if pos_count == target_idx {
+                deliver tok
+            }
+            pos_count = pos_count + 1
+            i = i + 1
+        }
+    }
+    deliver ""
+}
+
+open flow arg_parser_free(parser: Int) -> Int {
+    if parser != 0 {
+        flex t_buf = mem_read_i64(parser, 16)
+        if t_buf != 0 { free_buffer(t_buf) }
+        free_buffer(parser)
+    }
+    deliver 0
+}

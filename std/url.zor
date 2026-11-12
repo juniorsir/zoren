@@ -1,0 +1,241 @@
+// Zoren Standard URL & Query Parameter Parser (std/url.zor)
+// RFC 3986 URI parsing, query parameter extraction, and percent encoding/decoding.
+
+bring sys
+bring crypto
+bring pattern
+
+open flow url_scheme(url: Text) -> Text {
+    flex colon_slash = pattern_find_index(url, "://")
+    if colon_slash <= 0 {
+        deliver ""
+    }
+    deliver str_slice(url, 0, colon_slash)
+}
+
+open flow url_strip_scheme(url: Text) -> Text {
+    flex colon_slash = pattern_find_index(url, "://")
+    if colon_slash <= 0 { deliver url }
+    flex start = colon_slash + 3
+    flex u_len = length(url)
+    if start >= u_len { deliver "" }
+    deliver str_slice(url, start, u_len - start)
+}
+
+open flow url_host(url: Text) -> Text {
+    flex rest = url_strip_scheme(url)
+    flex r_len = length(rest)
+    if r_len == 0 { deliver "" }
+
+    flex end_pos = r_len
+    for i in 0..r_len {
+        flex ch = str_slice(rest, i, 1)
+        if constant_time_compare(ch, "/") {
+            end_pos = i
+            break
+        } else {
+            if constant_time_compare(ch, ":") {
+                end_pos = i
+                break
+            } else {
+                if constant_time_compare(ch, "?") {
+                    end_pos = i
+                    break
+                }
+            }
+        }
+    }
+    deliver str_slice(rest, 0, end_pos)
+}
+
+open flow url_port(url: Text) -> Int {
+    flex scheme = url_scheme(url)
+    flex default_port = 80
+    if constant_time_compare(scheme, "https") { default_port = 443 }
+    if constant_time_compare(scheme, "wss") { default_port = 443 }
+
+    flex rest = url_strip_scheme(url)
+    flex r_len = length(rest)
+    flex colon_idx = -1
+    flex slash_idx = r_len
+
+    for i in 0..r_len {
+        flex ch = str_slice(rest, i, 1)
+        if constant_time_compare(ch, "/") {
+            slash_idx = i
+            break
+        } else {
+            if constant_time_compare(ch, ":") {
+                colon_idx = i
+            }
+        }
+    }
+
+    if colon_idx < 0 {
+        deliver default_port
+    }
+
+    flex port_len = slash_idx - (colon_idx + 1)
+    if port_len <= 0 { deliver default_port }
+
+    flex port_str = str_slice(rest, colon_idx + 1, port_len)
+    flex p_res = 0
+    for j in 0..port_len {
+        flex d_ch = str_slice(port_str, j, 1)
+        flex digit = 0
+        if constant_time_compare(d_ch, "1") { digit = 1 }
+        if constant_time_compare(d_ch, "2") { digit = 2 }
+        if constant_time_compare(d_ch, "3") { digit = 3 }
+        if constant_time_compare(d_ch, "4") { digit = 4 }
+        if constant_time_compare(d_ch, "5") { digit = 5 }
+        if constant_time_compare(d_ch, "6") { digit = 6 }
+        if constant_time_compare(d_ch, "7") { digit = 7 }
+        if constant_time_compare(d_ch, "8") { digit = 8 }
+        if constant_time_compare(d_ch, "9") { digit = 9 }
+        p_res = (p_res * 10) + digit
+    }
+    if p_res == 0 { deliver default_port }
+    deliver p_res
+}
+
+open flow url_path(url: Text) -> Text {
+    flex rest = url_strip_scheme(url)
+    flex r_len = length(rest)
+    flex slash_idx = -1
+
+    for i in 0..r_len {
+        flex ch = str_slice(rest, i, 1)
+        if constant_time_compare(ch, "/") {
+            slash_idx = i
+            break
+        }
+    }
+
+    if slash_idx < 0 { deliver "/" }
+
+    flex q_idx = r_len
+    for j in slash_idx..r_len {
+        flex ch = str_slice(rest, j, 1)
+        if constant_time_compare(ch, "?") {
+            q_idx = j
+            break
+        } else {
+            if constant_time_compare(ch, "#") {
+                q_idx = j
+                break
+            }
+        }
+    }
+    deliver str_slice(rest, slash_idx, q_idx - slash_idx)
+}
+
+open flow url_query(url: Text) -> Text {
+    flex q_idx = pattern_find_index(url, "?")
+    if q_idx < 0 { deliver "" }
+
+    flex u_len = length(url)
+    flex start = q_idx + 1
+    flex end_pos = u_len
+
+    flex hash_idx = pattern_find_index(url, "#")
+    if hash_idx > start {
+        end_pos = hash_idx
+    }
+
+    deliver str_slice(url, start, end_pos - start)
+}
+
+open flow url_fragment(url: Text) -> Text {
+    flex hash_idx = pattern_find_index(url, "#")
+    if hash_idx < 0 { deliver "" }
+    flex u_len = length(url)
+    flex start = hash_idx + 1
+    if start >= u_len { deliver "" }
+    deliver str_slice(url, start, u_len - start)
+}
+
+// Extracts value for given key from query string, e.g. "page" from "q=test&page=2&sort=asc"
+open flow url_get_param(query: Text, key: Text) -> Text {
+    flex q_len = length(query)
+    flex k_len = length(key)
+    if q_len == 0 { deliver "" }
+    if k_len == 0 { deliver "" }
+
+    flex needle = str_concat(key, "=")
+    flex n_len = length(needle)
+
+    // Check if query starts with key=
+    if pattern_starts_with(query, needle) {
+        flex val_start = n_len
+        flex val_end = q_len
+        for i in val_start..q_len {
+            if constant_time_compare(str_slice(query, i, 1), "&") {
+                val_end = i
+                break
+            }
+        }
+        deliver str_slice(query, val_start, val_end - val_start)
+    }
+
+    // Check if query contains &key=
+    flex ampersand_needle = str_concat("&", needle)
+    flex idx = pattern_find_index(query, ampersand_needle)
+    if idx >= 0 {
+        flex val_start = idx + length(ampersand_needle)
+        flex val_end = q_len
+        for j in val_start..q_len {
+            if constant_time_compare(str_slice(query, j, 1), "&") {
+                val_end = j
+                break
+            }
+        }
+        deliver str_slice(query, val_start, val_end - val_start)
+    }
+
+    deliver ""
+}
+
+open flow url_hex_to_char(hex: Text) -> Text {
+    if constant_time_compare(hex, "20") { deliver " " }
+    if constant_time_compare(hex, "2F") { deliver "/" }
+    if constant_time_compare(hex, "2f") { deliver "/" }
+    if constant_time_compare(hex, "3A") { deliver ":" }
+    if constant_time_compare(hex, "3a") { deliver ":" }
+    if constant_time_compare(hex, "3D") { deliver "=" }
+    if constant_time_compare(hex, "3d") { deliver "=" }
+    if constant_time_compare(hex, "26") { deliver "&" }
+    if constant_time_compare(hex, "3F") { deliver "?" }
+    if constant_time_compare(hex, "3f") { deliver "?" }
+    deliver ""
+}
+
+// URL percent decoding (%20 -> space, etc.)
+open flow url_decode(s: Text) -> Text {
+    flex s_len = length(s)
+    if pattern_contains(s, "%") != true {
+        deliver s
+    }
+
+    flex res = ""
+    flex i = 0
+    for step in 0..s_len {
+        if i >= s_len { break }
+        flex ch = str_slice(s, i, 1)
+
+        if constant_time_compare(ch, "%") {
+            if (i + 2) < s_len {
+                flex hex = str_slice(s, i + 1, 2)
+                flex decoded_char = url_hex_to_char(hex)
+                if length(decoded_char) > 0 {
+                    res = str_concat(res, decoded_char)
+                    i = i + 3
+                    continue
+                }
+            }
+        }
+
+        res = str_concat(res, ch)
+        i = i + 1
+    }
+    deliver res
+}

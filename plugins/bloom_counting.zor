@@ -1,0 +1,124 @@
+// Zoren High-Performance Data Structures - Counting Bloom Filter (plugins/bloom_counting.zor)
+// Probabilistic set supporting insertions, deletions, zero false negatives, and frequency estimation.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// COUNTING BLOOM FILTER MEMORY LAYOUT (32 bytes)
+// [0..8]:   slot_count
+// [8..16]:  num_hashes (k)
+// [16..24]: item_count
+// [24..32]: counters_buf (slot_count bytes, each byte 0..255 saturating counter)
+// ============================================================================
+
+open flow cbf_new(slot_count: Int, num_hashes: Int) -> Int {
+    flex c_buf = alloc_buffer(slot_count)
+    mem_fill(c_buf, 0, slot_count)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, slot_count)
+    mem_write_i64(header, 8, num_hashes)
+    mem_write_i64(header, 16, 0) // item_count
+    mem_write_i64(header, 24, c_buf)
+
+    deliver header
+}
+
+// Kirsch-Mitzenmacher hash generation: g_i(x) = (h1 + i * h2) % slots
+open flow cbf_hash_slot(key: Text, index: Int, slots: Int) -> Int {
+    flex h1 = sys_fast_hash(key)
+    flex h2 = (h1 * 2654435761) + 1013904223
+    flex combined = h1 + (index * h2)
+    if combined < 0 {
+        combined = 0 - combined
+    }
+    deliver combined % slots
+}
+
+open flow cbf_add(cbf_ptr: Int, key: Text) -> Int {
+    flex slots = mem_read_i64(cbf_ptr, 0)
+    flex k = mem_read_i64(cbf_ptr, 8)
+    flex c_buf = mem_read_i64(cbf_ptr, 24)
+
+    for i in 0..k {
+        flex slot = cbf_hash_slot(key, i, slots)
+        flex count = mem_read_byte(c_buf, slot)
+        if count < 255 {
+            mem_write_byte(c_buf, slot, count + 1)
+        }
+    }
+
+    flex items = mem_read_i64(cbf_ptr, 16) + 1
+    mem_write_i64(cbf_ptr, 16, items)
+    deliver items
+}
+
+open flow cbf_contains(cbf_ptr: Int, key: Text) -> Bool {
+    flex slots = mem_read_i64(cbf_ptr, 0)
+    flex k = mem_read_i64(cbf_ptr, 8)
+    flex c_buf = mem_read_i64(cbf_ptr, 24)
+
+    for i in 0..k {
+        flex slot = cbf_hash_slot(key, i, slots)
+        flex count = mem_read_byte(c_buf, slot)
+        if count == 0 {
+            deliver false // Definitely not present
+        }
+    }
+    deliver true
+}
+
+open flow cbf_estimate_frequency(cbf_ptr: Int, key: Text) -> Int {
+    flex slots = mem_read_i64(cbf_ptr, 0)
+    flex k = mem_read_i64(cbf_ptr, 8)
+    flex c_buf = mem_read_i64(cbf_ptr, 24)
+
+    flex min_count = 255
+    for i in 0..k {
+        flex slot = cbf_hash_slot(key, i, slots)
+        flex count = mem_read_byte(c_buf, slot)
+        if count < min_count {
+            min_count = count
+        }
+    }
+    deliver min_count
+}
+
+// Safely removes an item by decrementing its k counters
+open flow cbf_remove(cbf_ptr: Int, key: Text) -> Bool {
+    if cbf_contains(cbf_ptr, key) != true {
+        deliver false
+    }
+
+    flex slots = mem_read_i64(cbf_ptr, 0)
+    flex k = mem_read_i64(cbf_ptr, 8)
+    flex c_buf = mem_read_i64(cbf_ptr, 24)
+
+    for i in 0..k {
+        flex slot = cbf_hash_slot(key, i, slots)
+        flex count = mem_read_byte(c_buf, slot)
+        if count > 0 {
+            mem_write_byte(c_buf, slot, count - 1)
+        }
+    }
+
+    flex items = mem_read_i64(cbf_ptr, 16)
+    if items > 0 {
+        mem_write_i64(cbf_ptr, 16, items - 1)
+    }
+    deliver true
+}
+
+open flow cbf_count(cbf_ptr: Int) -> Int {
+    deliver mem_read_i64(cbf_ptr, 16)
+}
+
+open flow cbf_free(cbf_ptr: Int) -> Int {
+    if cbf_ptr != 0 {
+        flex c_buf = mem_read_i64(cbf_ptr, 24)
+        if c_buf != 0 { free_buffer(c_buf) }
+        free_buffer(cbf_ptr)
+    }
+    deliver 0
+}

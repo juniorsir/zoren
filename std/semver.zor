@@ -1,0 +1,241 @@
+// Zoren Standard Semantic Versioning Module (std/semver.zor)
+// SemVer 2.0.0 specification compliant parser, comparator, version bumping, and range satisfaction.
+
+bring sys
+bring crypto
+bring pattern
+
+// ============================================================================
+// SEMVER MEMORY LAYOUT (48 bytes)
+// [0..8]:   major
+// [8..16]:  minor
+// [16..24]: patch
+// [24..32]: is_pre (0 = release, 1 = pre-release)
+// [32..40]: pre_hash (fast_hash of pre-release tag)
+// [40..48]: reserved
+// ============================================================================
+
+open flow semver_new(major: Int, minor: Int, patch: Int) -> Int {
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, major)
+    mem_write_i64(header, 8, minor)
+    mem_write_i64(header, 16, patch)
+    mem_write_i64(header, 24, 0)
+    mem_write_i64(header, 32, 0)
+    mem_write_i64(header, 40, 0)
+    deliver header
+}
+
+open flow semver_major(semver_ptr: Int) -> Int { deliver mem_read_i64(semver_ptr, 0) }
+open flow semver_minor(semver_ptr: Int) -> Int { deliver mem_read_i64(semver_ptr, 8) }
+open flow semver_patch(semver_ptr: Int) -> Int { deliver mem_read_i64(semver_ptr, 16) }
+open flow semver_is_prerelease(semver_ptr: Int) -> Bool { deliver mem_read_i64(semver_ptr, 24) == 1 }
+
+open flow parse_int_segment(s: Text, start: Int, len: Int) -> Int {
+    if len <= 0 { deliver 0 }
+    flex res = 0
+    for i in 0..len {
+        flex ch = str_slice(s, start + i, 1)
+        flex digit = 0
+        if constant_time_compare(ch, "1") { digit = 1 }
+        if constant_time_compare(ch, "2") { digit = 2 }
+        if constant_time_compare(ch, "3") { digit = 3 }
+        if constant_time_compare(ch, "4") { digit = 4 }
+        if constant_time_compare(ch, "5") { digit = 5 }
+        if constant_time_compare(ch, "6") { digit = 6 }
+        if constant_time_compare(ch, "7") { digit = 7 }
+        if constant_time_compare(ch, "8") { digit = 8 }
+        if constant_time_compare(ch, "9") { digit = 9 }
+        res = (res * 10) + digit
+    }
+    deliver res
+}
+
+open flow semver_parse(version_str: Text) -> Int {
+    flex s = str_trim(version_str)
+    flex s_len = length(s)
+    if s_len == 0 { deliver semver_new(0, 0, 0) }
+
+    // Strip leading 'v' or 'V' if present
+    flex offset = 0
+    flex first_ch = str_slice(s, 0, 1)
+    if constant_time_compare(first_ch, "v") {
+        offset = 1
+    } else {
+        if constant_time_compare(first_ch, "V") {
+            offset = 1
+        }
+    }
+
+    flex dot1 = -1
+    flex dot2 = -1
+    flex dash = -1
+
+    for i in offset..s_len {
+        flex ch = str_slice(s, i, 1)
+        if constant_time_compare(ch, ".") {
+            if dot1 < 0 {
+                dot1 = i
+            } else {
+                if dot2 < 0 {
+                    dot2 = i
+                }
+            }
+        } else {
+            if constant_time_compare(ch, "-") {
+                if dash < 0 {
+                    dash = i
+                }
+            }
+        }
+    }
+
+    if dot1 < 0 { deliver semver_new(0, 0, 0) }
+
+    flex maj = parse_int_segment(s, offset, dot1 - offset)
+    flex min = 0
+    flex pat = 0
+    flex is_pre = 0
+    flex pre_h = 0
+
+    if dot2 >= 0 {
+        min = parse_int_segment(s, dot1 + 1, dot2 - (dot1 + 1))
+        if dash >= 0 {
+            pat = parse_int_segment(s, dot2 + 1, dash - (dot2 + 1))
+            is_pre = 1
+            flex pre_str = str_slice(s, dash + 1, s_len - (dash + 1))
+            pre_h = sys_fast_hash(pre_str)
+        } else {
+            pat = parse_int_segment(s, dot2 + 1, s_len - (dot2 + 1))
+        }
+    } else {
+        if dash >= 0 {
+            min = parse_int_segment(s, dot1 + 1, dash - (dot1 + 1))
+            is_pre = 1
+        } else {
+            min = parse_int_segment(s, dot1 + 1, s_len - (dot1 + 1))
+        }
+    }
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, maj)
+    mem_write_i64(header, 8, min)
+    mem_write_i64(header, 16, pat)
+    mem_write_i64(header, 24, is_pre)
+    mem_write_i64(header, 32, pre_h)
+    mem_write_i64(header, 40, 0)
+    deliver header
+}
+
+open flow semver_format(semver_ptr: Int) -> Text {
+    flex maj = int_to_str(mem_read_i64(semver_ptr, 0))
+    flex min = int_to_str(mem_read_i64(semver_ptr, 8))
+    flex pat = int_to_str(mem_read_i64(semver_ptr, 16))
+    flex res = str_concat(maj, ".")
+    res = str_concat(res, min)
+    res = str_concat(res, ".")
+    deliver str_concat(res, pat)
+}
+
+// Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
+open flow semver_compare(v1: Int, v2: Int) -> Int {
+    flex maj1 = mem_read_i64(v1, 0)
+    flex maj2 = mem_read_i64(v2, 0)
+    if maj1 < maj2 { deliver -1 }
+    if maj1 > maj2 { deliver 1 }
+
+    flex min1 = mem_read_i64(v1, 8)
+    flex min2 = mem_read_i64(v2, 8)
+    if min1 < min2 { deliver -1 }
+    if min1 > min2 { deliver 1 }
+
+    flex pat1 = mem_read_i64(v1, 16)
+    flex pat2 = mem_read_i64(v2, 16)
+    if pat1 < pat2 { deliver -1 }
+    if pat1 > pat2 { deliver 1 }
+
+    // Prerelease comparison: release has higher precedence than prerelease
+    flex pre1 = mem_read_i64(v1, 24)
+    flex pre2 = mem_read_i64(v2, 24)
+    if pre1 == 1 {
+        if pre2 == 0 { deliver -1 }
+    }
+    if pre1 == 0 {
+        if pre2 == 1 { deliver 1 }
+    }
+
+    deliver 0
+}
+
+open flow semver_bump_major(semver_ptr: Int) -> Int {
+    flex maj = mem_read_i64(semver_ptr, 0) + 1
+    mem_write_i64(semver_ptr, 0, maj)
+    mem_write_i64(semver_ptr, 8, 0)
+    mem_write_i64(semver_ptr, 16, 0)
+    mem_write_i64(semver_ptr, 24, 0)
+    deliver 0
+}
+
+open flow semver_bump_minor(semver_ptr: Int) -> Int {
+    flex min = mem_read_i64(semver_ptr, 8) + 1
+    mem_write_i64(semver_ptr, 8, min)
+    mem_write_i64(semver_ptr, 16, 0)
+    mem_write_i64(semver_ptr, 24, 0)
+    deliver 0
+}
+
+open flow semver_bump_patch(semver_ptr: Int) -> Int {
+    flex pat = mem_read_i64(semver_ptr, 16) + 1
+    mem_write_i64(semver_ptr, 16, pat)
+    mem_write_i64(semver_ptr, 24, 0)
+    deliver 0
+}
+
+// Caret constraint (^): allows version >= required and < next breaking version
+open flow semver_satisfies_caret(version: Int, required: Int) -> Bool {
+    flex cmp = semver_compare(version, required)
+    if cmp < 0 { deliver false }
+
+    flex r_maj = mem_read_i64(required, 0)
+    flex v_maj = mem_read_i64(version, 0)
+
+    if r_maj > 0 {
+        deliver v_maj == r_maj
+    }
+
+    // 0.x.x breaking changes happen on minor
+    flex r_min = mem_read_i64(required, 8)
+    flex v_min = mem_read_i64(version, 8)
+    if r_min > 0 {
+        if v_maj != 0 { deliver false }
+        deliver v_min == r_min
+    }
+
+    // 0.0.x breaking changes happen on patch
+    flex r_pat = mem_read_i64(required, 16)
+    flex v_pat = mem_read_i64(version, 16)
+    if v_maj != 0 { deliver false }
+    if v_min != 0 { deliver false }
+    deliver v_pat == r_pat
+}
+
+// Tilde constraint (~): allows version >= required and < next minor version
+open flow semver_satisfies_tilde(version: Int, required: Int) -> Bool {
+    flex cmp = semver_compare(version, required)
+    if cmp < 0 { deliver false }
+
+    flex r_maj = mem_read_i64(required, 0)
+    flex v_maj = mem_read_i64(version, 0)
+    if v_maj != r_maj { deliver false }
+
+    flex r_min = mem_read_i64(required, 8)
+    flex v_min = mem_read_i64(version, 8)
+    deliver v_min == r_min
+}
+
+open flow semver_free(semver_ptr: Int) -> Int {
+    if semver_ptr != 0 {
+        free_buffer(semver_ptr)
+    }
+    deliver 0
+}
