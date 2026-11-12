@@ -1,0 +1,160 @@
+// Zoren Standard Compression & Encoding Primitives (std/compress.zor)
+// Protocol Buffers / SQLite LEB128 Varint, Zigzag signed integer mapping, RLE, and Delta encoding.
+
+bring sys
+
+// ============================================================================
+// VARINT (LEB128) & ZIGZAG ENCODING
+// ============================================================================
+
+// ZigZag encoding maps signed integers to positive unsigned integers:
+// 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, 2 -> 4 ...
+open flow zigzag_encode_i64(val: Int) -> Int {
+    if val >= 0 {
+        deliver val * 2
+    }
+    deliver ((0 - val) * 2) - 1
+}
+
+open flow zigzag_decode_i64(val: Int) -> Int {
+    if (val % 2) == 0 {
+        deliver val / 2
+    }
+    deliver 0 - ((val + 1) / 2)
+}
+
+// Encodes integer using variable-length LEB128 (1 to 10 bytes).
+// Writes raw bytes into out_buf at byte offset.
+// Returns the count of bytes written.
+open flow varint_encode_u64(val: Int, out_buf: Int, offset: Int) -> Int {
+    flex v = val
+    flex written = 0
+
+    for i in 0..10 {
+        flex byte_val = v % 128
+        v = v / 128
+        if v != 0 {
+            byte_val = byte_val + 128 // Set continuation bit (MSB)
+            mem_write_byte(out_buf, offset + written, byte_val)
+            written = written + 1
+        } else {
+            mem_write_byte(out_buf, offset + written, byte_val)
+            written = written + 1
+            break
+        }
+    }
+    deliver written
+}
+
+// Decodes variable-length LEB128 from in_buf at byte offset.
+// Returns decoded value, and writes count of bytes consumed to bytes_read_ptr.
+open flow varint_decode_u64(in_buf: Int, offset: Int, bytes_read_ptr: Int) -> Int {
+    flex res = 0
+    flex mult = 1
+    flex read_count = 0
+
+    for i in 0..10 {
+        flex b = mem_read_byte(in_buf, offset + i)
+        read_count = read_count + 1
+        res = res + ((b % 128) * mult)
+        mult = mult * 128
+
+        if b < 128 {
+            break
+        }
+    }
+
+    if bytes_read_ptr != 0 {
+        mem_write_i64(bytes_read_ptr, 0, read_count)
+    }
+    deliver res
+}
+
+// ============================================================================
+// RUN-LENGTH ENCODING (RLE)
+// Format: sequence of [count: u8, byte_val: u8]
+// ============================================================================
+
+open flow rle_encode(in_buf: Int, in_len: Int, out_buf: Int) -> Int {
+    if in_len <= 0 { deliver 0 }
+
+    flex out_pos = 0
+    flex cur_byte = mem_read_byte(in_buf, 0)
+    flex run_len = 1
+
+    for i in 1..in_len {
+        flex b = mem_read_byte(in_buf, i)
+        if b == cur_byte {
+            if run_len < 255 {
+                run_len = run_len + 1
+            } else {
+                mem_write_byte(out_buf, out_pos, run_len)
+                mem_write_byte(out_buf, out_pos + 1, cur_byte)
+                out_pos = out_pos + 2
+                run_len = 1
+            }
+        } else {
+            mem_write_byte(out_buf, out_pos, run_len)
+            mem_write_byte(out_buf, out_pos + 1, cur_byte)
+            out_pos = out_pos + 2
+            cur_byte = b
+            run_len = 1
+        }
+    }
+
+    mem_write_byte(out_buf, out_pos, run_len)
+    mem_write_byte(out_buf, out_pos + 1, cur_byte)
+    out_pos = out_pos + 2
+
+    deliver out_pos
+}
+
+open flow rle_decode(in_buf: Int, in_len: Int, out_buf: Int) -> Int {
+    if in_len <= 0 { deliver 0 }
+
+    flex out_pos = 0
+    flex pairs = in_len / 2
+
+    for i in 0..pairs {
+        flex count = mem_read_byte(in_buf, i * 2)
+        flex val = mem_read_byte(in_buf, (i * 2) + 1)
+
+        for j in 0..count {
+            mem_write_byte(out_buf, out_pos, val)
+            out_pos = out_pos + 1
+        }
+    }
+    deliver out_pos
+}
+
+// ============================================================================
+// DELTA ENCODING FOR NUMERIC ARRAYS
+// ============================================================================
+
+open flow delta_encode_i64(arr_buf: Int, count: Int, out_buf: Int) -> Int {
+    if count <= 0 { deliver 0 }
+
+    flex prev = mem_read_i64(arr_buf, 0)
+    mem_write_i64(out_buf, 0, prev)
+
+    for i in 1..count {
+        flex cur = mem_read_i64(arr_buf, i * 8)
+        mem_write_i64(out_buf, i * 8, cur - prev)
+        prev = cur
+    }
+    deliver count * 8
+}
+
+open flow delta_decode_i64(arr_buf: Int, count: Int, out_buf: Int) -> Int {
+    if count <= 0 { deliver 0 }
+
+    flex acc = mem_read_i64(arr_buf, 0)
+    mem_write_i64(out_buf, 0, acc)
+
+    for i in 1..count {
+        flex delta = mem_read_i64(arr_buf, i * 8)
+        acc = acc + delta
+        mem_write_i64(out_buf, i * 8, acc)
+    }
+    deliver count * 8
+}

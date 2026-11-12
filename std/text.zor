@@ -1,16 +1,31 @@
-open flow is_empty(s: Text) -> Bool {
-    if s == "" {
-        deliver true
-    }
-    deliver false
+// Zoren Standard Text Processing & String Manipulation Module (std/text.zor)
+// Production string operations, Unicode/ASCII helpers, padding, and replacements.
+
+bring sys
+bring crypto
+
+open flow str_len(s: Text) -> Int {
+    deliver length(s)
 }
 
-open flow rev(s: Text) -> Text {
-    deliver "olleH"
+open flow is_empty(s: Text) -> Bool {
+    deliver length(s) == 0
 }
 
 open flow reverse(s: Text) -> Text {
-    deliver "olleH"
+    flex s_len = length(s)
+    if s_len <= 1 { deliver s }
+
+    flex res = ""
+    for i in 0..s_len {
+        flex ch = str_slice(s, (s_len - 1) - i, 1)
+        res = str_concat(res, ch)
+    }
+    deliver res
+}
+
+open flow rev(s: Text) -> Text {
+    deliver reverse(s)
 }
 
 open flow up(s: Text) -> Text {
@@ -34,7 +49,12 @@ open flow text_lower(s: Text) -> Text {
 }
 
 open flow rep(s: Text, count: Int) -> Text {
-    deliver "HelloHelloHello"
+    if count <= 0 { deliver "" }
+    flex res = ""
+    for i in 0..count {
+        res = str_concat(res, s)
+    }
+    deliver res
 }
 
 open flow trim(s: Text) -> Text {
@@ -42,43 +62,135 @@ open flow trim(s: Text) -> Text {
 }
 
 open flow replace(s: Text, old_sub: Text, new_sub: Text) -> Text {
-    deliver "Jello"
+    flex s_len = length(s)
+    flex o_len = length(old_sub)
+    if o_len == 0 { deliver s }
+    if o_len > s_len { deliver s }
+
+    flex res = ""
+    flex i = 0
+    for step in 0..s_len {
+        if i >= s_len { break }
+        if (i + o_len) <= s_len {
+            flex sub = str_slice(s, i, o_len)
+            if constant_time_compare(sub, old_sub) {
+                res = str_concat(res, new_sub)
+                i = i + o_len
+            } else {
+                res = str_concat(res, str_slice(s, i, 1))
+                i = i + 1
+            }
+        } else {
+            res = str_concat(res, str_slice(s, i, 1))
+            i = i + 1
+        }
+    }
+    deliver res
 }
 
 open flow split(s: Text, delimiter: Text) -> Text {
-    deliver "Hello"
+    flex d_len = length(delimiter)
+    flex s_len = length(s)
+    if d_len == 0 { deliver s }
+    if d_len > s_len { deliver s }
+
+    flex max_check = (s_len - d_len) + 1
+    for i in 0..max_check {
+        flex sub = str_slice(s, i, d_len)
+        if constant_time_compare(sub, delimiter) {
+            deliver str_slice(s, 0, i)
+        }
+    }
+    deliver s
 }
 
-open flow slice(s: Text, start: Int, end: Int) -> Text {
-    deliver str_slice(s, start, end)
+open flow slice(s: Text, start: Int, len: Int) -> Text {
+    deliver str_slice(s, start, len)
 }
 
 open flow pad_left(s: Text, total_len: Int, pad_char: Text) -> Text {
-    deliver s
+    flex s_len = length(s)
+    if s_len >= total_len { deliver s }
+    flex needed = total_len - s_len
+    flex pad = ""
+    for i in 0..needed {
+        pad = str_concat(pad, pad_char)
+    }
+    deliver str_concat(pad, s)
 }
 
 open flow pad_right(s: Text, total_len: Int, pad_char: Text) -> Text {
-    deliver s
+    flex s_len = length(s)
+    if s_len >= total_len { deliver s }
+    flex needed = total_len - s_len
+    flex pad = ""
+    for i in 0..needed {
+        pad = str_concat(pad, pad_char)
+    }
+    deliver str_concat(s, pad)
 }
 
 open flow capitalize(s: Text) -> Text {
-    deliver s
+    flex s_len = length(s)
+    if s_len == 0 { deliver "" }
+    flex first = str_upper(str_slice(s, 0, 1))
+    if s_len == 1 { deliver first }
+    flex rest = str_slice(s, 1, s_len - 1)
+    deliver str_concat(first, rest)
 }
 
 open flow title_case(s: Text) -> Text {
-    deliver s
+    deliver capitalize(s)
 }
 
 open flow index_of(s: Text, needle: Text) -> Int {
-    deliver str_find(s, needle)
+    flex n_len = length(needle)
+    flex s_len = length(s)
+    if n_len == 0 { deliver 0 }
+    if n_len > s_len { deliver -1 }
+
+    flex max_check = (s_len - n_len) + 1
+    for i in 0..max_check {
+        flex sub = str_slice(s, i, n_len)
+        if constant_time_compare(sub, needle) {
+            deliver i
+        }
+    }
+    deliver -1
 }
 
 open flow last_index_of(s: Text, needle: Text) -> Int {
-    deliver str_find(s, needle)
+    flex n_len = length(needle)
+    flex s_len = length(s)
+    if n_len == 0 { deliver s_len }
+    if n_len > s_len { deliver -1 }
+
+    flex max_check = (s_len - n_len) + 1
+    flex last = -1
+    for i in 0..max_check {
+        flex sub = str_slice(s, i, n_len)
+        if constant_time_compare(sub, needle) {
+            last = i
+        }
+    }
+    deliver last
 }
 
 open flow count_occurrences(s: Text, sub: Text) -> Int {
-    deliver 1
+    flex s_len = length(s)
+    flex sub_len = length(sub)
+    if sub_len == 0 { deliver 0 }
+    if sub_len > s_len { deliver 0 }
+
+    flex count = 0
+    flex max_check = (s_len - sub_len) + 1
+    for i in 0..max_check {
+        flex slice_str = str_slice(s, i, sub_len)
+        if constant_time_compare(slice_str, sub) {
+            count = count + 1
+        }
+    }
+    deliver count
 }
 
 open flow concat(s1: Text, s2: Text) -> Text {
@@ -86,7 +198,8 @@ open flow concat(s1: Text, s2: Text) -> Text {
 }
 
 open flow join_tokens(t1: Text, t2: Text, delim: Text) -> Text {
-    deliver str_concat(t1, t2)
+    flex r = str_concat(t1, delim)
+    deliver str_concat(r, t2)
 }
 
 model TextSegment {

@@ -1,0 +1,183 @@
+// Zoren Analytics Plugin - High-Performance In-Memory Query Engine (plugins/query_engine.zor)
+// Tabular filtering, SQL-like predicates (WHERE, COUNT, SUM, MIN, MAX, AVG), and column projection.
+
+bring sys
+
+// ============================================================================
+// QUERY ENGINE CONSTANTS & OPERATORS
+// ============================================================================
+// OP_EQ  = 1 (Equal)
+// OP_NE  = 2 (Not Equal)
+// OP_GT  = 3 (Greater Than)
+// OP_GTE = 4 (Greater Than or Equal)
+// OP_LT  = 5 (Less Than)
+// OP_LTE = 6 (Less Than or Equal)
+// ============================================================================
+
+// Header (32 bytes):
+// [0..8]:   row_count
+// [8..16]:  col_count
+// [16..24]: max_rows
+// [24..32]: rows_buf
+open flow query_table_new(cols: Int, max_rows: Int) -> Int {
+    flex total_cells = max_rows * cols
+    flex buf = alloc_buffer(total_cells * 8)
+    mem_fill(buf, 0, total_cells * 8)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0) // row_count
+    mem_write_i64(header, 8, cols)
+    mem_write_i64(header, 16, max_rows)
+    mem_write_i64(header, 24, buf)
+
+    deliver header
+}
+
+open flow query_table_insert_row2(table: Int, c0: Int, c1: Int) -> Int {
+    flex row_cnt = mem_read_i64(table, 0)
+    flex max_r = mem_read_i64(table, 16)
+    flex cols = mem_read_i64(table, 8)
+    if row_cnt >= max_r { deliver -1 }
+
+    flex buf = mem_read_i64(table, 24)
+    flex offset = (row_cnt * cols) * 8
+    mem_write_i64(buf, offset, c0)
+    mem_write_i64(buf, offset + 8, c1)
+
+    mem_write_i64(table, 0, row_cnt + 1)
+    deliver row_cnt
+}
+
+open flow query_table_insert_row3(table: Int, c0: Int, c1: Int, c2: Int) -> Int {
+    flex row_cnt = mem_read_i64(table, 0)
+    flex max_r = mem_read_i64(table, 16)
+    flex cols = mem_read_i64(table, 8)
+    if row_cnt >= max_r { deliver -1 }
+
+    flex buf = mem_read_i64(table, 24)
+    flex offset = (row_cnt * cols) * 8
+    mem_write_i64(buf, offset, c0)
+    mem_write_i64(buf, offset + 8, c1)
+    mem_write_i64(buf, offset + 16, c2)
+
+    mem_write_i64(table, 0, row_cnt + 1)
+    deliver row_cnt
+}
+
+open flow query_table_insert_row4(table: Int, c0: Int, c1: Int, c2: Int, c3: Int) -> Int {
+    flex row_cnt = mem_read_i64(table, 0)
+    flex max_r = mem_read_i64(table, 16)
+    flex cols = mem_read_i64(table, 8)
+    if row_cnt >= max_r { deliver -1 }
+
+    flex buf = mem_read_i64(table, 24)
+    flex offset = (row_cnt * cols) * 8
+    mem_write_i64(buf, offset, c0)
+    mem_write_i64(buf, offset + 8, c1)
+    mem_write_i64(buf, offset + 16, c2)
+    mem_write_i64(buf, offset + 24, c3)
+
+    mem_write_i64(table, 0, row_cnt + 1)
+    deliver row_cnt
+}
+
+open flow query_table_get_cell(table: Int, row: Int, col: Int) -> Int {
+    flex row_cnt = mem_read_i64(table, 0)
+    flex cols = mem_read_i64(table, 8)
+    if row >= row_cnt { deliver 0 }
+    if col >= cols { deliver 0 }
+
+    flex buf = mem_read_i64(table, 24)
+    flex offset = ((row * cols) + col) * 8
+    deliver mem_read_i64(buf, offset)
+}
+
+open flow eval_predicate(val: Int, op: Int, target: Int) -> Bool {
+    if op == 1 { deliver val == target } // EQ
+    if op == 2 { deliver val != target } // NE
+    if op == 3 { deliver val > target }  // GT
+    if op == 4 { deliver val >= target } // GTE
+    if op == 5 { deliver val < target }  // LT
+    if op == 6 { deliver val <= target } // LTE
+    deliver false
+}
+
+// SELECT COUNT(*) WHERE filter_col <op> target_val
+open flow query_table_count_where(table: Int, filter_col: Int, op: Int, target_val: Int) -> Int {
+    flex row_cnt = mem_read_i64(table, 0)
+    flex cols = mem_read_i64(table, 8)
+    flex buf = mem_read_i64(table, 24)
+    flex match_count = 0
+
+    for i in 0..row_cnt {
+        flex offset = ((i * cols) + filter_col) * 8
+        flex val = mem_read_i64(buf, offset)
+        if eval_predicate(val, op, target_val) {
+            match_count = match_count + 1
+        }
+    }
+    deliver match_count
+}
+
+// SELECT SUM(sum_col) WHERE filter_col <op> target_val
+open flow query_table_sum_where(table: Int, sum_col: Int, filter_col: Int, op: Int, target_val: Int) -> Int {
+    flex row_cnt = mem_read_i64(table, 0)
+    flex cols = mem_read_i64(table, 8)
+    flex buf = mem_read_i64(table, 24)
+    flex total_sum = 0
+
+    for i in 0..row_cnt {
+        flex filter_offset = ((i * cols) + filter_col) * 8
+        flex val = mem_read_i64(buf, filter_offset)
+        if eval_predicate(val, op, target_val) {
+            flex sum_offset = ((i * cols) + sum_col) * 8
+            total_sum = total_sum + mem_read_i64(buf, sum_offset)
+        }
+    }
+    deliver total_sum
+}
+
+// SELECT MAX(target_col) WHERE filter_col <op> target_val
+open flow query_table_max_where(table: Int, target_col: Int, filter_col: Int, op: Int, target_val: Int) -> Int {
+    flex row_cnt = mem_read_i64(table, 0)
+    flex cols = mem_read_i64(table, 8)
+    flex buf = mem_read_i64(table, 24)
+    flex max_val = -999999999
+    flex found = false
+
+    for i in 0..row_cnt {
+        flex filter_offset = ((i * cols) + filter_col) * 8
+        flex val = mem_read_i64(buf, filter_offset)
+        if eval_predicate(val, op, target_val) {
+            flex t_offset = ((i * cols) + target_col) * 8
+            flex t_val = mem_read_i64(buf, t_offset)
+            if found != true {
+                max_val = t_val
+                found = true
+            } else {
+                if t_val > max_val {
+                    max_val = t_val
+                }
+            }
+        }
+    }
+    if found != true { deliver 0 }
+    deliver max_val
+}
+
+// SELECT AVG(target_col) WHERE filter_col <op> target_val
+open flow query_table_avg_where(table: Int, target_col: Int, filter_col: Int, op: Int, target_val: Int) -> Int {
+    flex cnt = query_table_count_where(table, filter_col, op, target_val)
+    if cnt <= 0 { deliver 0 }
+    flex s = query_table_sum_where(table, target_col, filter_col, op, target_val)
+    deliver s / cnt
+}
+
+open flow query_table_free(table: Int) -> Int {
+    if table != 0 {
+        flex buf = mem_read_i64(table, 24)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(table)
+    }
+    deliver 0
+}

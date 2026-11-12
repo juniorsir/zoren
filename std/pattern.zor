@@ -1,0 +1,165 @@
+// Zoren Standard Pattern Matching & Search Engine (std/pattern.zor)
+// Globbing, wildcard filters, prefix/suffix detection, and character classification.
+
+bring sys
+bring crypto
+
+open flow pattern_starts_with(s: Text, prefix: Text) -> Bool {
+    flex p_len = length(prefix)
+    flex s_len = length(s)
+    if p_len == 0 { deliver true }
+    if p_len > s_len { deliver false }
+
+    flex head = str_slice(s, 0, p_len)
+    deliver constant_time_compare(head, prefix)
+}
+
+open flow pattern_ends_with(s: Text, suffix: Text) -> Bool {
+    flex suf_len = length(suffix)
+    flex s_len = length(s)
+    if suf_len == 0 { deliver true }
+    if suf_len > s_len { deliver false }
+
+    flex tail = str_slice(s, s_len - suf_len, suf_len)
+    deliver constant_time_compare(tail, suffix)
+}
+
+open flow pattern_find_index(s: Text, needle: Text) -> Int {
+    flex n_len = length(needle)
+    flex s_len = length(s)
+    if n_len == 0 { deliver 0 }
+    if n_len > s_len { deliver -1 }
+
+    flex max_check = (s_len - n_len) + 1
+    for i in 0..max_check {
+        flex sub = str_slice(s, i, n_len)
+        if constant_time_compare(sub, needle) {
+            deliver i
+        }
+    }
+    deliver -1
+}
+
+open flow pattern_contains(s: Text, needle: Text) -> Bool {
+    flex idx = pattern_find_index(s, needle)
+    if idx >= 0 { deliver true }
+    deliver false
+}
+
+open flow pattern_is_digit(ch: Text) -> Bool {
+    if constant_time_compare(ch, "0") { deliver true }
+    if constant_time_compare(ch, "1") { deliver true }
+    if constant_time_compare(ch, "2") { deliver true }
+    if constant_time_compare(ch, "3") { deliver true }
+    if constant_time_compare(ch, "4") { deliver true }
+    if constant_time_compare(ch, "5") { deliver true }
+    if constant_time_compare(ch, "6") { deliver true }
+    if constant_time_compare(ch, "7") { deliver true }
+    if constant_time_compare(ch, "8") { deliver true }
+    if constant_time_compare(ch, "9") { deliver true }
+    deliver false
+}
+
+open flow pattern_is_numeric(s: Text) -> Bool {
+    flex s_len = length(s)
+    if s_len == 0 { deliver false }
+
+    flex start = 0
+    flex first_ch = str_slice(s, 0, 1)
+    if constant_time_compare(first_ch, "-") {
+        if s_len == 1 { deliver false }
+        start = 1
+    }
+
+    for i in start..s_len {
+        flex ch = str_slice(s, i, 1)
+        if pattern_is_digit(ch) != true {
+            deliver false
+        }
+    }
+    deliver true
+}
+
+open flow pattern_is_alpha_lower(ch: Text) -> Bool {
+    flex alphabet = "abcdefghijklmnopqrstuvwxyz"
+    for i in 0..26 {
+        flex c = str_slice(alphabet, i, 1)
+        if constant_time_compare(ch, c) { deliver true }
+    }
+    deliver false
+}
+
+open flow pattern_is_alpha_upper(ch: Text) -> Bool {
+    flex alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for i in 0..26 {
+        flex c = str_slice(alphabet, i, 1)
+        if constant_time_compare(ch, c) { deliver true }
+    }
+    deliver false
+}
+
+open flow pattern_is_alphanumeric(s: Text) -> Bool {
+    flex s_len = length(s)
+    if s_len == 0 { deliver false }
+
+    for i in 0..s_len {
+        flex ch = str_slice(s, i, 1)
+        flex is_ok = false
+        if pattern_is_digit(ch) { is_ok = true }
+        if pattern_is_alpha_lower(ch) { is_ok = true }
+        if pattern_is_alpha_upper(ch) { is_ok = true }
+        if constant_time_compare(ch, "_") { is_ok = true }
+
+        if is_ok != true { deliver false }
+    }
+    deliver true
+}
+
+// Glob Wildcard Matcher (* and ?)
+open flow pattern_glob_match(pattern: Text, target: Text) -> Bool {
+    flex p_len = length(pattern)
+    flex t_len = length(target)
+
+    // Pattern "*" matches everything
+    if constant_time_compare(pattern, "*") {
+        deliver true
+    }
+
+    // Pattern without wildcard: exact match
+    flex star_idx = pattern_find_index(pattern, "*")
+    if star_idx < 0 {
+        if p_len != t_len { deliver false }
+        for i in 0..p_len {
+            flex p_ch = str_slice(pattern, i, 1)
+            flex t_ch = str_slice(target, i, 1)
+            if constant_time_compare(p_ch, "?") != true {
+                if constant_time_compare(p_ch, t_ch) != true {
+                    deliver false
+                }
+            }
+        }
+        deliver true
+    }
+
+    // Pattern with single "*": prefix*suffix match
+    flex prefix = str_slice(pattern, 0, star_idx)
+    flex suffix_len = (p_len - 1) - star_idx
+    flex suffix = ""
+    if suffix_len > 0 {
+        suffix = str_slice(pattern, star_idx + 1, suffix_len)
+    }
+
+    if (length(prefix) + length(suffix)) > t_len {
+        deliver false
+    }
+
+    if pattern_starts_with(target, prefix) != true {
+        deliver false
+    }
+
+    if pattern_ends_with(target, suffix) != true {
+        deliver false
+    }
+
+    deliver true
+}

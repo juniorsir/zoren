@@ -1,0 +1,211 @@
+// Zoren Standard CSV & TSV Data Processing Engine (std/csv.zor)
+// RFC 4180 Compliant streaming CSV parser, quote escape handler, and tabular serializer.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// CSV WRITER
+// Header: [field_count_in_row, total_rows, reserved, 0] (32 bytes)
+// ============================================================================
+
+open flow csv_escape_field(field: Text) -> Text {
+    flex f_len = length(field)
+    flex needs_quotes = false
+
+    for i in 0..f_len {
+        flex ch = str_slice(field, i, 1)
+        if constant_time_compare(ch, ",") { needs_quotes = true }
+        if constant_time_compare(ch, "\"") { needs_quotes = true }
+        if constant_time_compare(ch, "\n") { needs_quotes = true }
+        if constant_time_compare(ch, "\r") { needs_quotes = true }
+    }
+
+    if needs_quotes != true {
+        deliver field
+    }
+
+    // Escape quotes: wrap with " and double internal quotes
+    flex escaped = "\""
+    for i in 0..f_len {
+        flex ch = str_slice(field, i, 1)
+        if constant_time_compare(ch, "\"") {
+            escaped = str_concat(escaped, "\"\"")
+        } else {
+            escaped = str_concat(escaped, ch)
+        }
+    }
+    escaped = str_concat(escaped, "\"")
+    deliver escaped
+}
+
+open flow csv_format_row2(c1: Text, c2: Text) -> Text {
+    flex e1 = csv_escape_field(c1)
+    flex e2 = csv_escape_field(c2)
+    flex r = str_concat(e1, ",")
+    deliver str_concat(r, e2)
+}
+
+open flow csv_format_row3(c1: Text, c2: Text, c3: Text) -> Text {
+    flex e1 = csv_escape_field(c1)
+    flex e2 = csv_escape_field(c2)
+    flex e3 = csv_escape_field(c3)
+    flex r = str_concat(e1, ",")
+    r = str_concat(r, e2)
+    r = str_concat(r, ",")
+    deliver str_concat(r, e3)
+}
+
+open flow csv_format_row4(c1: Text, c2: Text, c3: Text, c4: Text) -> Text {
+    flex r = csv_format_row3(c1, c2, c3)
+    flex e4 = csv_escape_field(c4)
+    r = str_concat(r, ",")
+    deliver str_concat(r, e4)
+}
+
+// ============================================================================
+// ZERO-COPY CSV PARSER
+// Header (32 bytes):
+// [0..8]:   row_count
+// [8..16]:  cell_count
+// [16..24]: max_cells
+// [24..32]: cells_buf (entry 32 bytes: [row_idx: i64, col_idx: i64, start: i64, len: i64])
+// ============================================================================
+
+open flow csv_parser_new(max_cells: Int) -> Int {
+    flex c_buf = alloc_buffer(max_cells * 32)
+    mem_fill(c_buf, 0, max_cells * 32)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0) // row_count
+    mem_write_i64(header, 8, 0) // cell_count
+    mem_write_i64(header, 16, max_cells)
+    mem_write_i64(header, 24, c_buf)
+
+    deliver header
+}
+
+open flow csv_parse(csv_text: Text, max_cells: Int) -> Int {
+    flex parser = csv_parser_new(max_cells)
+    flex t_len = length(csv_text)
+    if t_len == 0 { deliver parser }
+
+    flex c_buf = mem_read_i64(parser, 24)
+    flex cell_idx = 0
+    flex cur_row = 0
+    flex cur_col = 0
+    flex cell_start = 0
+    flex in_quotes = false
+
+    for i in 0..t_len {
+        flex ch = str_slice(csv_text, i, 1)
+
+        if constant_time_compare(ch, "\"") {
+            in_quotes = in_quotes != true
+        }
+
+        if in_quotes != true {
+            // Field delimiter: comma
+            if constant_time_compare(ch, ",") {
+                if cell_idx < max_cells {
+                    flex offset = cell_idx * 32
+                    flex clen = i - cell_start
+                    mem_write_i64(c_buf, offset, cur_row)
+                    mem_write_i64(c_buf, offset + 8, cur_col)
+                    mem_write_i64(c_buf, offset + 16, cell_start)
+                    mem_write_i64(c_buf, offset + 24, clen)
+                    cell_idx = cell_idx + 1
+                }
+                cur_col = cur_col + 1
+                cell_start = i + 1
+            } else {
+                // Line delimiter: newline
+                if constant_time_compare(ch, "\n") {
+                    if cell_idx < max_cells {
+                        flex offset = cell_idx * 32
+                        flex clen = i - cell_start
+                        // Strip trailing \r if present
+                        if clen > 0 {
+                            flex prev_ch = str_slice(csv_text, i - 1, 1)
+                            if constant_time_compare(prev_ch, "\r") {
+                                clen = clen - 1
+                            }
+                        }
+                        mem_write_i64(c_buf, offset, cur_row)
+                        mem_write_i64(c_buf, offset + 8, cur_col)
+                        mem_write_i64(c_buf, offset + 16, cell_start)
+                        mem_write_i64(c_buf, offset + 24, clen)
+                        cell_idx = cell_idx + 1
+                    }
+                    cur_row = cur_row + 1
+                    cur_col = 0
+                    cell_start = i + 1
+                }
+            }
+        }
+    }
+
+    // Capture final cell if text didn't end with newline
+    if cell_start <= t_len {
+        if cell_idx < max_cells {
+            flex offset = cell_idx * 32
+            flex clen = t_len - cell_start
+            mem_write_i64(c_buf, offset, cur_row)
+            mem_write_i64(c_buf, offset + 8, cur_col)
+            mem_write_i64(c_buf, offset + 16, cell_start)
+            mem_write_i64(c_buf, offset + 24, clen)
+            cell_idx = cell_idx + 1
+            cur_row = cur_row + 1
+        }
+    }
+
+    mem_write_i64(parser, 0, cur_row)
+    mem_write_i64(parser, 8, cell_idx)
+    deliver parser
+}
+
+open flow csv_row_count(parser: Int) -> Int {
+    deliver mem_read_i64(parser, 0)
+}
+
+open flow csv_cell_count(parser: Int) -> Int {
+    deliver mem_read_i64(parser, 8)
+}
+
+open flow csv_get_cell(parser: Int, raw_csv: Text, row: Int, col: Int) -> Text {
+    flex total_cells = mem_read_i64(parser, 8)
+    flex c_buf = mem_read_i64(parser, 24)
+
+    for i in 0..total_cells {
+        flex offset = i * 32
+        flex r = mem_read_i64(c_buf, offset)
+        flex c = mem_read_i64(c_buf, offset + 8)
+        if r == row {
+            if c == col {
+                flex start = mem_read_i64(c_buf, offset + 16)
+                flex clen = mem_read_i64(c_buf, offset + 24)
+                if clen <= 0 { deliver "" }
+                flex val = str_slice(raw_csv, start, clen)
+                // Unquote if wrapped in quotes
+                if clen >= 2 {
+                    if constant_time_compare(str_slice(val, 0, 1), "\"") {
+                        if constant_time_compare(str_slice(val, clen - 1, 1), "\"") {
+                            deliver str_slice(val, 1, clen - 2)
+                        }
+                    }
+                }
+                deliver val
+            }
+        }
+    }
+    deliver ""
+}
+
+open flow csv_free(parser: Int) -> Int {
+    if parser != 0 {
+        flex c_buf = mem_read_i64(parser, 24)
+        if c_buf != 0 { free_buffer(c_buf) }
+        free_buffer(parser)
+    }
+    deliver 0
+}

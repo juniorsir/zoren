@@ -1,0 +1,164 @@
+// Zoren Standard UUID Module (std/uuid.zor)
+// RFC 4122 (UUID v4 Random) & RFC 9562 (UUID v7 Monotonic Time-Ordered)
+
+bring sys
+bring crypto
+bring pattern
+
+open flow uuid_nil() -> Text {
+    deliver "00000000-0000-0000-0000-000000000000"
+}
+
+open flow uuid_v4_generate() -> Text {
+    deliver uuid_v4()
+}
+
+open flow hex_nibble_to_char(nibble: Int) -> Text {
+    flex n = nibble % 16
+    if n == 0 { deliver "0" }
+    if n == 1 { deliver "1" }
+    if n == 2 { deliver "2" }
+    if n == 3 { deliver "3" }
+    if n == 4 { deliver "4" }
+    if n == 5 { deliver "5" }
+    if n == 6 { deliver "6" }
+    if n == 7 { deliver "7" }
+    if n == 8 { deliver "8" }
+    if n == 9 { deliver "9" }
+    if n == 10 { deliver "a" }
+    if n == 11 { deliver "b" }
+    if n == 12 { deliver "c" }
+    if n == 13 { deliver "d" }
+    if n == 14 { deliver "e" }
+    deliver "f"
+}
+
+open flow hex_byte_to_str(byte_val: Int) -> Text {
+    flex high = hex_nibble_to_char(byte_val / 16)
+    flex low = hex_nibble_to_char(byte_val % 16)
+    deliver str_concat(high, low)
+}
+
+// RFC 9562 UUID Version 7: Monotonically increasing time-ordered UUID.
+// Layout: 48-bit timestamp_ms (12 hex chars), 4-bit ver (7), 12-bit rand,
+// 2-bit var (10), 62-bit rand.
+open flow uuid_v7_generate() -> Text {
+    flex now_ts = sys_clock_ms()
+    flex r1 = sys_secure_random_int(1000, 9999)
+    flex r2 = sys_secure_random_int(1000, 9999)
+    flex r3 = sys_secure_random_int(100000, 999999)
+
+    // Format 48-bit timestamp into 12 hex characters
+    flex ts_str = ""
+    flex t = now_ts
+    for i in 0..12 {
+        flex digit = hex_nibble_to_char(t % 16)
+        ts_str = str_concat(digit, ts_str)
+        t = t / 16
+    }
+
+    // [0..8] - first 8 hex of timestamp
+    flex part1 = str_slice(ts_str, 0, 8)
+    // [8..12] - next 4 hex of timestamp
+    flex part2 = str_slice(ts_str, 8, 4)
+
+    // [12..16] - '7' + 3 hex entropy
+    flex ent1_hi = hex_nibble_to_char((r1 / 256) % 16)
+    flex ent1_lo = hex_byte_to_str(r1 % 256)
+    flex part3 = str_concat("7", str_concat(ent1_hi, ent1_lo))
+
+    // [16..20] - '8'..'b' variant + 3 hex entropy
+    flex var_nibble = 8 + (r2 % 4) // 8, 9, 10, or 11 (8, 9, a, or b)
+    flex var_char = hex_nibble_to_char(var_nibble)
+    flex ent2_hi = hex_nibble_to_char((r2 / 256) % 16)
+    flex ent2_lo = hex_byte_to_str(r2 % 256)
+    flex part4 = str_concat(var_char, str_concat(ent2_hi, ent2_lo))
+
+    // [20..32] - 12 hex entropy
+    flex part5 = hex_byte_to_str((r3 / 65536) % 256)
+    part5 = str_concat(part5, hex_byte_to_str((r3 / 256) % 256))
+    part5 = str_concat(part5, hex_byte_to_str(r3 % 256))
+    part5 = str_concat(part5, hex_byte_to_str(r1 % 256))
+    part5 = str_concat(part5, hex_byte_to_str((r2 / 256) % 256))
+    part5 = str_concat(part5, hex_byte_to_str(r2 % 256))
+
+    // Combine with hyphens: 8-4-4-4-12
+    flex res = str_concat(part1, "-")
+    res = str_concat(res, part2)
+    res = str_concat(res, "-")
+    res = str_concat(res, part3)
+    res = str_concat(res, "-")
+    res = str_concat(res, part4)
+    res = str_concat(res, "-")
+    res = str_concat(res, part5)
+
+    deliver res
+}
+
+open flow is_hex_char(ch: Text) -> Bool {
+    if pattern_is_digit(ch) { deliver true }
+    if constant_time_compare(ch, "a") { deliver true }
+    if constant_time_compare(ch, "b") { deliver true }
+    if constant_time_compare(ch, "c") { deliver true }
+    if constant_time_compare(ch, "d") { deliver true }
+    if constant_time_compare(ch, "e") { deliver true }
+    if constant_time_compare(ch, "f") { deliver true }
+    if constant_time_compare(ch, "A") { deliver true }
+    if constant_time_compare(ch, "B") { deliver true }
+    if constant_time_compare(ch, "C") { deliver true }
+    if constant_time_compare(ch, "D") { deliver true }
+    if constant_time_compare(ch, "E") { deliver true }
+    if constant_time_compare(ch, "F") { deliver true }
+    deliver false
+}
+
+open flow uuid_validate(uuid_str: Text) -> Bool {
+    if length(uuid_str) != 36 {
+        deliver false
+    }
+
+    if constant_time_compare(str_slice(uuid_str, 8, 1), "-") != true { deliver false }
+    if constant_time_compare(str_slice(uuid_str, 13, 1), "-") != true { deliver false }
+    if constant_time_compare(str_slice(uuid_str, 18, 1), "-") != true { deliver false }
+    if constant_time_compare(str_slice(uuid_str, 23, 1), "-") != true { deliver false }
+
+    for i in 0..36 {
+        if i != 8 {
+            if i != 13 {
+                if i != 18 {
+                    if i != 23 {
+                        flex ch = str_slice(uuid_str, i, 1)
+                        if is_hex_char(ch) != true {
+                            deliver false
+                        }
+                    }
+                }
+            }
+        }
+    }
+    deliver true
+}
+
+open flow uuid_version(uuid_str: Text) -> Int {
+    if uuid_validate(uuid_str) != true {
+        deliver -1
+    }
+    flex ver_ch = str_slice(uuid_str, 14, 1)
+    if constant_time_compare(ver_ch, "4") { deliver 4 }
+    if constant_time_compare(ver_ch, "7") { deliver 7 }
+    if constant_time_compare(ver_ch, "1") { deliver 1 }
+    if constant_time_compare(ver_ch, "5") { deliver 5 }
+    deliver 0
+}
+
+open flow uuid_is_v4(uuid_str: Text) -> Bool {
+    flex v = uuid_version(uuid_str)
+    if v == 4 { deliver true }
+    deliver false
+}
+
+open flow uuid_is_v7(uuid_str: Text) -> Bool {
+    flex v = uuid_version(uuid_str)
+    if v == 7 { deliver true }
+    deliver false
+}
