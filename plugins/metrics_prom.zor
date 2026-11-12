@@ -1,0 +1,149 @@
+// Zoren Standard Prometheus Metrics Exporter (plugins/metrics_prom.zor)
+// Production exposition metrics registry for microservices: Counters, Gauges, and Prometheus text rendering.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// PROMETHEUS METRICS REGISTRY MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   metric_count
+// [8..16]:  max_metrics (64)
+// [16..24]: table_buf (64 * 32 bytes)
+// [24..32]: reserved
+//
+// Metric Entry (32 bytes):
+// [0..8]:   name_hash
+// [8..16]:  mtype (1 = COUNTER, 2 = GAUGE)
+// [16..24]: value (int64)
+// [24..32]: reserved
+// ============================================================================
+
+open flow prom_registry_new() -> Int {
+    flex max_metrics = 64
+    flex entry_size = 32
+    flex table = alloc_buffer(max_metrics * entry_size)
+    mem_fill(table, 0, max_metrics * entry_size)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0)
+    mem_write_i64(header, 8, max_metrics)
+    mem_write_i64(header, 16, table)
+    mem_write_i64(header, 24, 0)
+
+    deliver header
+}
+
+open flow prom_find_metric(reg: Int, name: Text) -> Int {
+    flex n_hash = sys_fast_hash(name)
+    flex count = mem_read_i64(reg, 0)
+    flex table = mem_read_i64(reg, 16)
+
+    for i in 0..count {
+        flex offset = i * 32
+        if mem_read_i64(table, offset) == n_hash {
+            deliver i
+        }
+    }
+
+    deliver -1
+}
+
+open flow prom_register_counter(reg: Int, name: Text) -> Bool {
+    flex existing = prom_find_metric(reg, name)
+    if existing >= 0 { deliver false }
+
+    flex count = mem_read_i64(reg, 0)
+    flex max_cnt = mem_read_i64(reg, 8)
+    if count >= max_cnt { deliver false }
+
+    flex table = mem_read_i64(reg, 16)
+    flex offset = count * 32
+
+    mem_write_i64(table, offset, sys_fast_hash(name))
+    mem_write_i64(table, offset + 8, 1) // 1 = COUNTER
+    mem_write_i64(table, offset + 16, 0) // initial value 0
+    mem_write_i64(table, offset + 24, 0)
+
+    mem_write_i64(reg, 0, count + 1)
+    deliver true
+}
+
+open flow prom_register_gauge(reg: Int, name: Text) -> Bool {
+    flex existing = prom_find_metric(reg, name)
+    if existing >= 0 { deliver false }
+
+    flex count = mem_read_i64(reg, 0)
+    flex max_cnt = mem_read_i64(reg, 8)
+    if count >= max_cnt { deliver false }
+
+    flex table = mem_read_i64(reg, 16)
+    flex offset = count * 32
+
+    mem_write_i64(table, offset, sys_fast_hash(name))
+    mem_write_i64(table, offset + 8, 2) // 2 = GAUGE
+    mem_write_i64(table, offset + 16, 0)
+    mem_write_i64(table, offset + 24, 0)
+
+    mem_write_i64(reg, 0, count + 1)
+    deliver true
+}
+
+open flow prom_counter_inc(reg: Int, name: Text, amount: Int) -> Bool {
+    flex idx = prom_find_metric(reg, name)
+    if idx < 0 { deliver false }
+
+    flex table = mem_read_i64(reg, 16)
+    flex offset = idx * 32
+
+    flex cur_val = mem_read_i64(table, offset + 16)
+    mem_write_i64(table, offset + 16, cur_val + amount)
+    deliver true
+}
+
+open flow prom_gauge_set(reg: Int, name: Text, val: Int) -> Bool {
+    flex idx = prom_find_metric(reg, name)
+    if idx < 0 { deliver false }
+
+    flex table = mem_read_i64(reg, 16)
+    flex offset = idx * 32
+
+    mem_write_i64(table, offset + 16, val)
+    deliver true
+}
+
+open flow prom_gauge_add(reg: Int, name: Text, delta: Int) -> Bool {
+    flex idx = prom_find_metric(reg, name)
+    if idx < 0 { deliver false }
+
+    flex table = mem_read_i64(reg, 16)
+    flex offset = idx * 32
+
+    flex cur_val = mem_read_i64(table, offset + 16)
+    mem_write_i64(table, offset + 16, cur_val + delta)
+    deliver true
+}
+
+open flow prom_get_value(reg: Int, name: Text) -> Int {
+    flex idx = prom_find_metric(reg, name)
+    if idx < 0 { deliver -1 }
+
+    flex table = mem_read_i64(reg, 16)
+    flex offset = idx * 32
+    deliver mem_read_i64(table, offset + 16)
+}
+
+open flow prom_format_metric(name: Text, mtype: Text, help: Text, val: Int) -> Text {
+    flex h1 = str_concat("# HELP ", name)
+    flex h2 = str_concat(h1, " ")
+    flex h3 = str_concat(h2, help)
+    flex h4 = str_concat(h3, "\n# TYPE ")
+    flex h5 = str_concat(h4, name)
+    flex h6 = str_concat(h5, " ")
+    flex h7 = str_concat(h6, mtype)
+    flex h8 = str_concat(h7, "\n")
+    flex h9 = str_concat(h8, name)
+    flex h10 = str_concat(h9, " ")
+    flex h11 = str_concat(h10, int_to_str(val))
+    deliver str_concat(h11, "\n")
+}

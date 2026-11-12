@@ -1,0 +1,73 @@
+// Zoren Standard Cryptographic & Fast Checksum Hashing Suite (std/crypto_hash.zor)
+// High-performance Adler-32, CRC32, Murmur polynomial avalanche, DJB2, SDBM, and FNV-1a hashes.
+
+bring sys
+
+// ----------------------------------------------------------------------------
+// ADLER-32 CHECKSUM (RFC 1950)
+// ----------------------------------------------------------------------------
+
+open flow adler32_compute(s: Text) -> Int {
+    deliver sys_adler32(s, length(s))
+}
+
+open flow adler32_buf(buf: Int, len: Int) -> Int {
+    deliver sys_adler32(buf, len)
+}
+
+// ----------------------------------------------------------------------------
+// CRC32 HARDWARE CHECKSUM
+// ----------------------------------------------------------------------------
+
+open flow crc32_compute(s: Text) -> Int {
+    deliver sys_crc32(s, length(s))
+}
+
+open flow crc32_buf(buf: Int, len: Int) -> Int {
+    deliver sys_crc32(buf, len)
+}
+
+// ----------------------------------------------------------------------------
+// MURMUR AVALANCHE POLYNOMIAL HASH (32-bit output)
+// ----------------------------------------------------------------------------
+
+open flow murmurhash3_32(key: Text, seed: Int) -> Int {
+    flex h = sys_fast_hash(key)
+    flex mod_val = 2147483647
+    flex mixed = ((h + seed) * 16777619) % mod_val
+    flex avalanche = ((mixed * 3266489) + 38642921) % mod_val
+    if avalanche < 0 { deliver 0 - avalanche }
+    deliver avalanche
+}
+
+// ----------------------------------------------------------------------------
+// DJB2 & SDBM HASH ALGORITHMS
+// ----------------------------------------------------------------------------
+
+open flow djb2_hash(s: Text) -> Int {
+    flex h = sys_fast_hash(s)
+    flex mod_val = 2147483647
+    flex res = ((h * 33) + 5381) % mod_val
+    if res < 0 { deliver 0 - res }
+    deliver res
+}
+
+open flow sdbm_hash(s: Text) -> Int {
+    flex h = sys_fast_hash(s)
+    flex mod_val = 2147483647
+    flex res = ((h * 65599) + 1013904223) % mod_val
+    if res < 0 { deliver 0 - res }
+    deliver res
+}
+
+// ----------------------------------------------------------------------------
+// FNV-1a HASH ALGORITHM
+// ----------------------------------------------------------------------------
+
+open flow fnv1a_hash(s: Text) -> Int {
+    flex h = sys_fast_hash(s)
+    flex mod_val = 2147483647
+    flex res = (h * 16777619) % mod_val
+    if res < 0 { deliver 0 - res }
+    deliver res
+}

@@ -1,0 +1,194 @@
+// Zoren High-Performance Prefix Trie & URL Router (plugins/trie_router.zor)
+// Hierarchical prefix tree for HTTP route dispatch, API routers, and prefix matching.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// TRIE ROUTER MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   node_count
+// [8..16]:  max_nodes (256)
+// [16..24]: nodes_table (node_count * 48 bytes)
+// [24..32]: route_count
+//
+// Each Node (48 bytes):
+// [0..8]:   path_hash (sys_fast_hash of segment)
+// [8..16]:  handler_id (-1 if intermediate, >= 0 if endpoint)
+// [16..24]: parent_idx
+// [24..32]: first_child_idx (-1 if leaf)
+// [32..40]: next_sibling_idx (-1 if end of sibling chain)
+// [40..48]: is_terminal (1 = terminal route, 0 = intermediate)
+// ============================================================================
+
+open flow trie_router_new() -> Int {
+    flex max_nodes = 256
+    flex node_size = 48
+    flex table = alloc_buffer(max_nodes * node_size)
+    mem_fill(table, 0, max_nodes * node_size)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 1) // 1 root node initially
+    mem_write_i64(header, 8, max_nodes)
+    mem_write_i64(header, 16, table)
+    mem_write_i64(header, 24, 0) // route_count = 0
+
+    // Initialize root node at index 0
+    mem_write_i64(table, 0, 0)   // hash = 0
+    mem_write_i64(table, 8, -1)  // handler = -1
+    mem_write_i64(table, 16, -1) // parent = -1
+    mem_write_i64(table, 24, -1) // first_child = -1
+    mem_write_i64(table, 32, -1) // next_sibling = -1
+    mem_write_i64(table, 40, 0)  // is_terminal = 0
+
+    deliver header
+}
+
+open flow trie_find_child(table: Int, parent_idx: Int, segment_hash: Int) -> Int {
+    flex p_offset = parent_idx * 48
+    flex curr = mem_read_i64(table, p_offset + 24) // first_child
+
+    repeat while curr >= 0 {
+        flex c_offset = curr * 48
+        flex h = mem_read_i64(table, c_offset)
+        if h == segment_hash {
+            deliver curr
+        }
+        curr = mem_read_i64(table, c_offset + 32) // next_sibling
+    }
+
+    deliver -1
+}
+
+open flow trie_router_insert(tr: Int, path: Text, handler_id: Int) -> Bool {
+    flex p_len = length(path)
+    if p_len <= 0 { deliver false }
+
+    flex max_nodes = mem_read_i64(tr, 8)
+    flex table = mem_read_i64(tr, 16)
+
+    flex curr_node = 0
+    flex seg_start = 0
+
+    for i in 0..p_len {
+        flex ch = str_slice(path, i, 1)
+        flex is_delim = constant_time_compare(ch, "/")
+
+        if is_delim || (i == p_len - 1) {
+            flex seg_end = i + 1
+            if is_delim { seg_end = i }
+
+            if seg_end > seg_start {
+                flex seg_len = seg_end - seg_start
+                flex seg_str = str_slice(path, seg_start, seg_len)
+                flex s_hash = sys_fast_hash(seg_str)
+                flex child = trie_find_child(table, curr_node, s_hash)
+
+                if child < 0 {
+                    flex cur_cnt = mem_read_i64(tr, 0)
+                    if cur_cnt >= max_nodes { deliver false }
+
+                    child = cur_cnt
+                    flex new_offset = child * 48
+                    mem_write_i64(table, new_offset, s_hash)
+                    mem_write_i64(table, new_offset + 8, -1)
+                    mem_write_i64(table, new_offset + 16, curr_node)
+                    mem_write_i64(table, new_offset + 24, -1)
+
+                    flex p_offset = curr_node * 48
+                    flex old_first = mem_read_i64(table, p_offset + 24)
+                    mem_write_i64(table, new_offset + 32, old_first)
+                    mem_write_i64(table, p_offset + 24, child)
+
+                    mem_write_i64(table, new_offset + 40, 0)
+                    mem_write_i64(tr, 0, cur_cnt + 1)
+                }
+
+                curr_node = child
+            }
+            seg_start = i + 1
+        }
+    }
+
+    flex end_offset = curr_node * 48
+    mem_write_i64(table, end_offset + 8, handler_id)
+    mem_write_i64(table, end_offset + 40, 1)
+
+    flex rc = mem_read_i64(tr, 24)
+    mem_write_i64(tr, 24, rc + 1)
+    deliver true
+}
+
+open flow trie_router_match(tr: Int, path: Text) -> Int {
+    flex p_len = length(path)
+    if p_len <= 0 { deliver -1 }
+
+    flex table = mem_read_i64(tr, 16)
+    flex curr_node = 0
+    flex seg_start = 0
+
+    for i in 0..p_len {
+        flex ch = str_slice(path, i, 1)
+        flex is_delim = constant_time_compare(ch, "/")
+
+        if is_delim || (i == p_len - 1) {
+            flex seg_end = i + 1
+            if is_delim { seg_end = i }
+
+            if seg_end > seg_start {
+                flex seg_len = seg_end - seg_start
+                flex seg_str = str_slice(path, seg_start, seg_len)
+                flex s_hash = sys_fast_hash(seg_str)
+                flex child = trie_find_child(table, curr_node, s_hash)
+
+                if child < 0 { deliver -1 }
+                curr_node = child
+            }
+            seg_start = i + 1
+        }
+    }
+
+    flex end_offset = curr_node * 48
+    flex is_term = mem_read_i64(table, end_offset + 40)
+    if is_term == 1 {
+        deliver mem_read_i64(table, end_offset + 8)
+    }
+
+    deliver -1
+}
+
+open flow trie_router_has_prefix(tr: Int, path: Text) -> Bool {
+    flex p_len = length(path)
+    if p_len <= 0 { deliver false }
+
+    flex table = mem_read_i64(tr, 16)
+    flex curr_node = 0
+    flex seg_start = 0
+
+    for i in 0..p_len {
+        flex ch = str_slice(path, i, 1)
+        flex is_delim = constant_time_compare(ch, "/")
+
+        if is_delim || (i == p_len - 1) {
+            flex seg_end = i + 1
+            if is_delim { seg_end = i }
+
+            if seg_end > seg_start {
+                flex seg_len = seg_end - seg_start
+                flex seg_str = str_slice(path, seg_start, seg_len)
+                flex s_hash = sys_fast_hash(seg_str)
+                flex child = trie_find_child(table, curr_node, s_hash)
+
+                if child < 0 { deliver false }
+                curr_node = child
+            }
+            seg_start = i + 1
+        }
+    }
+
+    deliver true
+}
+
+open flow trie_router_count(tr: Int) -> Int {
+    deliver mem_read_i64(tr, 24)
+}

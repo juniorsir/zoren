@@ -1,0 +1,227 @@
+// Zoren Standard Binary Byte Buffer Module (std/byte_buffer.zor)
+// High-performance Big-Endian & Little-Endian binary streaming, buffer management, and serialization.
+
+bring sys
+
+// ============================================================================
+// BYTE BUFFER MEMORY LAYOUT (32 bytes)
+// [0..8]:   buf_ptr  (raw allocated memory buffer)
+// [8..16]:  pos      (current read/write cursor)
+// [16..24]: limit    (current accessible boundary)
+// [24..32]: capacity (total capacity in bytes)
+// ============================================================================
+
+open flow byte_buffer_new(capacity: Int) -> Int {
+    if capacity <= 0 { capacity = 64 }
+    flex raw_buf = alloc_buffer(capacity)
+    mem_fill(raw_buf, 0, capacity)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, raw_buf)
+    mem_write_i64(header, 8, 0)         // pos
+    mem_write_i64(header, 16, capacity) // limit
+    mem_write_i64(header, 24, capacity) // cap
+    deliver header
+}
+
+open flow byte_buffer_position(bb: Int) -> Int { deliver mem_read_i64(bb, 8) }
+open flow byte_buffer_limit(bb: Int) -> Int { deliver mem_read_i64(bb, 16) }
+open flow byte_buffer_capacity(bb: Int) -> Int { deliver mem_read_i64(bb, 24) }
+open flow byte_buffer_raw_ptr(bb: Int) -> Int { deliver mem_read_i64(bb, 0) }
+
+open flow byte_buffer_remaining(bb: Int) -> Int {
+    flex pos = mem_read_i64(bb, 8)
+    flex lim = mem_read_i64(bb, 16)
+    if pos >= lim { deliver 0 }
+    deliver lim - pos
+}
+
+open flow byte_buffer_flip(bb: Int) -> Int {
+    flex pos = mem_read_i64(bb, 8)
+    mem_write_i64(bb, 16, pos) // limit = pos
+    mem_write_i64(bb, 8, 0)    // pos = 0
+    deliver 0
+}
+
+open flow byte_buffer_clear(bb: Int) -> Int {
+    flex cap = mem_read_i64(bb, 24)
+    mem_write_i64(bb, 8, 0)    // pos = 0
+    mem_write_i64(bb, 16, cap) // limit = capacity
+    deliver 0
+}
+
+open flow byte_buffer_rewind(bb: Int) -> Int {
+    mem_write_i64(bb, 8, 0)    // pos = 0
+    deliver 0
+}
+
+// ----------------------------------------------------------------------------
+// 1-Byte (u8) Read / Write
+// ----------------------------------------------------------------------------
+
+open flow byte_buffer_write_u8(bb: Int, val: Int) -> Bool {
+    flex pos = mem_read_i64(bb, 8)
+    flex lim = mem_read_i64(bb, 16)
+    if pos >= lim { deliver false }
+
+    flex raw_buf = mem_read_i64(bb, 0)
+    mem_write_byte(raw_buf, pos, val % 256)
+    mem_write_i64(bb, 8, pos + 1)
+    deliver true
+}
+
+open flow byte_buffer_read_u8(bb: Int) -> Int {
+    flex pos = mem_read_i64(bb, 8)
+    flex lim = mem_read_i64(bb, 16)
+    if pos >= lim { deliver -1 }
+
+    flex raw_buf = mem_read_i64(bb, 0)
+    flex val = mem_read_byte(raw_buf, pos)
+    mem_write_i64(bb, 8, pos + 1)
+    deliver val
+}
+
+// ----------------------------------------------------------------------------
+// 2-Byte (u16) Big-Endian & Little-Endian Read / Write
+// ----------------------------------------------------------------------------
+
+open flow byte_buffer_write_u16_be(bb: Int, val: Int) -> Bool {
+    flex b0 = (val / 256) % 256
+    flex b1 = val % 256
+    if byte_buffer_write_u8(bb, b0) != true { deliver false }
+    if byte_buffer_write_u8(bb, b1) != true { deliver false }
+    deliver true
+}
+
+open flow byte_buffer_read_u16_be(bb: Int) -> Int {
+    flex b0 = byte_buffer_read_u8(bb)
+    flex b1 = byte_buffer_read_u8(bb)
+    if b0 < 0 { deliver -1 }
+    if b1 < 0 { deliver -1 }
+    deliver (b0 * 256) + b1
+}
+
+open flow byte_buffer_write_u16_le(bb: Int, val: Int) -> Bool {
+    flex b0 = val % 256
+    flex b1 = (val / 256) % 256
+    if byte_buffer_write_u8(bb, b0) != true { deliver false }
+    if byte_buffer_write_u8(bb, b1) != true { deliver false }
+    deliver true
+}
+
+open flow byte_buffer_read_u16_le(bb: Int) -> Int {
+    flex b0 = byte_buffer_read_u8(bb)
+    flex b1 = byte_buffer_read_u8(bb)
+    if b0 < 0 { deliver -1 }
+    if b1 < 0 { deliver -1 }
+    deliver b0 + (b1 * 256)
+}
+
+// ----------------------------------------------------------------------------
+// 4-Byte (u32) Big-Endian & Little-Endian Read / Write
+// ----------------------------------------------------------------------------
+
+open flow byte_buffer_write_u32_be(bb: Int, val: Int) -> Bool {
+    flex b0 = (val / 16777216) % 256
+    flex b1 = (val / 65536) % 256
+    flex b2 = (val / 256) % 256
+    flex b3 = val % 256
+    if byte_buffer_write_u8(bb, b0) != true { deliver false }
+    if byte_buffer_write_u8(bb, b1) != true { deliver false }
+    if byte_buffer_write_u8(bb, b2) != true { deliver false }
+    if byte_buffer_write_u8(bb, b3) != true { deliver false }
+    deliver true
+}
+
+open flow byte_buffer_read_u32_be(bb: Int) -> Int {
+    flex b0 = byte_buffer_read_u8(bb)
+    flex b1 = byte_buffer_read_u8(bb)
+    flex b2 = byte_buffer_read_u8(bb)
+    flex b3 = byte_buffer_read_u8(bb)
+    if b0 < 0 { deliver -1 }
+    if b1 < 0 { deliver -1 }
+    if b2 < 0 { deliver -1 }
+    if b3 < 0 { deliver -1 }
+    deliver (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+}
+
+open flow byte_buffer_write_u32_le(bb: Int, val: Int) -> Bool {
+    flex b0 = val % 256
+    flex b1 = (val / 256) % 256
+    flex b2 = (val / 65536) % 256
+    flex b3 = (val / 16777216) % 256
+    if byte_buffer_write_u8(bb, b0) != true { deliver false }
+    if byte_buffer_write_u8(bb, b1) != true { deliver false }
+    if byte_buffer_write_u8(bb, b2) != true { deliver false }
+    if byte_buffer_write_u8(bb, b3) != true { deliver false }
+    deliver true
+}
+
+open flow byte_buffer_read_u32_le(bb: Int) -> Int {
+    flex b0 = byte_buffer_read_u8(bb)
+    flex b1 = byte_buffer_read_u8(bb)
+    flex b2 = byte_buffer_read_u8(bb)
+    flex b3 = byte_buffer_read_u8(bb)
+    if b0 < 0 { deliver -1 }
+    if b1 < 0 { deliver -1 }
+    if b2 < 0 { deliver -1 }
+    if b3 < 0 { deliver -1 }
+    deliver b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+}
+
+// ----------------------------------------------------------------------------
+// Raw Memory Streaming
+// ----------------------------------------------------------------------------
+
+open flow byte_buffer_write_bytes(bb: Int, src_buf: Int, src_len: Int) -> Bool {
+    flex rem = byte_buffer_remaining(bb)
+    if rem < src_len { deliver false }
+
+    flex raw_buf = mem_read_i64(bb, 0)
+    flex pos = mem_read_i64(bb, 8)
+    mem_copy(raw_buf + pos, src_buf, src_len)
+    mem_write_i64(bb, 8, pos + src_len)
+    deliver true
+}
+
+// ----------------------------------------------------------------------------
+// Hexadecimal Formatting
+// ----------------------------------------------------------------------------
+
+open flow bb_hex_nibble(nibble: Int) -> Text {
+    flex n = nibble % 16
+    if n == 0 { deliver "0" }
+    if n == 1 { deliver "1" }
+    if n == 2 { deliver "2" }
+    if n == 3 { deliver "3" }
+    if n == 4 { deliver "4" }
+    if n == 5 { deliver "5" }
+    if n == 6 { deliver "6" }
+    if n == 7 { deliver "7" }
+    if n == 8 { deliver "8" }
+    if n == 9 { deliver "9" }
+    if n == 10 { deliver "a" }
+    if n == 11 { deliver "b" }
+    if n == 12 { deliver "c" }
+    if n == 13 { deliver "d" }
+    if n == 14 { deliver "e" }
+    deliver "f"
+}
+
+open flow bb_hex_byte(byte_val: Int) -> Text {
+    flex high = bb_hex_nibble(byte_val / 16)
+    flex low = bb_hex_nibble(byte_val % 16)
+    deliver str_concat(high, low)
+}
+
+open flow byte_buffer_to_hex(bb: Int) -> Text {
+    flex pos = mem_read_i64(bb, 8)
+    flex raw_buf = mem_read_i64(bb, 0)
+
+    flex out_str = ""
+    for i in 0..pos {
+        flex b = mem_read_byte(raw_buf, i)
+        out_str = str_concat(out_str, bb_hex_byte(b))
+    }
+    deliver out_str
+}

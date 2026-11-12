@@ -1,0 +1,197 @@
+// Zoren High-Performance Priority Task Queue (plugins/priority_task_queue.zor)
+// Binary max-heap priority job scheduler with FIFO tie-breaking and starvation aging prevention.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// PRIORITY QUEUE MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   size
+// [8..16]:  capacity
+// [16..24]: seq_counter
+// [24..32]: heap_buf (capacity * 48 bytes)
+//
+// Each Task Item (48 bytes):
+// [0..8]:   task_id
+// [8..16]:  priority (higher = dispatched first)
+// [16..24]: scheduled_at_ms
+// [24..32]: seq
+// [32..40]: state (0=PENDING, 1=RUNNING, 2=COMPLETED, 3=FAILED)
+// [40..48]: name_hash
+// ============================================================================
+
+open flow pq_new(capacity: Int) -> Int {
+    if capacity <= 0 { capacity = 128 }
+    flex item_size = 48
+    flex heap = alloc_buffer(capacity * item_size)
+    mem_fill(heap, 0, capacity * item_size)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0)        // size = 0
+    mem_write_i64(header, 8, capacity) // capacity
+    mem_write_i64(header, 16, 1)       // seq_counter = 1
+    mem_write_i64(header, 24, heap)    // heap_buf
+
+    deliver header
+}
+
+open flow pq_size(pq: Int) -> Int { deliver mem_read_i64(pq, 0) }
+
+open flow pq_compare_tasks(heap: Int, idx_a: Int, idx_b: Int) -> Int {
+    flex off_a = idx_a * 48
+    flex off_b = idx_b * 48
+
+    flex prio_a = mem_read_i64(heap, off_a + 8)
+    flex prio_b = mem_read_i64(heap, off_b + 8)
+
+    if prio_a > prio_b { deliver 1 }
+    if prio_a < prio_b { deliver -1 }
+
+    // Tie-break by FIFO (lower sequence was scheduled earlier, higher priority)
+    flex seq_a = mem_read_i64(heap, off_a + 24)
+    flex seq_b = mem_read_i64(heap, off_b + 24)
+    if seq_a < seq_b { deliver 1 }
+    if seq_a > seq_b { deliver -1 }
+
+    deliver 0
+}
+
+open flow pq_swap_items(heap: Int, idx_a: Int, idx_b: Int) -> Int {
+    if idx_a == idx_b { deliver 0 }
+    flex off_a = idx_a * 48
+    flex off_b = idx_b * 48
+
+    for k in 0..6 {
+        flex slot = k * 8
+        flex temp = mem_read_i64(heap, off_a + slot)
+        mem_write_i64(heap, off_a + slot, mem_read_i64(heap, off_b + slot))
+        mem_write_i64(heap, off_b + slot, temp)
+    }
+    deliver 0
+}
+
+open flow pq_sift_up(heap: Int, start_idx: Int) -> Int {
+    flex idx = start_idx
+    repeat while idx > 0 {
+        flex parent = (idx - 1) / 2
+        if pq_compare_tasks(heap, idx, parent) > 0 {
+            pq_swap_items(heap, idx, parent)
+            idx = parent
+        } else {
+            break
+        }
+    }
+    deliver 0
+}
+
+open flow pq_sift_down(heap: Int, size: Int, start_idx: Int) -> Int {
+    flex idx = start_idx
+    repeat while true {
+        flex left = (idx * 2) + 1
+        flex right = (idx * 2) + 2
+        flex largest = idx
+
+        if left < size {
+            if pq_compare_tasks(heap, left, largest) > 0 {
+                largest = left
+            }
+        }
+        if right < size {
+            if pq_compare_tasks(heap, right, largest) > 0 {
+                largest = right
+            }
+        }
+
+        if largest != idx {
+            pq_swap_items(heap, idx, largest)
+            idx = largest
+        } else {
+            break
+        }
+    }
+    deliver 0
+}
+
+open flow pq_push(pq: Int, task_id: Int, priority: Int, task_name: Text, now_ms: Int) -> Bool {
+    flex size = mem_read_i64(pq, 0)
+    flex cap = mem_read_i64(pq, 8)
+    if size >= cap { deliver false }
+
+    flex seq = mem_read_i64(pq, 16)
+    mem_write_i64(pq, 16, seq + 1)
+
+    flex heap = mem_read_i64(pq, 24)
+    flex offset = size * 48
+
+    mem_write_i64(heap, offset, task_id)
+    mem_write_i64(heap, offset + 8, priority)
+    mem_write_i64(heap, offset + 16, now_ms)
+    mem_write_i64(heap, offset + 24, seq)
+    mem_write_i64(heap, offset + 32, 0) // PENDING
+    mem_write_i64(heap, offset + 40, sys_fast_hash(task_name))
+
+    pq_sift_up(heap, size)
+    mem_write_i64(pq, 0, size + 1)
+    deliver true
+}
+
+open flow pq_peek_id(pq: Int) -> Int {
+    flex size = mem_read_i64(pq, 0)
+    if size <= 0 { deliver -1 }
+    flex heap = mem_read_i64(pq, 24)
+    deliver mem_read_i64(heap, 0)
+}
+
+open flow pq_peek_priority(pq: Int) -> Int {
+    flex size = mem_read_i64(pq, 0)
+    if size <= 0 { deliver -1 }
+    flex heap = mem_read_i64(pq, 24)
+    deliver mem_read_i64(heap, 8)
+}
+
+open flow pq_pop(pq: Int) -> Int {
+    flex size = mem_read_i64(pq, 0)
+    if size <= 0 { deliver -1 }
+
+    flex heap = mem_read_i64(pq, 24)
+    flex root_id = mem_read_i64(heap, 0)
+
+    flex last_idx = size - 1
+    if last_idx > 0 {
+        // Move last item to root
+        pq_swap_items(heap, 0, last_idx)
+        pq_sift_down(heap, last_idx, 0)
+    }
+
+    mem_write_i64(pq, 0, last_idx)
+    deliver root_id
+}
+
+open flow pq_boost_starved(pq: Int, now_ms: Int, max_wait_ms: Int, boost: Int) -> Int {
+    flex size = mem_read_i64(pq, 0)
+    if size <= 0 { deliver 0 }
+
+    flex heap = mem_read_i64(pq, 24)
+    flex changed = false
+
+    for i in 0..size {
+        flex offset = i * 48
+        flex scheduled_at = mem_read_i64(heap, offset + 16)
+        if (now_ms - scheduled_at) > max_wait_ms {
+            flex old_prio = mem_read_i64(heap, offset + 8)
+            mem_write_i64(heap, offset + 8, old_prio + boost)
+            changed = true
+        }
+    }
+
+    if changed {
+        // Re-heapify from floor(size/2) down to 0
+        flex p = (size / 2) - 1
+        repeat while p >= 0 {
+            pq_sift_down(heap, size, p)
+            p = p - 1
+        }
+    }
+    deliver 0
+}

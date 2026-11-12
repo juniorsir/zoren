@@ -1,0 +1,155 @@
+// Zoren High-Throughput Multi-Tenant Token Bucket Rate Limiter (plugins/token_bucket_limiter.zor)
+// Enterprise burst rate limiting, millisecond precision token refills, and per-tenant quota isolation.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// TOKEN BUCKET LIMITER MEMORY LAYOUT (48 bytes)
+// [0..8]:   max_capacity (burst capacity)
+// [8..16]:  refill_per_sec (tokens added per second)
+// [16..24]: client_count
+// [24..32]: client_hash_buf (128 slots * 8 bytes)
+// [32..40]: tokens_buf      (128 slots * 8 bytes, scaled by 1000)
+// [40..48]: last_ms_buf     (128 slots * 8 bytes, epoch ms)
+// ============================================================================
+
+open flow tbl_new(capacity: Int, refill_per_sec: Int) -> Int {
+    if capacity <= 0 { capacity = 10 }
+    if refill_per_sec <= 0 { refill_per_sec = 1 }
+
+    flex max_clients = 128
+    flex hash_buf = alloc_buffer(max_clients * 8)
+    flex tok_buf = alloc_buffer(max_clients * 8)
+    flex ms_buf = alloc_buffer(max_clients * 8)
+
+    mem_fill(hash_buf, 0, max_clients * 8)
+    mem_fill(tok_buf, 0, max_clients * 8)
+    mem_fill(ms_buf, 0, max_clients * 8)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, capacity)
+    mem_write_i64(header, 8, refill_per_sec)
+    mem_write_i64(header, 16, 0) // count
+    mem_write_i64(header, 24, hash_buf)
+    mem_write_i64(header, 32, tok_buf)
+    mem_write_i64(header, 40, ms_buf)
+
+    deliver header
+}
+
+open flow tbl_find_or_add_client(tbl_ptr: Int, client_id: Text, now_ms: Int) -> Int {
+    flex c_hash = sys_fast_hash(client_id)
+    flex count = mem_read_i64(tbl_ptr, 16)
+    flex hash_buf = mem_read_i64(tbl_ptr, 24)
+    flex tok_buf = mem_read_i64(tbl_ptr, 32)
+    flex ms_buf = mem_read_i64(tbl_ptr, 40)
+    flex capacity = mem_read_i64(tbl_ptr, 0)
+
+    // Linear probe existing
+    for i in 0..count {
+        flex existing_hash = mem_read_i64(hash_buf, i * 8)
+        if existing_hash == c_hash {
+            deliver i
+        }
+    }
+
+    // Register new client
+    if count >= 128 { deliver -1 }
+
+    flex new_idx = count
+    mem_write_i64(hash_buf, new_idx * 8, c_hash)
+    mem_write_i64(tok_buf, new_idx * 8, capacity * 1000) // start full
+    mem_write_i64(ms_buf, new_idx * 8, now_ms)
+    mem_write_i64(tbl_ptr, 16, count + 1)
+
+    deliver new_idx
+}
+
+open flow tbl_refill(tbl_ptr: Int, idx: Int, now_ms: Int) -> Int {
+    if idx < 0 { deliver 0 }
+
+    flex capacity = mem_read_i64(tbl_ptr, 0)
+    flex refill_rate = mem_read_i64(tbl_ptr, 8)
+    flex tok_buf = mem_read_i64(tbl_ptr, 32)
+    flex ms_buf = mem_read_i64(tbl_ptr, 40)
+
+    flex last_ms = mem_read_i64(ms_buf, idx * 8)
+    flex current_tokens = mem_read_i64(tok_buf, idx * 8)
+
+    if now_ms > last_ms {
+        flex elapsed_ms = now_ms - last_ms
+        // refill_rate is tokens per 1000ms. In scaled units (x1000), tokens added = elapsed_ms * refill_rate
+        flex added_scaled = elapsed_ms * refill_rate
+        current_tokens = current_tokens + added_scaled
+        flex max_scaled = capacity * 1000
+        if current_tokens > max_scaled {
+            current_tokens = max_scaled
+        }
+        mem_write_i64(tok_buf, idx * 8, current_tokens)
+        mem_write_i64(ms_buf, idx * 8, now_ms)
+    }
+    deliver 0
+}
+
+open flow tbl_allow(tbl_ptr: Int, client_id: Text, cost: Int, now_ms: Int) -> Bool {
+    flex idx = tbl_find_or_add_client(tbl_ptr, client_id, now_ms)
+    if idx < 0 { deliver false }
+
+    tbl_refill(tbl_ptr, idx, now_ms)
+
+    flex tok_buf = mem_read_i64(tbl_ptr, 32)
+    flex current_tokens = mem_read_i64(tok_buf, idx * 8)
+    flex cost_scaled = cost * 1000
+
+    if current_tokens >= cost_scaled {
+        mem_write_i64(tok_buf, idx * 8, current_tokens - cost_scaled)
+        deliver true
+    }
+
+    deliver false
+}
+
+open flow tbl_get_tokens(tbl_ptr: Int, client_id: Text, now_ms: Int) -> Int {
+    flex idx = tbl_find_or_add_client(tbl_ptr, client_id, now_ms)
+    if idx < 0 { deliver 0 }
+
+    tbl_refill(tbl_ptr, idx, now_ms)
+
+    flex tok_buf = mem_read_i64(tbl_ptr, 32)
+    flex current_tokens = mem_read_i64(tok_buf, idx * 8)
+    deliver current_tokens / 1000
+}
+
+open flow tbl_time_until_allow_ms(tbl_ptr: Int, client_id: Text, cost: Int, now_ms: Int) -> Int {
+    flex idx = tbl_find_or_add_client(tbl_ptr, client_id, now_ms)
+    if idx < 0 { deliver 999999 }
+
+    tbl_refill(tbl_ptr, idx, now_ms)
+
+    flex tok_buf = mem_read_i64(tbl_ptr, 32)
+    flex current_tokens = mem_read_i64(tok_buf, idx * 8)
+    flex cost_scaled = cost * 1000
+
+    if current_tokens >= cost_scaled { deliver 0 }
+
+    flex deficit = cost_scaled - current_tokens
+    flex refill_rate = mem_read_i64(tbl_ptr, 8)
+    if refill_rate <= 0 { deliver 999999 }
+
+    // deficit / refill_rate in ms
+    deliver (deficit + refill_rate - 1) / refill_rate
+}
+
+open flow tbl_reset_client(tbl_ptr: Int, client_id: Text, now_ms: Int) -> Int {
+    flex idx = tbl_find_or_add_client(tbl_ptr, client_id, now_ms)
+    if idx < 0 { deliver 0 }
+
+    flex capacity = mem_read_i64(tbl_ptr, 0)
+    flex tok_buf = mem_read_i64(tbl_ptr, 32)
+    flex ms_buf = mem_read_i64(tbl_ptr, 40)
+
+    mem_write_i64(tok_buf, idx * 8, capacity * 1000)
+    mem_write_i64(ms_buf, idx * 8, now_ms)
+    deliver 0
+}
