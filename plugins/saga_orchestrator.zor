@@ -1,0 +1,147 @@
+// Zoren Distributed Saga Transaction Coordinator (plugins/saga_orchestrator.zor)
+// Microservices saga pattern: forward step orchestration and backward compensating rollbacks.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// SAGA ORCHESTRATOR MEMORY LAYOUT
+// Header (40 bytes):
+// [0..8]:   step_count
+// [8..16]:  max_steps
+// [16..24]: current_step_idx
+// [24..32]: saga_state (0=PENDING, 1=EXECUTING, 2=COMPLETED, 3=COMPENSATING, 4=ROLLED_BACK)
+// [32..40]: steps_buf
+//
+// Each Step Entry (32 bytes):
+// [0..8]:   name_hash
+// [8..16]:  action_id
+// [16..24]: compensation_id
+// [24..32]: step_state (0=PENDING, 1=SUCCESS, 2=FAILED, 3=COMPENSATED)
+// ============================================================================
+
+open flow saga_new(max_steps: Int) -> Int {
+    if max_steps <= 0 { max_steps = 32 }
+    flex step_size = 32
+    flex steps = alloc_buffer(max_steps * step_size)
+    mem_fill(steps, 0, max_steps * step_size)
+
+    flex header = alloc_buffer(40)
+    mem_write_i64(header, 0, 0)         // step_count = 0
+    mem_write_i64(header, 8, max_steps) // max_steps
+    mem_write_i64(header, 16, 0)        // current_step_idx = 0
+    mem_write_i64(header, 24, 0)        // saga_state = PENDING (0)
+    mem_write_i64(header, 32, steps)
+
+    deliver header
+}
+
+open flow saga_add_step(saga_ptr: Int, step_name: Text, action_id: Int, comp_id: Int) -> Bool {
+    flex count = mem_read_i64(saga_ptr, 0)
+    flex max_s = mem_read_i64(saga_ptr, 8)
+    if count >= max_s { deliver false }
+
+    flex steps = mem_read_i64(saga_ptr, 32)
+    flex offset = count * 32
+
+    mem_write_i64(steps, offset, sys_fast_hash(step_name))
+    mem_write_i64(steps, offset + 8, action_id)
+    mem_write_i64(steps, offset + 16, comp_id)
+    mem_write_i64(steps, offset + 24, 0) // PENDING
+
+    mem_write_i64(saga_ptr, 0, count + 1)
+    deliver true
+}
+
+open flow saga_state(saga_ptr: Int) -> Int {
+    deliver mem_read_i64(saga_ptr, 24)
+}
+
+open flow saga_current_step_action(saga_ptr: Int) -> Int {
+    flex cur = mem_read_i64(saga_ptr, 16)
+    flex count = mem_read_i64(saga_ptr, 0)
+    if cur >= count { deliver -1 }
+
+    flex steps = mem_read_i64(saga_ptr, 32)
+    deliver mem_read_i64(steps, (cur * 32) + 8)
+}
+
+open flow saga_step_success(saga_ptr: Int) -> Bool {
+    flex count = mem_read_i64(saga_ptr, 0)
+    flex cur = mem_read_i64(saga_ptr, 16)
+    if cur >= count { deliver false }
+
+    flex steps = mem_read_i64(saga_ptr, 32)
+    mem_write_i64(steps, (cur * 32) + 24, 1) // mark SUCCESS
+
+    flex next_idx = cur + 1
+    mem_write_i64(saga_ptr, 16, next_idx)
+
+    if next_idx >= count {
+        mem_write_i64(saga_ptr, 24, 2) // COMPLETED
+    } else {
+        mem_write_i64(saga_ptr, 24, 1) // EXECUTING
+    }
+    deliver true
+}
+
+open flow saga_step_fail_and_compensate(saga_ptr: Int) -> Int {
+    flex cur = mem_read_i64(saga_ptr, 16)
+    flex steps = mem_read_i64(saga_ptr, 32)
+
+    // Mark current failed
+    mem_write_i64(steps, (cur * 32) + 24, 2) // FAILED
+    mem_write_i64(saga_ptr, 24, 3)            // COMPENSATING
+
+    // Point to last successful step to compensate (cur - 1)
+    flex comp_target = cur - 1
+    mem_write_i64(saga_ptr, 16, comp_target)
+
+    if comp_target < 0 {
+        mem_write_i64(saga_ptr, 24, 4) // nothing to compensate -> ROLLED_BACK
+        deliver -1
+    }
+
+    deliver mem_read_i64(steps, (comp_target * 32) + 16) // comp_id
+}
+
+open flow saga_next_compensation_action(saga_ptr: Int) -> Int {
+    flex state = mem_read_i64(saga_ptr, 24)
+    if state != 3 { deliver -1 } // must be COMPENSATING
+
+    flex cur = mem_read_i64(saga_ptr, 16)
+    if cur < 0 { deliver -1 }
+
+    flex steps = mem_read_i64(saga_ptr, 32)
+    deliver mem_read_i64(steps, (cur * 32) + 16)
+}
+
+open flow saga_compensation_step_done(saga_ptr: Int) -> Bool {
+    flex state = mem_read_i64(saga_ptr, 24)
+    if state != 3 { deliver false }
+
+    flex cur = mem_read_i64(saga_ptr, 16)
+    if cur < 0 {
+        mem_write_i64(saga_ptr, 24, 4) // ROLLED_BACK
+        deliver true
+    }
+
+    flex steps = mem_read_i64(saga_ptr, 32)
+    mem_write_i64(steps, (cur * 32) + 24, 3) // COMPENSATED
+
+    flex next_comp = cur - 1
+    mem_write_i64(saga_ptr, 16, next_comp)
+
+    if next_comp < 0 {
+        mem_write_i64(saga_ptr, 24, 4) // ROLLED_BACK
+    }
+    deliver true
+}
+
+open flow saga_is_complete(saga_ptr: Int) -> Bool {
+    deliver mem_read_i64(saga_ptr, 24) == 2
+}
+
+open flow saga_is_rolled_back(saga_ptr: Int) -> Bool {
+    deliver mem_read_i64(saga_ptr, 24) == 4
+}

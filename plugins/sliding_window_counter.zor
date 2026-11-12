@@ -1,0 +1,104 @@
+// Zoren Sliding Window Counter & Telemetry Accumulator (plugins/sliding_window_counter.zor)
+// Sub-millisecond decaying ring-buffer counter for real-time throughput rates and burst telemetry.
+
+bring sys
+
+// ============================================================================
+// SLIDING WINDOW COUNTER MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   window_ms          (e.g., 60000 ms)
+// [8..16]:  num_buckets        (e.g., 60 buckets)
+// [16..24]: bucket_duration_ms (window_ms / num_buckets)
+// [24..32]: buckets_table      (num_buckets * 16 bytes)
+// [32..40]: last_update_ms
+// [40..48]: reserved
+//
+// Each Bucket (16 bytes):
+// [0..8]:   bucket_start_ms
+// [8..16]:  count
+// ============================================================================
+
+open flow swc_new(window_ms: Int, num_buckets: Int) -> Int {
+    if window_ms <= 0 { window_ms = 10000 }
+    if num_buckets <= 0 { num_buckets = 10 }
+
+    flex bucket_dur = window_ms / num_buckets
+    if bucket_dur <= 0 { bucket_dur = 1 }
+
+    flex table_size = num_buckets * 16
+    flex table = alloc_buffer(table_size)
+    mem_fill(table, 0, table_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, window_ms)
+    mem_write_i64(header, 8, num_buckets)
+    mem_write_i64(header, 16, bucket_dur)
+    mem_write_i64(header, 24, table)
+    mem_write_i64(header, 32, 0)
+    mem_write_i64(header, 40, 0)
+
+    deliver header
+}
+
+open flow swc_record(swc_ptr: Int, now_ms: Int, count: Int) -> Int {
+    if count <= 0 { deliver 0 }
+
+    flex num_buckets = mem_read_i64(swc_ptr, 8)
+    flex bucket_dur = mem_read_i64(swc_ptr, 16)
+    flex table = mem_read_i64(swc_ptr, 24)
+
+    flex bucket_unit = now_ms / bucket_dur
+    flex idx = bucket_unit % num_buckets
+    flex b_start = bucket_unit * bucket_dur
+
+    flex offset = idx * 16
+    flex old_start = mem_read_i64(table, offset)
+
+    if old_start != b_start {
+        // New time slice in this circular slot -> overwrite
+        mem_write_i64(table, offset, b_start)
+        mem_write_i64(table, offset + 8, count)
+    } else {
+        // Same time slice -> accumulate
+        flex cur_cnt = mem_read_i64(table, offset + 8)
+        mem_write_i64(table, offset + 8, cur_cnt + count)
+    }
+
+    mem_write_i64(swc_ptr, 32, now_ms)
+    deliver count
+}
+
+open flow swc_sum(swc_ptr: Int, now_ms: Int) -> Int {
+    flex window_ms = mem_read_i64(swc_ptr, 0)
+    flex num_buckets = mem_read_i64(swc_ptr, 8)
+    flex table = mem_read_i64(swc_ptr, 24)
+
+    flex total = 0
+    for i in 0..num_buckets {
+        flex offset = i * 16
+        flex b_start = mem_read_i64(table, offset)
+        if b_start > 0 {
+            if (now_ms - b_start) < window_ms && now_ms >= b_start {
+                total = total + mem_read_i64(table, offset + 8)
+            }
+        }
+    }
+    deliver total
+}
+
+open flow swc_rate_per_sec(swc_ptr: Int, now_ms: Int) -> Int {
+    flex window_ms = mem_read_i64(swc_ptr, 0)
+    if window_ms <= 0 { deliver 0 }
+
+    flex total = swc_sum(swc_ptr, now_ms)
+    // Rate scaled per 1000ms
+    deliver (total * 1000) / window_ms
+}
+
+open flow swc_reset(swc_ptr: Int, now_ms: Int) -> Int {
+    flex num_buckets = mem_read_i64(swc_ptr, 8)
+    flex table = mem_read_i64(swc_ptr, 24)
+    mem_fill(table, 0, num_buckets * 16)
+    mem_write_i64(swc_ptr, 32, now_ms)
+    deliver 0
+}

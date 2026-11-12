@@ -1,0 +1,126 @@
+// Zoren Compact BitSet Engine (std/bitset.zor)
+// Dense bit vector with 8x memory density over byte arrays, fast testing, toggling, and population count.
+
+bring sys
+
+// ============================================================================
+// BITSET MEMORY LAYOUT (24 bytes)
+// [0..8]:   num_bits  (total capacity in bits)
+// [8..16]:  num_bytes ((num_bits + 7) / 8)
+// [16..24]: bytes_buf (allocated memory buffer)
+// ============================================================================
+
+open flow bitset_pow2(pos: Int) -> Int {
+    flex p = pos % 8
+    if p == 0 { deliver 1 }
+    if p == 1 { deliver 2 }
+    if p == 2 { deliver 4 }
+    if p == 3 { deliver 8 }
+    if p == 4 { deliver 16 }
+    if p == 5 { deliver 32 }
+    if p == 6 { deliver 64 }
+    deliver 128
+}
+
+open flow bitset_new(num_bits: Int) -> Int {
+    if num_bits <= 0 { num_bits = 64 }
+    flex num_bytes = (num_bits + 7) / 8
+    flex buf = alloc_buffer(num_bytes)
+    mem_fill(buf, 0, num_bytes)
+
+    flex header = alloc_buffer(24)
+    mem_write_i64(header, 0, num_bits)
+    mem_write_i64(header, 8, num_bytes)
+    mem_write_i64(header, 16, buf)
+
+    deliver header
+}
+
+open flow bitset_size(bs_ptr: Int) -> Int {
+    deliver mem_read_i64(bs_ptr, 0)
+}
+
+open flow bitset_test(bs_ptr: Int, bit_idx: Int) -> Bool {
+    flex num_bits = mem_read_i64(bs_ptr, 0)
+    if bit_idx < 0 { deliver false }
+    if bit_idx >= num_bits { deliver false }
+
+    flex buf = mem_read_i64(bs_ptr, 16)
+    flex byte_idx = bit_idx / 8
+    flex bit_pos = bit_idx % 8
+    flex p2 = bitset_pow2(bit_pos)
+
+    flex byte_val = mem_read_byte(buf, byte_idx)
+    deliver ((byte_val / p2) % 2) == 1
+}
+
+open flow bitset_set(bs_ptr: Int, bit_idx: Int) -> Bool {
+    flex num_bits = mem_read_i64(bs_ptr, 0)
+    if bit_idx < 0 { deliver false }
+    if bit_idx >= num_bits { deliver false }
+
+    flex buf = mem_read_i64(bs_ptr, 16)
+    flex byte_idx = bit_idx / 8
+    flex bit_pos = bit_idx % 8
+    flex p2 = bitset_pow2(bit_pos)
+
+    flex byte_val = mem_read_byte(buf, byte_idx)
+    if ((byte_val / p2) % 2) == 0 {
+        mem_write_byte(buf, byte_idx, byte_val + p2)
+    }
+    deliver true
+}
+
+open flow bitset_clear(bs_ptr: Int, bit_idx: Int) -> Bool {
+    flex num_bits = mem_read_i64(bs_ptr, 0)
+    if bit_idx < 0 { deliver false }
+    if bit_idx >= num_bits { deliver false }
+
+    flex buf = mem_read_i64(bs_ptr, 16)
+    flex byte_idx = bit_idx / 8
+    flex bit_pos = bit_idx % 8
+    flex p2 = bitset_pow2(bit_pos)
+
+    flex byte_val = mem_read_byte(buf, byte_idx)
+    if ((byte_val / p2) % 2) == 1 {
+        mem_write_byte(buf, byte_idx, byte_val - p2)
+    }
+    deliver true
+}
+
+open flow bitset_toggle(bs_ptr: Int, bit_idx: Int) -> Bool {
+    if bitset_test(bs_ptr, bit_idx) {
+        bitset_clear(bs_ptr, bit_idx)
+    } else {
+        bitset_set(bs_ptr, bit_idx)
+    }
+    deliver true
+}
+
+open flow bitset_fill(bs_ptr: Int, val: Int) -> Int {
+    flex num_bytes = mem_read_i64(bs_ptr, 8)
+    flex buf = mem_read_i64(bs_ptr, 16)
+    flex byte_val = 255
+    if val == 0 { byte_val = 0 }
+    mem_fill(buf, byte_val, num_bytes)
+    deliver 0
+}
+
+open flow bitset_count_ones(bs_ptr: Int) -> Int {
+    flex num_bits = mem_read_i64(bs_ptr, 0)
+    flex num_bytes = mem_read_i64(bs_ptr, 8)
+    flex buf = mem_read_i64(bs_ptr, 16)
+
+    flex total = 0
+    for i in 0..num_bytes {
+        flex b = mem_read_byte(buf, i)
+        flex temp = b
+        repeat while temp > 0 {
+            if (temp % 2) == 1 {
+                total = total + 1
+            }
+            temp = temp / 2
+        }
+    }
+    deliver total
+}

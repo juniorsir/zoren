@@ -1,0 +1,165 @@
+// Zoren Directed Graph & Topological Sort DAG Engine (plugins/hyper_graph.zor)
+// Dependency resolution, cycle detection (Kahn's algorithm), and DAG topological sorting.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// DIRECTED GRAPH MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   num_nodes
+// [8..16]:  max_nodes
+// [16..24]: adj_matrix (max_nodes * max_nodes bytes)
+// [24..32]: names_buf  (max_nodes * 8 bytes, hash of names)
+// ============================================================================
+
+open flow graph_new(max_nodes: Int) -> Int {
+    if max_nodes <= 0 { max_nodes = 32 }
+    flex matrix_bytes = max_nodes * max_nodes
+    flex adj = alloc_buffer(matrix_bytes)
+    mem_fill(adj, 0, matrix_bytes)
+
+    flex names = alloc_buffer(max_nodes * 8)
+    mem_fill(names, 0, max_nodes * 8)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0)         // num_nodes = 0
+    mem_write_i64(header, 8, max_nodes) // max_nodes
+    mem_write_i64(header, 16, adj)
+    mem_write_i64(header, 24, names)
+
+    deliver header
+}
+
+open flow graph_add_node(g_ptr: Int, node_name: Text) -> Int {
+    flex n_nodes = mem_read_i64(g_ptr, 0)
+    flex max_n = mem_read_i64(g_ptr, 8)
+    if n_nodes >= max_n { deliver -1 }
+
+    flex names = mem_read_i64(g_ptr, 24)
+    mem_write_i64(names, n_nodes * 8, sys_fast_hash(node_name))
+
+    mem_write_i64(g_ptr, 0, n_nodes + 1)
+    deliver n_nodes
+}
+
+open flow graph_add_edge(g_ptr: Int, from_id: Int, to_id: Int) -> Bool {
+    flex n_nodes = mem_read_i64(g_ptr, 0)
+    if from_id < 0 || from_id >= n_nodes { deliver false }
+    if to_id < 0 || to_id >= n_nodes { deliver false }
+
+    flex max_n = mem_read_i64(g_ptr, 8)
+    flex adj = mem_read_i64(g_ptr, 16)
+    flex slot = (from_id * max_n) + to_id
+
+    mem_write_byte(adj, slot, 1)
+    deliver true
+}
+
+open flow graph_has_edge(g_ptr: Int, from_id: Int, to_id: Int) -> Bool {
+    flex n_nodes = mem_read_i64(g_ptr, 0)
+    if from_id < 0 || from_id >= n_nodes { deliver false }
+    if to_id < 0 || to_id >= n_nodes { deliver false }
+
+    flex max_n = mem_read_i64(g_ptr, 8)
+    flex adj = mem_read_i64(g_ptr, 16)
+    flex slot = (from_id * max_n) + to_id
+
+    deliver mem_read_byte(adj, slot) == 1
+}
+
+open flow graph_in_degree(g_ptr: Int, node_id: Int) -> Int {
+    flex n_nodes = mem_read_i64(g_ptr, 0)
+    if node_id < 0 || node_id >= n_nodes { deliver 0 }
+
+    flex max_n = mem_read_i64(g_ptr, 8)
+    flex adj = mem_read_i64(g_ptr, 16)
+
+    flex deg = 0
+    for u in 0..n_nodes {
+        flex slot = (u * max_n) + node_id
+        if mem_read_byte(adj, slot) == 1 {
+            deg = deg + 1
+        }
+    }
+    deliver deg
+}
+
+open flow graph_out_degree(g_ptr: Int, node_id: Int) -> Int {
+    flex n_nodes = mem_read_i64(g_ptr, 0)
+    if node_id < 0 || node_id >= n_nodes { deliver 0 }
+
+    flex max_n = mem_read_i64(g_ptr, 8)
+    flex adj = mem_read_i64(g_ptr, 16)
+
+    flex deg = 0
+    for v in 0..n_nodes {
+        flex slot = (node_id * max_n) + v
+        if mem_read_byte(adj, slot) == 1 {
+            deg = deg + 1
+        }
+    }
+    deliver deg
+}
+
+open flow graph_topological_sort(g_ptr: Int, out_order_buf: Int) -> Int {
+    flex n_nodes = mem_read_i64(g_ptr, 0)
+    if n_nodes <= 0 { deliver 0 }
+
+    flex max_n = mem_read_i64(g_ptr, 8)
+    flex adj = mem_read_i64(g_ptr, 16)
+
+    // Allocate in-degree working array
+    flex in_degrees = alloc_buffer(n_nodes * 8)
+    for i in 0..n_nodes {
+        mem_write_i64(in_degrees, i * 8, graph_in_degree(g_ptr, i))
+    }
+
+    // Queue of nodes with 0 in-degree
+    flex queue = alloc_buffer(n_nodes * 8)
+    flex q_head = 0
+    flex q_tail = 0
+
+    for i in 0..n_nodes {
+        if mem_read_i64(in_degrees, i * 8) == 0 {
+            mem_write_i64(queue, q_tail * 8, i)
+            q_tail = q_tail + 1
+        }
+    }
+
+    flex sorted_count = 0
+
+    repeat while q_head < q_tail {
+        flex u = mem_read_i64(queue, q_head * 8)
+        q_head = q_head + 1
+
+        mem_write_i64(out_order_buf, sorted_count * 8, u)
+        sorted_count = sorted_count + 1
+
+        // Decrement in-degree for all children of u
+        for v in 0..n_nodes {
+            flex slot = (u * max_n) + v
+            if mem_read_byte(adj, slot) == 1 {
+                flex cur_in = mem_read_i64(in_degrees, v * 8)
+                flex new_in = cur_in - 1
+                mem_write_i64(in_degrees, v * 8, new_in)
+                if new_in == 0 {
+                    mem_write_i64(queue, q_tail * 8, v)
+                    q_tail = q_tail + 1
+                }
+            }
+        }
+    }
+
+    if sorted_count != n_nodes {
+        deliver -1 // Cycle detected!
+    }
+
+    deliver sorted_count
+}
+
+open flow graph_has_cycle(g_ptr: Int) -> Bool {
+    flex n_nodes = mem_read_i64(g_ptr, 0)
+    flex dummy = alloc_buffer(n_nodes * 8)
+    deliver graph_topological_sort(g_ptr, dummy) == -1
+}
