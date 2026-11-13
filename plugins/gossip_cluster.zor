@@ -1,0 +1,186 @@
+// SWIM / Gossip Protocol Engine for Distributed Node Membership & Failure Detection
+// Manages node states (ALIVE, SUSPECT, DEAD) with incarnation counters and heartbeat timeouts
+
+// Member Record (32 bytes):
+// [0..8]:   node_id (Int, -1 if empty)
+// [8..16]:  state (0 = DEAD, 1 = ALIVE, 2 = SUSPECT)
+// [16..24]: incarnation (Int version counter)
+// [24..32]: last_heartbeat_sec (Int timestamp)
+
+// Header (48 bytes):
+// [0..8]:   capacity
+// [8..16]:  member_count
+// [16..24]: members_buf (pointer)
+// [24..32]: ping_round
+// [32..40]: suspect_timeout_sec
+// [40..48]: dead_timeout_sec
+
+open flow gossip_create(capacity: Int, suspect_timeout_sec: Int, dead_timeout_sec: Int) -> Int {
+    flex cap = capacity
+    if cap < 4 {
+        cap = 4
+    }
+    flex members = alloc_buffer(cap * 32)
+    flex header = alloc_buffer(48)
+
+    flex i = 0
+    while i < cap {
+        mem_write_i64(members, i * 32 + 0, -1) // empty
+        mem_write_i64(members, i * 32 + 8, 0)  // DEAD
+        mem_write_i64(members, i * 32 + 16, 0) // incarnation
+        mem_write_i64(members, i * 32 + 24, 0) // last_hb
+        i = i + 1
+    }
+
+    mem_write_i64(header, 0, cap)
+    mem_write_i64(header, 8, 0)
+    mem_write_i64(header, 16, members)
+    mem_write_i64(header, 24, 0)
+    mem_write_i64(header, 32, suspect_timeout_sec)
+    mem_write_i64(header, 40, dead_timeout_sec)
+
+    deliver header
+}
+
+open flow gossip_join(cluster: Int, node_id: Int, now_sec: Int) -> Bool {
+    flex cap = mem_read_i64(cluster, 0)
+    flex members = mem_read_i64(cluster, 16)
+
+    flex empty_idx = -1
+    flex i = 0
+    while i < cap {
+        flex nid = mem_read_i64(members, i * 32 + 0)
+        if nid == node_id {
+            // Already member, refresh to ALIVE
+            mem_write_i64(members, i * 32 + 8, 1) // ALIVE
+            mem_write_i64(members, i * 32 + 24, now_sec)
+            deliver true
+        }
+        if empty_idx == -1 && nid == -1 {
+            empty_idx = i
+        }
+        i = i + 1
+    }
+
+    if empty_idx == -1 {
+        deliver false // Capacity full
+    }
+
+    mem_write_i64(members, empty_idx * 32 + 0, node_id)
+    mem_write_i64(members, empty_idx * 32 + 8, 1) // ALIVE
+    mem_write_i64(members, empty_idx * 32 + 16, 1) // incarnation 1
+    mem_write_i64(members, empty_idx * 32 + 24, now_sec)
+
+    flex cnt = mem_read_i64(cluster, 8)
+    mem_write_i64(cluster, 8, cnt + 1)
+    deliver true
+}
+
+open flow gossip_heartbeat(cluster: Int, node_id: Int, incarnation: Int, now_sec: Int) -> Bool {
+    flex cap = mem_read_i64(cluster, 0)
+    flex members = mem_read_i64(cluster, 16)
+
+    flex i = 0
+    while i < cap {
+        flex nid = mem_read_i64(members, i * 32 + 0)
+        if nid == node_id {
+            flex curr_inc = mem_read_i64(members, i * 32 + 16)
+            if incarnation >= curr_inc {
+                mem_write_i64(members, i * 32 + 8, 1) // ALIVE
+                mem_write_i64(members, i * 32 + 16, incarnation)
+                mem_write_i64(members, i * 32 + 24, now_sec)
+                deliver true
+            }
+        }
+        i = i + 1
+    }
+
+    deliver false
+}
+
+open flow gossip_mark_suspect(cluster: Int, node_id: Int) -> Bool {
+    flex cap = mem_read_i64(cluster, 0)
+    flex members = mem_read_i64(cluster, 16)
+
+    flex i = 0
+    while i < cap {
+        flex nid = mem_read_i64(members, i * 32 + 0)
+        if nid == node_id {
+            mem_write_i64(members, i * 32 + 8, 2) // SUSPECT
+            deliver true
+        }
+        i = i + 1
+    }
+    deliver false
+}
+
+open flow gossip_evaluate_timeouts(cluster: Int, now_sec: Int) -> Int {
+    flex cap = mem_read_i64(cluster, 0)
+    flex suspect_to = mem_read_i64(cluster, 32)
+    flex dead_to = mem_read_i64(cluster, 40)
+    flex members = mem_read_i64(cluster, 16)
+
+    flex transitions = 0
+    flex i = 0
+    while i < cap {
+        flex nid = mem_read_i64(members, i * 32 + 0)
+        if nid != -1 {
+            flex state = mem_read_i64(members, i * 32 + 8)
+            flex last_hb = mem_read_i64(members, i * 32 + 24)
+            flex elapsed = now_sec - last_hb
+
+            if state == 1 && elapsed >= suspect_to { // ALIVE -> SUSPECT
+                mem_write_i64(members, i * 32 + 8, 2)
+                transitions = transitions + 1
+            }
+            if state == 2 && elapsed >= dead_to { // SUSPECT -> DEAD
+                mem_write_i64(members, i * 32 + 8, 0)
+                transitions = transitions + 1
+            }
+        }
+        i = i + 1
+    }
+
+    deliver transitions
+}
+
+open flow gossip_get_state(cluster: Int, node_id: Int) -> Int {
+    flex cap = mem_read_i64(cluster, 0)
+    flex members = mem_read_i64(cluster, 16)
+
+    flex i = 0
+    while i < cap {
+        flex nid = mem_read_i64(members, i * 32 + 0)
+        if nid == node_id {
+            deliver mem_read_i64(members, i * 32 + 8)
+        }
+        i = i + 1
+    }
+    deliver -1 // Not found
+}
+
+open flow gossip_alive_count(cluster: Int) -> Int {
+    flex cap = mem_read_i64(cluster, 0)
+    flex members = mem_read_i64(cluster, 16)
+
+    flex count = 0
+    flex i = 0
+    while i < cap {
+        flex nid = mem_read_i64(members, i * 32 + 0)
+        if nid != -1 {
+            flex state = mem_read_i64(members, i * 32 + 8)
+            if state == 1 { // ALIVE
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    deliver count
+}
+
+open flow gossip_free(cluster: Int) -> Int {
+    flex members = mem_read_i64(cluster, 16)
+    free_buffer(members)
+    free_buffer(cluster)
+    deliver 0
+}

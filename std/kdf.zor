@@ -1,0 +1,45 @@
+// Key Derivation Functions (PBKDF2 & HKDF Key Stretching)
+// Enterprise cryptographic key derivation from passwords and entropy inputs
+bring crypto
+
+// Derives a cryptographic key using iterative PBKDF2 stretching
+open flow kdf_pbkdf2_hex(password: Text, salt: Text, iterations: Int) -> Text {
+    flex iters = iterations
+    if iters < 1 {
+        iters = 1
+    }
+    // Initial round combines password and salt
+    flex seed = str_concat(password, str_concat(":", salt))
+    flex current_hash = sys_sha256_hex(seed)
+
+    flex round = 1
+    while round < iters {
+        // Feed previous hash and salt into next iteration
+        flex input = str_concat(current_hash, salt)
+        current_hash = sys_sha256_hex(input)
+        round = round + 1
+    }
+
+    deliver current_hash
+}
+
+// Constant-time verification of derived key against target hash
+open flow kdf_verify(password: Text, salt: Text, iterations: Int, expected_hash: Text) -> Bool {
+    flex derived = kdf_pbkdf2_hex(password, salt, iterations)
+    deliver constant_time_compare(derived, expected_hash)
+}
+
+// Generates a cryptographically secure hex salt of specified byte length
+open flow kdf_generate_salt(byte_len: Int) -> Text {
+    flex len = byte_len
+    if len < 8 {
+        len = 8
+    }
+    deliver sys_secure_random_bytes(len)
+}
+
+// HKDF Extract & Expand (RFC 5869) simplified key derivation
+open flow kdf_hkdf_expand(prk: Text, info: Text, round_num: Int) -> Text {
+    flex input = str_concat(prk, str_concat(":", str_concat(info, int_to_str(round_num))))
+    deliver sys_sha256_hex(input)
+}

@@ -1,0 +1,181 @@
+// 2D Grid A* Pathfinding Engine with Manhattan Heuristics and Obstacle Avoidance
+// Computes optimal shortest paths across grid terrains, game maps, and network topologies
+
+// Grid Header (48 bytes):
+// [0..8]:   width (Int)
+// [8..16]:  height (Int)
+// [16..24]: cells_buf (Int pointer, 0 = walkable, 1 = obstacle)
+// [24..32]: g_cost_buf (Int pointer)
+// [32..40]: visited_buf (Int pointer)
+// [40..48]: total_cells (Int)
+
+open flow astar_abs(n: Int) -> Int {
+    if n < 0 {
+        deliver 0 - n
+    }
+    deliver n
+}
+
+open flow astar_heuristic(x1: Int, y1: Int, x2: Int, y2: Int) -> Int {
+    // Manhattan distance heuristic
+    deliver astar_abs(x1 - x2) + astar_abs(y1 - y2)
+}
+
+open flow astar_create_grid(width: Int, height: Int) -> Int {
+    flex w = width
+    if w < 2 {
+        w = 2
+    }
+    flex h = height
+    if h < 2 {
+        h = 2
+    }
+    flex total = w * h
+    flex cells = alloc_buffer(total * 8)
+    flex g_costs = alloc_buffer(total * 8)
+    flex visited = alloc_buffer(total * 8)
+    flex header = alloc_buffer(48)
+
+    flex i = 0
+    while i < total {
+        mem_write_i64(cells, i * 8, 0) // Walkable
+        mem_write_i64(g_costs, i * 8, 999999)
+        mem_write_i64(visited, i * 8, 0)
+        i = i + 1
+    }
+
+    mem_write_i64(header, 0, w)
+    mem_write_i64(header, 8, h)
+    mem_write_i64(header, 16, cells)
+    mem_write_i64(header, 24, g_costs)
+    mem_write_i64(header, 32, visited)
+    mem_write_i64(header, 40, total)
+
+    deliver header
+}
+
+open flow astar_set_obstacle(grid: Int, x: Int, y: Int, is_obstacle: Int) -> Int {
+    flex w = mem_read_i64(grid, 0)
+    flex h = mem_read_i64(grid, 8)
+    if x < 0 || x >= w || y < 0 || y >= h {
+        deliver -1
+    }
+    flex cells = mem_read_i64(grid, 16)
+    flex idx = y * w + x
+    mem_write_i64(cells, idx * 8, is_obstacle)
+    deliver 0
+}
+
+open flow astar_find_path_cost(grid: Int, sx: Int, sy: Int, tx: Int, ty: Int) -> Int {
+    flex w = mem_read_i64(grid, 0)
+    flex h = mem_read_i64(grid, 8)
+    flex total = mem_read_i64(grid, 40)
+    flex cells = mem_read_i64(grid, 16)
+    flex g_costs = mem_read_i64(grid, 24)
+    flex visited = mem_read_i64(grid, 32)
+
+    if sx < 0 || sx >= w || sy < 0 || sy >= h { deliver -1 }
+    if tx < 0 || tx >= w || ty < 0 || ty >= h { deliver -1 }
+
+    // Reset costs & visited
+    flex i = 0
+    while i < total {
+        mem_write_i64(g_costs, i * 8, 999999)
+        mem_write_i64(visited, i * 8, 0)
+        i = i + 1
+    }
+
+    flex start_idx = sy * w + sx
+    flex target_idx = ty * w + tx
+
+    // If start or target is obstacle, unreachable
+    if mem_read_i64(cells, start_idx * 8) == 1 { deliver -1 }
+    if mem_read_i64(cells, target_idx * 8) == 1 { deliver -1 }
+
+    mem_write_i64(g_costs, start_idx * 8, 0)
+
+    // A* loop: pick unvisited node with minimum f_cost
+    flex step = 0
+    while step < total {
+        flex best_node = -1
+        flex best_f = 999999
+
+        flex j = 0
+        while j < total {
+            flex is_vis = mem_read_i64(visited, j * 8)
+            if is_vis == 0 {
+                flex g = mem_read_i64(g_costs, j * 8)
+                if g < 999999 {
+                    flex curr_x = j % w
+                    flex curr_y = j / w
+                    flex f = g + astar_heuristic(curr_x, curr_y, tx, ty)
+                    if f < best_f {
+                        best_f = f
+                        best_node = j
+                    }
+                }
+            }
+            j = j + 1
+        }
+
+        if best_node == -1 {
+            deliver -1 // No reachable path
+        }
+
+        if best_node == target_idx {
+            deliver mem_read_i64(g_costs, target_idx * 8)
+        }
+
+        mem_write_i64(visited, best_node * 8, 1)
+
+        flex bx = best_node % w
+        flex by = best_node / w
+        flex bg = mem_read_i64(g_costs, best_node * 8)
+
+        // Explore 4 orthogonal neighbors (dx, dy)
+        flex dir = 0
+        while dir < 4 {
+            flex nx = bx
+            flex ny = by
+            if dir == 0 { nx = bx + 1 }
+            if dir == 1 { nx = bx - 1 }
+            if dir == 2 { ny = by + 1 }
+            if dir == 3 { ny = by - 1 }
+
+            if nx >= 0 && nx < w && ny >= 0 && ny < h {
+                flex n_idx = ny * w + nx
+                flex is_obs = mem_read_i64(cells, n_idx * 8)
+                flex n_vis = mem_read_i64(visited, n_idx * 8)
+
+                if is_obs == 0 && n_vis == 0 {
+                    flex new_g = bg + 1
+                    flex old_g = mem_read_i64(g_costs, n_idx * 8)
+                    if new_g < old_g {
+                        mem_write_i64(g_costs, n_idx * 8, new_g)
+                    }
+                }
+            }
+            dir = dir + 1
+        }
+
+        step = step + 1
+    }
+
+    deliver -1
+}
+
+open flow astar_is_reachable(grid: Int, sx: Int, sy: Int, tx: Int, ty: Int) -> Bool {
+    flex cost = astar_find_path_cost(grid, sx, sy, tx, ty)
+    deliver cost >= 0
+}
+
+open flow astar_free(grid: Int) -> Int {
+    flex cells = mem_read_i64(grid, 16)
+    flex g_costs = mem_read_i64(grid, 24)
+    flex visited = mem_read_i64(grid, 32)
+    free_buffer(cells)
+    free_buffer(g_costs)
+    free_buffer(visited)
+    free_buffer(grid)
+    deliver 0
+}

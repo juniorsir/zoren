@@ -1,0 +1,252 @@
+// Self-Balancing Left-Leaning Red-Black (LLRB) Binary Search Tree
+// Guarantees O(log N) lookup, insertion, and strictly bounded tree height
+// Colors: 0 = RED, 1 = BLACK
+
+// Node layout (48 bytes):
+// [0..8]:   key (Int)
+// [8..16]:  value (Int)
+// [16..24]: color (0 = RED, 1 = BLACK)
+// [24..32]: left (Int, node index or -1)
+// [32..40]: right (Int, node index or -1)
+// [40..48]: reserved
+
+// Header layout (32 bytes):
+// [0..8]:   capacity (Int)
+// [8..16]:  count (Int)
+// [16..24]: root (Int, node index or -1)
+// [24..32]: nodes_buf (Int pointer)
+
+open flow rbt_create(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap < 8 {
+        cap = 8
+    }
+    flex nodes = alloc_buffer(cap * 48)
+    flex header = alloc_buffer(32)
+
+    mem_write_i64(header, 0, cap)
+    mem_write_i64(header, 8, 0)   // count
+    mem_write_i64(header, 16, -1) // root
+    mem_write_i64(header, 24, nodes)
+
+    deliver header
+}
+
+open flow rbt_size(tree: Int) -> Int {
+    deliver mem_read_i64(tree, 8)
+}
+
+open flow rbt_is_empty(tree: Int) -> Bool {
+    flex c = mem_read_i64(tree, 8)
+    deliver c == 0
+}
+
+open flow rbt_is_red(nodes: Int, idx: Int) -> Bool {
+    if idx < 0 {
+        deliver false
+    }
+    flex col = mem_read_i64(nodes, idx * 48 + 16)
+    deliver col == 0
+}
+
+open flow rbt_rotate_left(nodes: Int, h: Int) -> Int {
+    flex x = mem_read_i64(nodes, h * 48 + 32) // x = h.right
+    flex x_left = mem_read_i64(nodes, x * 48 + 24)
+    mem_write_i64(nodes, h * 48 + 32, x_left) // h.right = x.left
+    mem_write_i64(nodes, x * 48 + 24, h)      // x.left = h
+
+    // x.color = h.color; h.color = RED
+    flex h_col = mem_read_i64(nodes, h * 48 + 16)
+    mem_write_i64(nodes, x * 48 + 16, h_col)
+    mem_write_i64(nodes, h * 48 + 16, 0) // RED
+
+    deliver x
+}
+
+open flow rbt_rotate_right(nodes: Int, h: Int) -> Int {
+    flex x = mem_read_i64(nodes, h * 48 + 24) // x = h.left
+    flex x_right = mem_read_i64(nodes, x * 48 + 32)
+    mem_write_i64(nodes, h * 48 + 24, x_right) // h.left = x.right
+    mem_write_i64(nodes, x * 48 + 32, h)       // x.right = h
+
+    // x.color = h.color; h.color = RED
+    flex h_col = mem_read_i64(nodes, h * 48 + 16)
+    mem_write_i64(nodes, x * 48 + 16, h_col)
+    mem_write_i64(nodes, h * 48 + 16, 0) // RED
+
+    deliver x
+}
+
+open flow rbt_flip_colors(nodes: Int, h: Int) -> Int {
+    // Invert colors of h, h.left, h.right
+    flex h_col = mem_read_i64(nodes, h * 48 + 16)
+    if h_col == 0 {
+        mem_write_i64(nodes, h * 48 + 16, 1)
+    } else {
+        mem_write_i64(nodes, h * 48 + 16, 0)
+    }
+
+    flex left = mem_read_i64(nodes, h * 48 + 24)
+    if left >= 0 {
+        flex l_col = mem_read_i64(nodes, left * 48 + 16)
+        if l_col == 0 {
+            mem_write_i64(nodes, left * 48 + 16, 1)
+        } else {
+            mem_write_i64(nodes, left * 48 + 16, 0)
+        }
+    }
+
+    flex right = mem_read_i64(nodes, h * 48 + 32)
+    if right >= 0 {
+        flex r_col = mem_read_i64(nodes, right * 48 + 16)
+        if r_col == 0 {
+            mem_write_i64(nodes, right * 48 + 16, 1)
+        } else {
+            mem_write_i64(nodes, right * 48 + 16, 0)
+        }
+    }
+
+    deliver 0
+}
+
+open flow rbt_insert_rec(tree: Int, h: Int, key: Int, val: Int) -> Int {
+    flex nodes = mem_read_i64(tree, 24)
+    if h < 0 {
+        // Allocate new node
+        flex cnt = mem_read_i64(tree, 8)
+        flex new_idx = cnt
+        mem_write_i64(nodes, new_idx * 48 + 0, key)
+        mem_write_i64(nodes, new_idx * 48 + 8, val)
+        mem_write_i64(nodes, new_idx * 48 + 16, 0) // New nodes are RED
+        mem_write_i64(nodes, new_idx * 48 + 24, -1)
+        mem_write_i64(nodes, new_idx * 48 + 32, -1)
+        mem_write_i64(nodes, new_idx * 48 + 40, 0)
+        mem_write_i64(tree, 8, cnt + 1)
+        deliver new_idx
+    }
+
+    flex curr_key = mem_read_i64(nodes, h * 48 + 0)
+    if key < curr_key {
+        flex left = mem_read_i64(nodes, h * 48 + 24)
+        flex new_left = rbt_insert_rec(tree, left, key, val)
+        mem_write_i64(nodes, h * 48 + 24, new_left)
+    }
+    if key > curr_key {
+        flex right = mem_read_i64(nodes, h * 48 + 32)
+        flex new_right = rbt_insert_rec(tree, right, key, val)
+        mem_write_i64(nodes, h * 48 + 32, new_right)
+    }
+    if key == curr_key {
+        // Update existing value
+        mem_write_i64(nodes, h * 48 + 8, val)
+        deliver h
+    }
+
+    // Fix-up right-leaning reds & double reds
+    flex curr_node = h
+    flex curr_right = mem_read_i64(nodes, curr_node * 48 + 32)
+    flex curr_left = mem_read_i64(nodes, curr_node * 48 + 24)
+
+    if rbt_is_red(nodes, curr_right) && !rbt_is_red(nodes, curr_left) {
+        curr_node = rbt_rotate_left(nodes, curr_node)
+    }
+
+    curr_left = mem_read_i64(nodes, curr_node * 48 + 24)
+    if curr_left >= 0 {
+        flex left_left = mem_read_i64(nodes, curr_left * 48 + 24)
+        if rbt_is_red(nodes, curr_left) && rbt_is_red(nodes, left_left) {
+            curr_node = rbt_rotate_right(nodes, curr_node)
+        }
+    }
+
+    curr_left = mem_read_i64(nodes, curr_node * 48 + 24)
+    curr_right = mem_read_i64(nodes, curr_node * 48 + 32)
+    if rbt_is_red(nodes, curr_left) && rbt_is_red(nodes, curr_right) {
+        rbt_flip_colors(nodes, curr_node)
+    }
+
+    deliver curr_node
+}
+
+open flow rbt_insert(tree: Int, key: Int, val: Int) -> Bool {
+    flex cap = mem_read_i64(tree, 0)
+    flex cnt = mem_read_i64(tree, 8)
+    if cnt >= cap {
+        deliver false
+    }
+
+    flex root = mem_read_i64(tree, 16)
+    flex new_root = rbt_insert_rec(tree, root, key, val)
+    flex nodes = mem_read_i64(tree, 24)
+
+    // Root must always be BLACK
+    mem_write_i64(nodes, new_root * 48 + 16, 1)
+    mem_write_i64(tree, 16, new_root)
+    deliver true
+}
+
+open flow rbt_get(tree: Int, key: Int) -> Int {
+    flex root = mem_read_i64(tree, 16)
+    if root < 0 {
+        deliver -1
+    }
+    flex nodes = mem_read_i64(tree, 24)
+    flex curr = root
+
+    while curr >= 0 {
+        flex k = mem_read_i64(nodes, curr * 48 + 0)
+        if key == k {
+            deliver mem_read_i64(nodes, curr * 48 + 8)
+        }
+        if key < k {
+            curr = mem_read_i64(nodes, curr * 48 + 24)
+        } else {
+            curr = mem_read_i64(nodes, curr * 48 + 32)
+        }
+    }
+    deliver -1
+}
+
+open flow rbt_contains(tree: Int, key: Int) -> Bool {
+    flex v = rbt_get(tree, key)
+    deliver v != -1
+}
+
+open flow rbt_min_key(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 16)
+    if root < 0 {
+        deliver -1
+    }
+    flex nodes = mem_read_i64(tree, 24)
+    flex curr = root
+    flex min_k = mem_read_i64(nodes, curr * 48 + 0)
+
+    while curr >= 0 {
+        min_k = mem_read_i64(nodes, curr * 48 + 0)
+        curr = mem_read_i64(nodes, curr * 48 + 24) // follow left
+    }
+    deliver min_k
+}
+
+open flow rbt_max_key(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 16)
+    if root < 0 {
+        deliver -1
+    }
+    flex nodes = mem_read_i64(tree, 24)
+    flex curr = root
+    flex max_k = mem_read_i64(nodes, curr * 48 + 0)
+
+    while curr >= 0 {
+        max_k = mem_read_i64(nodes, curr * 48 + 0)
+        curr = mem_read_i64(nodes, curr * 48 + 32) // follow right
+    }
+    deliver max_k
+}
+
+open flow rbt_free(tree: Int) -> Int {
+    flex nodes = mem_read_i64(tree, 24)
+    free_buffer(nodes)
+    free_buffer(tree)
+    deliver 0
+}

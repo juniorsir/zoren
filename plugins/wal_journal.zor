@@ -1,0 +1,147 @@
+// Write-Ahead Logging (WAL) Crash-Resilience Journal Engine
+// Appends structured transaction logs with FNV-checksum validation and recovery replay
+
+// WAL Record Layout (48 bytes):
+// [0..8]:   lsn (Log Sequence Number)
+// [8..16]:  tx_id (Transaction ID)
+// [16..24]: op_type (1 = INSERT/ADD, 2 = SUB/DEBIT, 3 = SET, 4 = COMMIT, 5 = ROLLBACK)
+// [24..32]: payload (Int data/value)
+// [32..40]: checksum (32-bit verification hash)
+// [40..48]: timestamp_sec
+
+// Header Layout (48 bytes):
+// [0..8]:   capacity
+// [8..16]:  entry_count
+// [16..24]: last_lsn
+// [24..32]: entries_buf (pointer)
+// [32..40]: corrupted_entries
+// [40..48]: committed_lsn
+
+open flow wal_compute_checksum(lsn: Int, tx_id: Int, op: Int, payload: Int) -> Int {
+    flex h = 2166136261
+    flex sum = lsn * 31 + tx_id * 17 + op * 101 + payload * 7
+    if sum < 0 {
+        sum = 0 - sum
+    }
+    flex step = 0
+    while step < 4 {
+        flex b = (sum / (step * 256 + 1)) % 256
+        h = (h + b) * 16777619
+        if h < 0 {
+            h = 0 - h
+        }
+        h = h % 2147483647
+        step = step + 1
+    }
+    deliver h
+}
+
+open flow wal_create(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap < 16 {
+        cap = 16
+    }
+    flex entries = alloc_buffer(cap * 48)
+    flex header = alloc_buffer(48)
+
+    mem_write_i64(header, 0, cap)
+    mem_write_i64(header, 8, 0)  // entry_count
+    mem_write_i64(header, 16, 0) // last_lsn
+    mem_write_i64(header, 24, entries)
+    mem_write_i64(header, 32, 0) // corrupted_entries
+    mem_write_i64(header, 40, 0) // committed_lsn
+
+    deliver header
+}
+
+open flow wal_count(wal: Int) -> Int {
+    deliver mem_read_i64(wal, 8)
+}
+
+open flow wal_last_lsn(wal: Int) -> Int {
+    deliver mem_read_i64(wal, 16)
+}
+
+open flow wal_append(wal: Int, tx_id: Int, op_type: Int, payload: Int, now_sec: Int) -> Int {
+    flex cap = mem_read_i64(wal, 0)
+    flex count = mem_read_i64(wal, 8)
+    if count >= cap {
+        deliver -1
+    }
+
+    flex entries = mem_read_i64(wal, 24)
+    flex lsn = count + 1
+    flex chk = wal_compute_checksum(lsn, tx_id, op_type, payload)
+
+    mem_write_i64(entries, count * 48 + 0, lsn)
+    mem_write_i64(entries, count * 48 + 8, tx_id)
+    mem_write_i64(entries, count * 48 + 16, op_type)
+    mem_write_i64(entries, count * 48 + 24, payload)
+    mem_write_i64(entries, count * 48 + 32, chk)
+    mem_write_i64(entries, count * 48 + 40, now_sec)
+
+    mem_write_i64(wal, 8, count + 1)
+    mem_write_i64(wal, 16, lsn)
+
+    deliver lsn
+}
+
+open flow wal_commit(wal: Int, tx_id: Int, now_sec: Int) -> Int {
+    flex lsn = wal_append(wal, tx_id, 4, 0, now_sec) // 4 = COMMIT
+    if lsn > 0 {
+        mem_write_i64(wal, 40, lsn)
+    }
+    deliver lsn
+}
+
+open flow wal_verify_entry(wal: Int, entry_idx: Int) -> Bool {
+    flex count = mem_read_i64(wal, 8)
+    if entry_idx < 0 || entry_idx >= count {
+        deliver false
+    }
+
+    flex entries = mem_read_i64(wal, 24)
+    flex lsn = mem_read_i64(entries, entry_idx * 48 + 0)
+    flex tx_id = mem_read_i64(entries, entry_idx * 48 + 8)
+    flex op = mem_read_i64(entries, entry_idx * 48 + 16)
+    flex payload = mem_read_i64(entries, entry_idx * 48 + 24)
+    flex stored_chk = mem_read_i64(entries, entry_idx * 48 + 32)
+
+    flex calculated = wal_compute_checksum(lsn, tx_id, op, payload)
+    deliver calculated == stored_chk
+}
+
+open flow wal_replay_to_state(wal: Int) -> Int {
+    flex count = mem_read_i64(wal, 8)
+    flex entries = mem_read_i64(wal, 24)
+
+    flex state = 0
+    flex i = 0
+    while i < count {
+        flex is_valid = wal_verify_entry(wal, i)
+        if is_valid {
+            flex op = mem_read_i64(entries, i * 48 + 16)
+            flex payload = mem_read_i64(entries, i * 48 + 24)
+
+            if op == 1 { // ADD
+                state = state + payload
+            }
+            if op == 2 { // SUB
+                state = state - payload
+            }
+            if op == 3 { // SET
+                state = payload
+            }
+        }
+        i = i + 1
+    }
+
+    deliver state
+}
+
+open flow wal_free(wal: Int) -> Int {
+    flex entries = mem_read_i64(wal, 24)
+    free_buffer(entries)
+    free_buffer(wal)
+    deliver 0
+}
