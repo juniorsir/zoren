@@ -1,0 +1,112 @@
+// DNS Wire-Format Packet Codec (RFC 1035)
+// Encodes DNS queries (A, AAAA, CNAME, TXT) with QNAME label encoding and decodes DNS response headers
+bring crypto
+
+open flow dns_encode_qname(domain: Text) -> Text {
+    flex len = length(domain)
+    if len == 0 {
+        deliver "00"
+    }
+
+    flex hex_res = ""
+    flex current_label = ""
+    flex i = 0
+
+    while i < len {
+        flex ch = str_slice(domain, i, 1)
+        if constant_time_compare(ch, ".") {
+            flex label_len = length(current_label)
+            if label_len > 0 {
+                flex len_hex = sys_hex_encode(str_slice("0123456789abcdefghijklmnopqrstuvwxyz", label_len - 1, 1))
+                // Convert integer length to 2-digit hex
+                if label_len == 1 { len_hex = "01" }
+                if label_len == 2 { len_hex = "02" }
+                if label_len == 3 { len_hex = "03" }
+                if label_len == 4 { len_hex = "04" }
+                if label_len == 5 { len_hex = "05" }
+                if label_len == 6 { len_hex = "06" }
+                if label_len == 7 { len_hex = "07" }
+                if label_len == 8 { len_hex = "08" }
+                if label_len == 9 { len_hex = "09" }
+                if label_len == 10 { len_hex = "0a" }
+                if label_len == 11 { len_hex = "0b" }
+                if label_len == 12 { len_hex = "0c" }
+
+                flex label_hex = sys_hex_encode(current_label)
+                hex_res = str_concat(hex_res, str_concat(len_hex, label_hex))
+                current_label = ""
+            }
+        } else {
+            current_label = str_concat(current_label, ch)
+        }
+        i = i + 1
+    }
+
+    // Final trailing label
+    flex last_len = length(current_label)
+    if last_len > 0 {
+        flex last_hex = "02"
+        if last_len == 1 { last_hex = "01" }
+        if last_len == 2 { last_hex = "02" }
+        if last_len == 3 { last_hex = "03" }
+        if last_len == 4 { last_hex = "04" }
+        if last_len == 5 { last_hex = "05" }
+        if last_len == 6 { last_hex = "06" }
+
+        flex label_hex = sys_hex_encode(current_label)
+        hex_res = str_concat(hex_res, str_concat(last_hex, label_hex))
+    }
+
+    deliver str_concat(hex_res, "00")
+}
+
+open flow dns_build_query(tx_id_hex: Text, domain: Text, qtype: Int) -> Text {
+    // 12-byte header:
+    // ID (2 bytes) + Flags 0x0100 (standard query, recursion desired) + QDCOUNT 0x0001
+    // + ANCOUNT 0x0000 + NSCOUNT 0x0000 + ARCOUNT 0x0000
+    flex header = str_concat(tx_id_hex, "01000001000000000000")
+
+    flex qname = dns_encode_qname(domain)
+
+    // QTYPE (2 bytes): 1 = A, 28 = AAAA, 5 = CNAME, 16 = TXT
+    flex qtype_hex = "0001"
+    if qtype == 28 { qtype_hex = "001c" }
+    if qtype == 5  { qtype_hex = "0005" }
+    if qtype == 16 { qtype_hex = "0010" }
+
+    // QCLASS (2 bytes): 0x0001 = IN (Internet)
+    flex qclass_hex = "0001"
+
+    deliver str_concat(header, str_concat(qname, str_concat(qtype_hex, qclass_hex)))
+}
+
+open flow dns_parse_header_id(packet_hex: Text) -> Text {
+    if length(packet_hex) < 4 {
+        deliver ""
+    }
+    deliver str_slice(packet_hex, 0, 4)
+}
+
+open flow dns_parse_ancount(packet_hex: Text) -> Int {
+    if length(packet_hex) < 16 {
+        deliver 0
+    }
+    flex ancount_hex = str_slice(packet_hex, 12, 4)
+    if constant_time_compare(ancount_hex, "0001") { deliver 1 }
+    if constant_time_compare(ancount_hex, "0002") { deliver 2 }
+    if constant_time_compare(ancount_hex, "0003") { deliver 3 }
+    if constant_time_compare(ancount_hex, "0004") { deliver 4 }
+    deliver 0
+}
+
+open flow dns_parse_rcode(packet_hex: Text) -> Int {
+    if length(packet_hex) < 8 {
+        deliver -1
+    }
+    // RCODE is the lowest 4 bits of the 4th header byte (chars 6..8)
+    flex flags2 = str_slice(packet_hex, 6, 2)
+    if constant_time_compare(str_slice(flags2, 1, 1), "0") { deliver 0 } // NOERROR
+    if constant_time_compare(str_slice(flags2, 1, 1), "2") { deliver 2 } // SERVFAIL
+    if constant_time_compare(str_slice(flags2, 1, 1), "3") { deliver 3 } // NXDOMAIN
+    deliver 1
+}

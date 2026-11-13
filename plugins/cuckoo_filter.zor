@@ -1,0 +1,188 @@
+// Cuckoo Probabilistic Set-Membership Filter (Fan et al., 2014)
+// Supports O(1) membership lookups and dynamic item DELETIONS using cuckoo hashing fingerprints
+
+// Bucket layout: 2 fingerprint entries per bucket (16 bytes per bucket)
+// [0..8]: entry 0 (fingerprint Int, 0 = empty)
+// [8..16]: entry 1 (fingerprint Int, 0 = empty)
+
+// Header layout (32 bytes):
+// [0..8]:   num_buckets (Int)
+// [8..16]:  count (Int)
+// [16..24]: table_buf (Int pointer)
+// [24..32]: max_kicks (Int, default 8)
+
+open flow cuckoo_hash_item(item: Text) -> Int {
+    flex len = length(item)
+    flex h = 2166136261
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(item, i, 1)
+        flex b = (i * 31 + 47) % 127
+        h = (h + b) * 16777619
+        if h < 0 {
+            h = 0 - h
+        }
+        h = h % 2147483647
+        i = i + 1
+    }
+    deliver h
+}
+
+open flow cuckoo_fingerprint(item: Text) -> Int {
+    flex h = cuckoo_hash_item(item)
+    flex fp = (h % 255) + 1 // 1..255 (never 0)
+    deliver fp
+}
+
+open flow cuckoo_create(num_buckets: Int) -> Int {
+    flex m = num_buckets
+    if m < 8 {
+        m = 8
+    }
+    flex table = alloc_buffer(m * 16)
+    flex header = alloc_buffer(32)
+
+    flex i = 0
+    while i < m {
+        mem_write_i64(table, i * 16 + 0, 0) // Empty
+        mem_write_i64(table, i * 16 + 8, 0)
+        i = i + 1
+    }
+
+    mem_write_i64(header, 0, m)
+    mem_write_i64(header, 8, 0) // count
+    mem_write_i64(header, 16, table)
+    mem_write_i64(header, 24, 8) // max_kicks = 8
+
+    deliver header
+}
+
+open flow cuckoo_count(cf: Int) -> Int {
+    deliver mem_read_i64(cf, 8)
+}
+
+open flow cuckoo_insert(cf: Int, item: Text) -> Bool {
+    flex m = mem_read_i64(cf, 0)
+    flex table = mem_read_i64(cf, 16)
+
+    flex fp = cuckoo_fingerprint(item)
+    flex h = cuckoo_hash_item(item)
+
+    flex b1 = h % m
+    flex b2 = (b1 + fp * 17) % m // Alternative bucket
+
+    // Try placing in b1
+    flex e1_0 = mem_read_i64(table, b1 * 16 + 0)
+    if e1_0 == 0 {
+        mem_write_i64(table, b1 * 16 + 0, fp)
+        flex cnt = mem_read_i64(cf, 8)
+        mem_write_i64(cf, 8, cnt + 1)
+        deliver true
+    }
+    flex e1_1 = mem_read_i64(table, b1 * 16 + 8)
+    if e1_1 == 0 {
+        mem_write_i64(table, b1 * 16 + 8, fp)
+        flex cnt = mem_read_i64(cf, 8)
+        mem_write_i64(cf, 8, cnt + 1)
+        deliver true
+    }
+
+    // Try placing in b2
+    flex e2_0 = mem_read_i64(table, b2 * 16 + 0)
+    if e2_0 == 0 {
+        mem_write_i64(table, b2 * 16 + 0, fp)
+        flex cnt = mem_read_i64(cf, 8)
+        mem_write_i64(cf, 8, cnt + 1)
+        deliver true
+    }
+    flex e2_1 = mem_read_i64(table, b2 * 16 + 8)
+    if e2_1 == 0 {
+        mem_write_i64(table, b2 * 16 + 8, fp)
+        flex cnt = mem_read_i64(cf, 8)
+        mem_write_i64(cf, 8, cnt + 1)
+        deliver true
+    }
+
+    // Cuckoo kick: displace entry from b1
+    flex kicked_fp = e1_0
+    mem_write_i64(table, b1 * 16 + 0, fp)
+
+    // Move kicked entry to its alt bucket
+    flex alt_b = (b1 + kicked_fp * 17) % m
+    mem_write_i64(table, alt_b * 16 + 8, kicked_fp)
+
+    flex cnt = mem_read_i64(cf, 8)
+    mem_write_i64(cf, 8, cnt + 1)
+    deliver true
+}
+
+open flow cuckoo_contains(cf: Int, item: Text) -> Bool {
+    flex m = mem_read_i64(cf, 0)
+    flex table = mem_read_i64(cf, 16)
+
+    flex fp = cuckoo_fingerprint(item)
+    flex h = cuckoo_hash_item(item)
+
+    flex b1 = h % m
+    flex b2 = (b1 + fp * 17) % m
+
+    // Check b1
+    if mem_read_i64(table, b1 * 16 + 0) == fp || mem_read_i64(table, b1 * 16 + 8) == fp {
+        deliver true
+    }
+
+    // Check b2
+    if mem_read_i64(table, b2 * 16 + 0) == fp || mem_read_i64(table, b2 * 16 + 8) == fp {
+        deliver true
+    }
+
+    deliver false
+}
+
+open flow cuckoo_delete(cf: Int, item: Text) -> Bool {
+    flex m = mem_read_i64(cf, 0)
+    flex table = mem_read_i64(cf, 16)
+
+    flex fp = cuckoo_fingerprint(item)
+    flex h = cuckoo_hash_item(item)
+
+    flex b1 = h % m
+    flex b2 = (b1 + fp * 17) % m
+
+    // Try delete from b1
+    if mem_read_i64(table, b1 * 16 + 0) == fp {
+        mem_write_i64(table, b1 * 16 + 0, 0)
+        flex cnt = mem_read_i64(cf, 8)
+        mem_write_i64(cf, 8, cnt - 1)
+        deliver true
+    }
+    if mem_read_i64(table, b1 * 16 + 8) == fp {
+        mem_write_i64(table, b1 * 16 + 8, 0)
+        flex cnt = mem_read_i64(cf, 8)
+        mem_write_i64(cf, 8, cnt - 1)
+        deliver true
+    }
+
+    // Try delete from b2
+    if mem_read_i64(table, b2 * 16 + 0) == fp {
+        mem_write_i64(table, b2 * 16 + 0, 0)
+        flex cnt = mem_read_i64(cf, 8)
+        mem_write_i64(cf, 8, cnt - 1)
+        deliver true
+    }
+    if mem_read_i64(table, b2 * 16 + 8) == fp {
+        mem_write_i64(table, b2 * 16 + 8, 0)
+        flex cnt = mem_read_i64(cf, 8)
+        mem_write_i64(cf, 8, cnt - 1)
+        deliver true
+    }
+
+    deliver false // Not found
+}
+
+open flow cuckoo_free(cf: Int) -> Int {
+    flex table = mem_read_i64(cf, 16)
+    free_buffer(table)
+    free_buffer(cf)
+    deliver 0
+}

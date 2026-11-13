@@ -1,0 +1,250 @@
+// Strictly Balanced AVL Binary Search Tree (|height(left) - height(right)| <= 1)
+// Guarantees minimal search path depth with LL, RR, LR, RL balancing rotations
+
+// Node layout (40 bytes):
+// [0..8]:   key (Int)
+// [8..16]:  value (Int)
+// [16..24]: height (Int)
+// [24..32]: left (Int, -1 if null)
+// [32..40]: right (Int, -1 if null)
+
+// Header layout (32 bytes):
+// [0..8]:   capacity
+// [8..16]:  count
+// [16..24]: root
+// [24..32]: nodes_buf
+
+open flow avl_max(a: Int, b: Int) -> Int {
+    if a > b {
+        deliver a
+    }
+    deliver b
+}
+
+open flow avl_node_height(nodes: Int, idx: Int) -> Int {
+    if idx < 0 {
+        deliver 0
+    }
+    deliver mem_read_i64(nodes, idx * 40 + 16)
+}
+
+open flow avl_balance_factor(nodes: Int, idx: Int) -> Int {
+    if idx < 0 {
+        deliver 0
+    }
+    flex left = mem_read_i64(nodes, idx * 40 + 24)
+    flex right = mem_read_i64(nodes, idx * 40 + 32)
+    deliver avl_node_height(nodes, left) - avl_node_height(nodes, right)
+}
+
+open flow avl_update_height(nodes: Int, idx: Int) -> Int {
+    flex left = mem_read_i64(nodes, idx * 40 + 24)
+    flex right = mem_read_i64(nodes, idx * 40 + 32)
+    flex hl = avl_node_height(nodes, left)
+    flex hr = avl_node_height(nodes, right)
+    flex h = 1 + avl_max(hl, hr)
+    mem_write_i64(nodes, idx * 40 + 16, h)
+    deliver h
+}
+
+open flow avl_rotate_right(nodes: Int, y: Int) -> Int {
+    flex x = mem_read_i64(nodes, y * 40 + 24) // x = y.left
+    flex t2 = mem_read_i64(nodes, x * 40 + 32) // t2 = x.right
+
+    mem_write_i64(nodes, x * 40 + 32, y)  // x.right = y
+    mem_write_i64(nodes, y * 40 + 24, t2) // y.left = t2
+
+    avl_update_height(nodes, y)
+    avl_update_height(nodes, x)
+
+    deliver x
+}
+
+open flow avl_rotate_left(nodes: Int, x: Int) -> Int {
+    flex y = mem_read_i64(nodes, x * 40 + 32) // y = x.right
+    flex t2 = mem_read_i64(nodes, y * 40 + 24) // t2 = y.left
+
+    mem_write_i64(nodes, y * 40 + 24, x)  // y.left = x
+    mem_write_i64(nodes, x * 40 + 32, t2) // x.right = t2
+
+    avl_update_height(nodes, x)
+    avl_update_height(nodes, y)
+
+    deliver y
+}
+
+open flow avl_insert_rec(tree: Int, node: Int, key: Int, val: Int) -> Int {
+    flex nodes = mem_read_i64(tree, 24)
+
+    if node < 0 {
+        flex cnt = mem_read_i64(tree, 8)
+        flex new_idx = cnt
+        mem_write_i64(nodes, new_idx * 40 + 0, key)
+        mem_write_i64(nodes, new_idx * 40 + 8, val)
+        mem_write_i64(nodes, new_idx * 40 + 16, 1) // height = 1
+        mem_write_i64(nodes, new_idx * 40 + 24, -1)
+        mem_write_i64(nodes, new_idx * 40 + 32, -1)
+        mem_write_i64(tree, 8, cnt + 1)
+        deliver new_idx
+    }
+
+    flex curr_key = mem_read_i64(nodes, node * 40 + 0)
+    if key < curr_key {
+        flex left = mem_read_i64(nodes, node * 40 + 24)
+        flex new_left = avl_insert_rec(tree, left, key, val)
+        mem_write_i64(nodes, node * 40 + 24, new_left)
+    }
+    if key > curr_key {
+        flex right = mem_read_i64(nodes, node * 40 + 32)
+        flex new_right = avl_insert_rec(tree, right, key, val)
+        mem_write_i64(nodes, node * 40 + 32, new_right)
+    }
+    if key == curr_key {
+        mem_write_i64(nodes, node * 40 + 8, val) // Update value
+        deliver node
+    }
+
+    avl_update_height(nodes, node)
+    flex balance = avl_balance_factor(nodes, node)
+
+    // Left-Left Case
+    if balance > 1 {
+        flex left = mem_read_i64(nodes, node * 40 + 24)
+        flex left_key = mem_read_i64(nodes, left * 40 + 0)
+        if key < left_key {
+            deliver avl_rotate_right(nodes, node)
+        }
+        // Left-Right Case
+        if key > left_key {
+            flex new_left = avl_rotate_left(nodes, left)
+            mem_write_i64(nodes, node * 40 + 24, new_left)
+            deliver avl_rotate_right(nodes, node)
+        }
+    }
+
+    // Right-Right Case
+    if balance < -1 {
+        flex right = mem_read_i64(nodes, node * 40 + 32)
+        flex right_key = mem_read_i64(nodes, right * 40 + 0)
+        if key > right_key {
+            deliver avl_rotate_left(nodes, node)
+        }
+        // Right-Left Case
+        if key < right_key {
+            flex new_right = avl_rotate_right(nodes, right)
+            mem_write_i64(nodes, node * 40 + 32, new_right)
+            deliver avl_rotate_left(nodes, node)
+        }
+    }
+
+    deliver node
+}
+
+open flow avl_create(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap < 8 {
+        cap = 8
+    }
+    flex nodes = alloc_buffer(cap * 40)
+    flex header = alloc_buffer(32)
+
+    mem_write_i64(header, 0, cap)
+    mem_write_i64(header, 8, 0)   // count
+    mem_write_i64(header, 16, -1) // root
+    mem_write_i64(header, 24, nodes)
+
+    deliver header
+}
+
+open flow avl_size(tree: Int) -> Int {
+    deliver mem_read_i64(tree, 8)
+}
+
+open flow avl_height(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 16)
+    if root < 0 {
+        deliver 0
+    }
+    flex nodes = mem_read_i64(tree, 24)
+    deliver avl_node_height(nodes, root)
+}
+
+open flow avl_insert(tree: Int, key: Int, val: Int) -> Bool {
+    flex cap = mem_read_i64(tree, 0)
+    flex cnt = mem_read_i64(tree, 8)
+    if cnt >= cap {
+        deliver false
+    }
+
+    flex root = mem_read_i64(tree, 16)
+    flex new_root = avl_insert_rec(tree, root, key, val)
+    mem_write_i64(tree, 16, new_root)
+    deliver true
+}
+
+open flow avl_get(tree: Int, key: Int) -> Int {
+    flex root = mem_read_i64(tree, 16)
+    if root < 0 {
+        deliver -1
+    }
+
+    flex nodes = mem_read_i64(tree, 24)
+    flex curr = root
+
+    while curr >= 0 {
+        flex k = mem_read_i64(nodes, curr * 40 + 0)
+        if key == k {
+            deliver mem_read_i64(nodes, curr * 40 + 8)
+        }
+        if key < k {
+            curr = mem_read_i64(nodes, curr * 40 + 24)
+        } else {
+            curr = mem_read_i64(nodes, curr * 40 + 32)
+        }
+    }
+    deliver -1
+}
+
+open flow avl_contains(tree: Int, key: Int) -> Bool {
+    flex v = avl_get(tree, key)
+    deliver v != -1
+}
+
+open flow avl_min_key(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 16)
+    if root < 0 {
+        deliver -1
+    }
+    flex nodes = mem_read_i64(tree, 24)
+    flex curr = root
+    flex min_k = mem_read_i64(nodes, curr * 40 + 0)
+
+    while curr >= 0 {
+        min_k = mem_read_i64(nodes, curr * 40 + 0)
+        curr = mem_read_i64(nodes, curr * 40 + 24)
+    }
+    deliver min_k
+}
+
+open flow avl_max_key(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 16)
+    if root < 0 {
+        deliver -1
+    }
+    flex nodes = mem_read_i64(tree, 24)
+    flex curr = root
+    flex max_k = mem_read_i64(nodes, curr * 40 + 0)
+
+    while curr >= 0 {
+        max_k = mem_read_i64(nodes, curr * 40 + 0)
+        curr = mem_read_i64(nodes, curr * 40 + 32)
+    }
+    deliver max_k
+}
+
+open flow avl_free(tree: Int) -> Int {
+    flex nodes = mem_read_i64(tree, 24)
+    free_buffer(nodes)
+    free_buffer(tree)
+    deliver 0
+}

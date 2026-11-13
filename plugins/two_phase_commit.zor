@@ -1,0 +1,128 @@
+// Two-Phase Commit (2PC) Distributed Transaction Coordinator
+// Atomically coordinates distributed participants across Prepare and Commit/Abort phases
+// State Codes: 0 = INIT, 1 = PREPARING, 2 = COMMITTED, 3 = ABORTED
+
+// Participant slot (16 bytes):
+// [0..8]:  participant_id (Int)
+// [8..16]: vote (-1 = PENDING, 0 = NO/ABORT, 1 = YES/COMMIT)
+
+// Header layout (48 bytes):
+// [0..8]:   tx_id (Int)
+// [8..16]:  participant_count (Int)
+// [16..24]: state (Int)
+// [24..32]: votes_buf (Int pointer)
+// [32..40]: yes_count (Int)
+// [40..48]: no_count (Int)
+
+open flow tpc_create_tx(tx_id: Int, num_participants: Int) -> Int {
+    flex n = num_participants
+    if n < 1 {
+        n = 1
+    }
+    flex slots = alloc_buffer(n * 16)
+    flex header = alloc_buffer(48)
+
+    flex i = 0
+    while i < n {
+        mem_write_i64(slots, i * 16 + 0, i + 1) // participant_id 1..n
+        mem_write_i64(slots, i * 16 + 8, -1)   // PENDING
+        i = i + 1
+    }
+
+    mem_write_i64(header, 0, tx_id)
+    mem_write_i64(header, 8, n)
+    mem_write_i64(header, 16, 1) // PREPARING
+    mem_write_i64(header, 24, slots)
+    mem_write_i64(header, 32, 0) // yes_count
+    mem_write_i64(header, 40, 0) // no_count
+
+    deliver header
+}
+
+open flow tpc_record_vote(tx: Int, participant_id: Int, vote_yes: Bool) -> Bool {
+    flex n = mem_read_i64(tx, 8)
+    flex state = mem_read_i64(tx, 16)
+
+    if state != 1 {
+        deliver false // Transaction is already resolved
+    }
+
+    flex slots = mem_read_i64(tx, 24)
+    flex i = 0
+    flex found_idx = -1
+
+    while i < n {
+        if found_idx == -1 {
+            flex pid = mem_read_i64(slots, i * 16 + 0)
+            if pid == participant_id {
+                found_idx = i
+            }
+        }
+        i = i + 1
+    }
+
+    if found_idx == -1 {
+        deliver false // Unknown participant
+    }
+
+    flex current_vote = mem_read_i64(slots, found_idx * 16 + 8)
+    if current_vote != -1 {
+        deliver false // Vote already recorded
+    }
+
+    if vote_yes {
+        mem_write_i64(slots, found_idx * 16 + 8, 1)
+        flex yes = mem_read_i64(tx, 32)
+        mem_write_i64(tx, 32, yes + 1)
+    } else {
+        mem_write_i64(slots, found_idx * 16 + 8, 0)
+        flex no = mem_read_i64(tx, 40)
+        mem_write_i64(tx, 40, no + 1)
+        // An immediate NO causes the whole transaction to ABORT
+        mem_write_i64(tx, 16, 3) // ABORTED
+    }
+
+    deliver true
+}
+
+open flow tpc_evaluate_outcome(tx: Int) -> Int {
+    flex state = mem_read_i64(tx, 16)
+    if state == 3 {
+        deliver 3 // Already ABORTED
+    }
+
+    flex n = mem_read_i64(tx, 8)
+    flex yes = mem_read_i64(tx, 32)
+
+    if yes == n {
+        mem_write_i64(tx, 16, 2) // COMMITTED
+        deliver 2
+    }
+
+    flex no = mem_read_i64(tx, 40)
+    if no > 0 {
+        mem_write_i64(tx, 16, 3) // ABORTED
+        deliver 3
+    }
+
+    deliver 1 // Still PREPARING
+}
+
+open flow tpc_get_state(tx: Int) -> Int {
+    deliver mem_read_i64(tx, 16)
+}
+
+open flow tpc_yes_votes(tx: Int) -> Int {
+    deliver mem_read_i64(tx, 32)
+}
+
+open flow tpc_no_votes(tx: Int) -> Int {
+    deliver mem_read_i64(tx, 40)
+}
+
+open flow tpc_free(tx: Int) -> Int {
+    flex slots = mem_read_i64(tx, 24)
+    free_buffer(slots)
+    free_buffer(tx)
+    deliver 0
+}

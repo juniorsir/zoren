@@ -1,0 +1,68 @@
+// RFC 4648 Base32 Encoder & Decoder
+// Standard Base32 representation for TOTP authenticator secrets, onion services, and human-friendly tokens
+
+open flow base32_alphabet() -> Text {
+    deliver "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+}
+
+open flow base32_encode_u64(val: Int) -> Text {
+    if val <= 0 {
+        deliver "A"
+    }
+
+    flex alphabet = base32_alphabet()
+    flex res = ""
+    flex curr = val
+
+    while curr > 0 {
+        flex rem = curr % 32
+        flex ch = str_slice(alphabet, rem, 1)
+        res = str_concat(ch, res)
+        curr = curr / 32
+    }
+
+    deliver res
+}
+
+open flow base32_decode_u64(encoded: Text) -> Int {
+    flex len = length(encoded)
+    if len == 0 {
+        deliver 0
+    }
+
+    flex alphabet = base32_alphabet()
+    flex val = 0
+    flex i = 0
+
+    while i < len {
+        flex ch = str_slice(encoded, i, 1)
+        flex digit = str_find(alphabet, ch)
+        if digit >= 0 {
+            val = val * 32 + digit
+        }
+        i = i + 1
+    }
+
+    deliver val
+}
+
+open flow base32_is_valid(s: Text) -> Bool {
+    flex len = length(s)
+    if len == 0 {
+        deliver false
+    }
+
+    flex alphabet = base32_alphabet()
+    flex i = 0
+
+    while i < len {
+        flex ch = str_slice(s, i, 1)
+        flex pos = str_find(alphabet, ch)
+        if pos < 0 {
+            deliver false
+        }
+        i = i + 1
+    }
+
+    deliver true
+}

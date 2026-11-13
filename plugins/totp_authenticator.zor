@@ -1,0 +1,84 @@
+// RFC 6238 Time-Based One-Time Password (TOTP) Authenticator
+// Generates and validates 6-digit Google Authenticator / 2FA security tokens with clock drift tolerance
+bring crypto
+
+open flow totp_time_counter(now_sec: Int, step_sec: Int) -> Int {
+    flex step = step_sec
+    if step < 5 {
+        step = 30 // Default 30s step
+    }
+    deliver now_sec / step
+}
+
+open flow totp_generate_code(secret: Text, now_sec: Int, step_sec: Int) -> Int {
+    flex counter = totp_time_counter(now_sec, step_sec)
+    flex counter_str = int_to_str(counter)
+
+    // Compute HMAC
+    flex hmac = sys_hmac_sha256_hex(secret, counter_str)
+
+    // Dynamic Truncation
+    flex len = length(hmac)
+    flex last_ch = str_slice(hmac, len - 1, 1)
+
+    flex offset = 0
+    if constant_time_compare(last_ch, "1") { offset = 2 }
+    if constant_time_compare(last_ch, "2") { offset = 4 }
+    if constant_time_compare(last_ch, "3") { offset = 6 }
+    if constant_time_compare(last_ch, "4") { offset = 8 }
+    if constant_time_compare(last_ch, "5") { offset = 10 }
+    if constant_time_compare(last_ch, "6") { offset = 12 }
+    if constant_time_compare(last_ch, "7") { offset = 14 }
+    if constant_time_compare(last_ch, "8") { offset = 16 }
+    if constant_time_compare(last_ch, "9") { offset = 18 }
+    if constant_time_compare(last_ch, "a") { offset = 20 }
+    if constant_time_compare(last_ch, "b") { offset = 22 }
+    if constant_time_compare(last_ch, "c") { offset = 24 }
+    if constant_time_compare(last_ch, "d") { offset = 26 }
+    if constant_time_compare(last_ch, "e") { offset = 28 }
+    if constant_time_compare(last_ch, "f") { offset = 30 }
+
+    flex slice_hex = str_slice(hmac, offset, 8)
+    flex num = sys_fast_hash(slice_hex)
+    if num < 0 {
+        num = 0 - num
+    }
+
+    deliver num % 1000000
+}
+
+open flow totp_verify(secret: Text, code: Int, now_sec: Int, step_sec: Int, allowed_drift_steps: Int) -> Bool {
+    flex current_code = totp_generate_code(secret, now_sec, step_sec)
+    if current_code == code {
+        deliver true
+    }
+
+    // Check drift steps: -drift to +drift
+    flex d = 1
+    while d <= allowed_drift_steps {
+        flex prev_code = totp_generate_code(secret, now_sec - (d * step_sec), step_sec)
+        if prev_code == code {
+            deliver true
+        }
+
+        flex next_code = totp_generate_code(secret, now_sec + (d * step_sec), step_sec)
+        if next_code == code {
+            deliver true
+        }
+        d = d + 1
+    }
+
+    deliver false
+}
+
+open flow totp_format_code(code: Int) -> Text {
+    flex s = int_to_str(code)
+    flex len = length(s)
+    if len == 6 { deliver s }
+    if len == 5 { deliver str_concat("0", s) }
+    if len == 4 { deliver str_concat("00", s) }
+    if len == 3 { deliver str_concat("000", s) }
+    if len == 2 { deliver str_concat("0000", s) }
+    if len == 1 { deliver str_concat("00000", s) }
+    deliver "000000"
+}
