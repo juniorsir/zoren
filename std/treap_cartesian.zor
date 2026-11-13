@@ -1,0 +1,293 @@
+// Zoren Randomized Treap & Cartesian Tree Suite (std/treap_cartesian.zor)
+// Production Cartesian Tree combining Binary Search Tree key ordering with Heap priority balancing
+// for expected O(log N) search, insertion, and deletion without complex rebalancing rotations.
+
+bring sys
+
+// ============================================================================
+// TREAP MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   size
+// [8..16]:  root_idx (-1 if empty)
+// [16..24]: nodes_buf
+// [24..32]: max_nodes
+// [32..40]: node_count
+// [40..48]: rng_seed
+//
+// Each Node (48 bytes):
+// [0..8]:   key
+// [8..16]:  priority (pseudorandom max-heap weight)
+// [16..24]: val
+// [24..32]: left (-1 if none)
+// [32..40]: right (-1 if none)
+// [40..48]: subtree_size
+// ============================================================================
+
+flow treap_node_addr(tree: Int, node_idx: Int) -> Int {
+    flex buf = mem_read_i64(tree, 16)
+    deliver buf + (node_idx * 48)
+}
+
+flow treap_next_rand(tree: Int) -> Int {
+    flex seed = mem_read_i64(tree, 40)
+    // 64-bit LCG: next = (seed * 6364136223846793005 + 1442695040888963407)
+    // Simplified positive 32-bit PRNG
+    flex mod_val = 2147483647
+    flex next_seed = ((seed * 1103515245) + 12345) % mod_val
+    if next_seed < 0 { next_seed = next_seed + mod_val }
+    mem_write_i64(tree, 40, next_seed)
+    deliver next_seed
+}
+
+flow treap_update_size(tree: Int, node_idx: Int) -> Int {
+    if node_idx < 0 { deliver 0 }
+    flex addr = treap_node_addr(tree, node_idx)
+    flex left = mem_read_i64(addr, 24)
+    flex right = mem_read_i64(addr, 32)
+    flex l_sz = 0
+    flex r_sz = 0
+    if left >= 0 {
+        l_sz = mem_read_i64(treap_node_addr(tree, left), 40)
+    }
+    if right >= 0 {
+        r_sz = mem_read_i64(treap_node_addr(tree, right), 40)
+    }
+    flex sz = 1 + l_sz + r_sz
+    mem_write_i64(addr, 40, sz)
+    deliver sz
+}
+
+flow treap_alloc_node(tree: Int, key: Int, val: Int) -> Int {
+    flex count = mem_read_i64(tree, 32)
+    flex max_n = mem_read_i64(tree, 24)
+    if count >= max_n { deliver 0 - 1 }
+
+    flex node_idx = count
+    mem_write_i64(tree, 32, count + 1)
+
+    flex prio = treap_next_rand(tree)
+    flex addr = treap_node_addr(tree, node_idx)
+    mem_write_i64(addr, 0, key)
+    mem_write_i64(addr, 8, prio)
+    mem_write_i64(addr, 16, val)
+    mem_write_i64(addr, 24, 0 - 1) // left = -1
+    mem_write_i64(addr, 32, 0 - 1) // right = -1
+    mem_write_i64(addr, 40, 1)     // size = 1
+
+    deliver node_idx
+}
+
+// Right rotation (at node y): elevates left child x to root of subtree
+flow treap_rotate_right(tree: Int, y: Int) -> Int {
+    flex y_addr = treap_node_addr(tree, y)
+    flex x = mem_read_i64(y_addr, 24)
+    flex x_addr = treap_node_addr(tree, x)
+    flex t2 = mem_read_i64(x_addr, 32)
+
+    mem_write_i64(x_addr, 32, y)
+    mem_write_i64(y_addr, 24, t2)
+
+    treap_update_size(tree, y)
+    treap_update_size(tree, x)
+    deliver x
+}
+
+// Left rotation (at node x): elevates right child y to root of subtree
+flow treap_rotate_left(tree: Int, x: Int) -> Int {
+    flex x_addr = treap_node_addr(tree, x)
+    flex y = mem_read_i64(x_addr, 32)
+    flex y_addr = treap_node_addr(tree, y)
+    flex t2 = mem_read_i64(y_addr, 24)
+
+    mem_write_i64(y_addr, 24, x)
+    mem_write_i64(x_addr, 32, t2)
+
+    treap_update_size(tree, x)
+    treap_update_size(tree, y)
+    deliver y
+}
+
+flow treap_insert_recursive(tree: Int, curr: Int, key: Int, val: Int) -> Int {
+    if curr < 0 {
+        deliver treap_alloc_node(tree, key, val)
+    }
+
+    flex addr = treap_node_addr(tree, curr)
+    flex cur_k = mem_read_i64(addr, 0)
+
+    if key == cur_k {
+        mem_write_i64(addr, 16, val) // update value
+        deliver curr
+    }
+
+    if key < cur_k {
+        flex left = mem_read_i64(addr, 24)
+        flex new_left = treap_insert_recursive(tree, left, key, val)
+        mem_write_i64(addr, 24, new_left)
+
+        // Heap priority property check
+        flex l_prio = mem_read_i64(treap_node_addr(tree, new_left), 8)
+        flex cur_prio = mem_read_i64(addr, 8)
+        if l_prio > cur_prio {
+            curr = treap_rotate_right(tree, curr)
+        }
+    } else {
+        flex right = mem_read_i64(addr, 32)
+        flex new_right = treap_insert_recursive(tree, right, key, val)
+        mem_write_i64(addr, 32, new_right)
+
+        flex r_prio = mem_read_i64(treap_node_addr(tree, new_right), 8)
+        flex cur_prio = mem_read_i64(addr, 8)
+        if r_prio > cur_prio {
+            curr = treap_rotate_left(tree, curr)
+        }
+    }
+
+    treap_update_size(tree, curr)
+    deliver curr
+}
+
+flow treap_remove_recursive(tree: Int, curr: Int, key: Int) -> Int {
+    if curr < 0 { deliver 0 - 1 }
+
+    flex addr = treap_node_addr(tree, curr)
+    flex cur_k = mem_read_i64(addr, 0)
+
+    if key < cur_k {
+        flex left = mem_read_i64(addr, 24)
+        flex new_left = treap_remove_recursive(tree, left, key)
+        mem_write_i64(addr, 24, new_left)
+        treap_update_size(tree, curr)
+        deliver curr
+    } else if key > cur_k {
+        flex right = mem_read_i64(addr, 32)
+        flex new_right = treap_remove_recursive(tree, right, key)
+        mem_write_i64(addr, 32, new_right)
+        treap_update_size(tree, curr)
+        deliver curr
+    } else {
+        // Found node to delete
+        flex left = mem_read_i64(addr, 24)
+        flex right = mem_read_i64(addr, 32)
+
+        if left < 0 && right < 0 {
+            deliver 0 - 1 // Leaf deleted
+        }
+
+        if left < 0 {
+            deliver right
+        } else if right < 0 {
+            deliver left
+        } else {
+            flex l_prio = mem_read_i64(treap_node_addr(tree, left), 8)
+            flex r_prio = mem_read_i64(treap_node_addr(tree, right), 8)
+
+            if l_prio > r_prio {
+                curr = treap_rotate_right(tree, curr)
+                flex c_addr = treap_node_addr(tree, curr)
+                flex new_r = treap_remove_recursive(tree, mem_read_i64(c_addr, 32), key)
+                mem_write_i64(c_addr, 32, new_r)
+            } else {
+                curr = treap_rotate_left(tree, curr)
+                flex c_addr = treap_node_addr(tree, curr)
+                flex new_l = treap_remove_recursive(tree, mem_read_i64(c_addr, 24), key)
+                mem_write_i64(c_addr, 24, new_l)
+            }
+            treap_update_size(tree, curr)
+            deliver curr
+        }
+    }
+}
+
+open flow treap_new(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 128 }
+    flex total_bytes = cap * 48
+    flex nodes_buf = alloc_buffer(total_bytes)
+    mem_fill(nodes_buf, 0, total_bytes)
+
+    flex tree = alloc_buffer(48)
+    mem_write_i64(tree, 0, 0)          // size = 0
+    mem_write_i64(tree, 8, 0 - 1)      // root_idx = -1
+    mem_write_i64(tree, 16, nodes_buf)
+    mem_write_i64(tree, 24, cap)
+    mem_write_i64(tree, 32, 0)         // node_count = 0
+    mem_write_i64(tree, 40, 123456789) // default rng seed
+
+    deliver tree
+}
+
+open flow treap_size(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 8)
+    if root < 0 { deliver 0 }
+    deliver mem_read_i64(treap_node_addr(tree, root), 40)
+}
+
+open flow treap_is_empty(tree: Int) -> Bool {
+    deliver mem_read_i64(tree, 8) < 0
+}
+
+open flow treap_insert(tree: Int, key: Int, val: Int) -> Int {
+    flex root = mem_read_i64(tree, 8)
+    flex new_root = treap_insert_recursive(tree, root, key, val)
+    if new_root >= 0 {
+        mem_write_i64(tree, 8, new_root)
+        deliver 1
+    }
+    deliver 0
+}
+
+open flow treap_find(tree: Int, key: Int) -> Int {
+    flex curr = mem_read_i64(tree, 8)
+    while curr >= 0 {
+        flex addr = treap_node_addr(tree, curr)
+        flex cur_k = mem_read_i64(addr, 0)
+        if key == cur_k {
+            deliver mem_read_i64(addr, 16)
+        } else if key < cur_k {
+            curr = mem_read_i64(addr, 24)
+        } else {
+            curr = mem_read_i64(addr, 32)
+        }
+    }
+    deliver 0 - 1
+}
+
+open flow treap_contains(tree: Int, key: Int) -> Bool {
+    deliver treap_find(tree, key) >= 0
+}
+
+open flow treap_remove(tree: Int, key: Int) -> Int {
+    if !treap_contains(tree, key) { deliver 0 }
+    flex root = mem_read_i64(tree, 8)
+    flex new_root = treap_remove_recursive(tree, root, key)
+    mem_write_i64(tree, 8, new_root)
+    deliver 1
+}
+
+open flow treap_min_key(tree: Int) -> Int {
+    flex curr = mem_read_i64(tree, 8)
+    if curr < 0 { deliver 0 - 1 }
+    while mem_read_i64(treap_node_addr(tree, curr), 24) >= 0 {
+        curr = mem_read_i64(treap_node_addr(tree, curr), 24)
+    }
+    deliver mem_read_i64(treap_node_addr(tree, curr), 0)
+}
+
+open flow treap_max_key(tree: Int) -> Int {
+    flex curr = mem_read_i64(tree, 8)
+    if curr < 0 { deliver 0 - 1 }
+    while mem_read_i64(treap_node_addr(tree, curr), 32) >= 0 {
+        curr = mem_read_i64(treap_node_addr(tree, curr), 32)
+    }
+    deliver mem_read_i64(treap_node_addr(tree, curr), 0)
+}
+
+open flow treap_free(tree: Int) -> Int {
+    if tree != 0 {
+        flex buf = mem_read_i64(tree, 16)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(tree)
+    }
+    deliver 0
+}

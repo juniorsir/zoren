@@ -1,0 +1,264 @@
+// Zoren Suffix Automaton Suite (std/suffix_automaton.zor)
+// Production linear-time O(N) Suffix Automaton (SAM / DAWG) for distinct substring enumeration,
+// factor verification, and longest common factor analysis.
+
+bring sys
+
+// ============================================================================
+// SUFFIX AUTOMATON MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   num_states
+// [8..16]:  last_state
+// [16..24]: states_buf
+// [24..32]: max_states (up to 2 * max_len + 2)
+// [32..40]: distinct_substrings_cache
+// [40..48]: reserved
+//
+// Each State (240 bytes):
+// [0..8]:     len (max substring length)
+// [8..16]:    link (suffix link to parent state, -1 for root)
+// [16..24]:   is_clone (1 if cloned state, 0 otherwise)
+// [24..32]:   reserved
+// [32..240]:  next[26] transitions (26 * 8 = 208 bytes, -1 if none)
+// ============================================================================
+
+flow sam_state_addr(sam: Int, state_idx: Int) -> Int {
+    flex buf = mem_read_i64(sam, 16)
+    deliver buf + (state_idx * 240)
+}
+
+flow sam_char_to_idx(ch: Text) -> Int {
+    flex alphabet = "abcdefghijklmnopqrstuvwxyz"
+    flex pos = str_find(alphabet, ch)
+    if pos >= 0 { deliver pos }
+    flex upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    flex u_pos = str_find(upper, ch)
+    if u_pos >= 0 { deliver u_pos }
+    deliver 0 - 1
+}
+
+flow sam_alloc_state(sam: Int, length: Int, link: Int) -> Int {
+    flex num = mem_read_i64(sam, 0)
+    flex max_s = mem_read_i64(sam, 24)
+    if num >= max_s { deliver 0 - 1 }
+
+    flex state_idx = num
+    mem_write_i64(sam, 0, num + 1)
+
+    flex addr = sam_state_addr(sam, state_idx)
+    mem_fill(addr, 0, 240)
+    mem_write_i64(addr, 0, length)
+    mem_write_i64(addr, 8, link)
+    mem_write_i64(addr, 16, 0) // not clone
+
+    // Initialize transitions to -1
+    flex i = 0
+    while i < 26 {
+        mem_write_i64(addr, 32 + (i * 8), 0 - 1)
+        i = i + 1
+    }
+
+    deliver state_idx
+}
+
+open flow sam_new(max_length: Int) -> Int {
+    flex m = max_length
+    if m <= 0 { m = 64 }
+    flex max_states = (2 * m) + 4
+    flex total_bytes = max_states * 240
+    flex states_buf = alloc_buffer(total_bytes)
+    mem_fill(states_buf, 0, total_bytes)
+
+    flex sam = alloc_buffer(48)
+    mem_write_i64(sam, 0, 0)          // num_states = 0
+    mem_write_i64(sam, 8, 0)          // last_state = 0
+    mem_write_i64(sam, 16, states_buf)
+    mem_write_i64(sam, 24, max_states)
+    mem_write_i64(sam, 32, 0 - 1)     // distinct_cache = -1
+    mem_write_i64(sam, 40, 0)
+
+    // Root state at index 0 (len = 0, link = -1)
+    flex root = sam_alloc_state(sam, 0, 0 - 1)
+    mem_write_i64(sam, 8, root)
+
+    deliver sam
+}
+
+open flow sam_state_count(sam: Int) -> Int { deliver mem_read_i64(sam, 0) }
+
+// Extends the automaton with a single character c (O(1) amortized)
+open flow sam_extend(sam: Int, ch: Text) -> Int {
+    flex c = sam_char_to_idx(ch)
+    if c < 0 { deliver 0 }
+
+    flex last = mem_read_i64(sam, 8)
+    flex last_addr = sam_state_addr(sam, last)
+    flex last_len = mem_read_i64(last_addr, 0)
+
+    flex cur = sam_alloc_state(sam, last_len + 1, 0)
+    if cur < 0 { deliver 0 }
+    flex cur_addr = sam_state_addr(sam, cur)
+
+    flex p = last
+    while p >= 0 {
+        flex p_addr = sam_state_addr(sam, p)
+        flex trans = mem_read_i64(p_addr, 32 + (c * 8))
+        if trans >= 0 {
+            break
+        }
+        mem_write_i64(p_addr, 32 + (c * 8), cur)
+        p = mem_read_i64(p_addr, 8) // p = link(p)
+    }
+
+    if p < 0 {
+        mem_write_i64(cur_addr, 8, 0) // link(cur) = root
+    } else {
+        flex p_addr = sam_state_addr(sam, p)
+        flex q = mem_read_i64(p_addr, 32 + (c * 8))
+        flex q_addr = sam_state_addr(sam, q)
+        flex p_len = mem_read_i64(p_addr, 0)
+        flex q_len = mem_read_i64(q_addr, 0)
+
+        if p_len + 1 == q_len {
+            mem_write_i64(cur_addr, 8, q) // link(cur) = q
+        } else {
+            // Clone state q
+            flex clone = sam_alloc_state(sam, p_len + 1, mem_read_i64(q_addr, 8))
+            if clone < 0 { deliver 0 }
+            flex clone_addr = sam_state_addr(sam, clone)
+            mem_write_i64(clone_addr, 16, 1) // is_clone = 1
+
+            // Copy transitions from q to clone
+            flex i = 0
+            while i < 26 {
+                flex t_val = mem_read_i64(q_addr, 32 + (i * 8))
+                mem_write_i64(clone_addr, 32 + (i * 8), t_val)
+                i = i + 1
+            }
+
+            // Redirect links
+            while p >= 0 {
+                flex curr_p_addr = sam_state_addr(sam, p)
+                if mem_read_i64(curr_p_addr, 32 + (c * 8)) == q {
+                    mem_write_i64(curr_p_addr, 32 + (c * 8), clone)
+                } else {
+                    break
+                }
+                p = mem_read_i64(curr_p_addr, 8)
+            }
+
+            mem_write_i64(q_addr, 8, clone)
+            mem_write_i64(cur_addr, 8, clone)
+        }
+    }
+
+    mem_write_i64(sam, 8, cur)
+    mem_write_i64(sam, 32, 0 - 1) // Invalidate distinct substrings cache
+    deliver 1
+}
+
+// Builds the SAM from an entire string
+open flow sam_build(sam: Int, text: Text) -> Int {
+    flex len = length(text)
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(text, i, 1)
+        sam_extend(sam, ch)
+        i = i + 1
+    }
+    deliver sam_state_count(sam)
+}
+
+// Checks if sub is a substring of the indexed text in O(|sub|) time
+open flow sam_contains_substring(sam: Int, sub: Text) -> Bool {
+    flex len = length(sub)
+    flex curr = 0 // start at root
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(sub, i, 1)
+        flex c = sam_char_to_idx(ch)
+        if c < 0 { deliver false }
+
+        flex addr = sam_state_addr(sam, curr)
+        curr = mem_read_i64(addr, 32 + (c * 8))
+        if curr < 0 { deliver false }
+        i = i + 1
+    }
+    deliver true
+}
+
+// Counts total distinct substrings in O(states) time: sum(len(u) - len(link(u))) for u > 0
+open flow sam_count_distinct_substrings(sam: Int) -> Int {
+    flex cached = mem_read_i64(sam, 32)
+    if cached >= 0 { deliver cached }
+
+    flex num_states = mem_read_i64(sam, 0)
+    flex total = 0
+    flex i = 1 // skip root
+    while i < num_states {
+        flex addr = sam_state_addr(sam, i)
+        flex cur_len = mem_read_i64(addr, 0)
+        flex link = mem_read_i64(addr, 8)
+        flex link_len = 0
+        if link >= 0 {
+            flex link_addr = sam_state_addr(sam, link)
+            link_len = mem_read_i64(link_addr, 0)
+        }
+        total = total + (cur_len - link_len)
+        i = i + 1
+    }
+
+    mem_write_i64(sam, 32, total)
+    deliver total
+}
+
+// Computes the length of the Longest Common Factor (LCF) between the automaton and s2 in O(|s2|)
+open flow sam_longest_common_factor_len(sam: Int, s2: Text) -> Int {
+    flex len = length(s2)
+    flex curr = 0
+    flex cur_l = 0
+    flex max_l = 0
+
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(s2, i, 1)
+        flex c = sam_char_to_idx(ch)
+        if c >= 0 {
+            while curr >= 0 {
+                flex addr = sam_state_addr(sam, curr)
+                if mem_read_i64(addr, 32 + (c * 8)) >= 0 {
+                    break
+                }
+                curr = mem_read_i64(addr, 8) // link(curr)
+                if curr >= 0 {
+                    flex p_addr = sam_state_addr(sam, curr)
+                    cur_l = mem_read_i64(p_addr, 0)
+                }
+            }
+
+            if curr < 0 {
+                curr = 0
+                cur_l = 0
+            } else {
+                flex addr = sam_state_addr(sam, curr)
+                curr = mem_read_i64(addr, 32 + (c * 8))
+                cur_l = cur_l + 1
+                if cur_l > max_l {
+                    max_l = cur_l
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    deliver max_l
+}
+
+open flow sam_free(sam: Int) -> Int {
+    if sam != 0 {
+        flex buf = mem_read_i64(sam, 16)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(sam)
+    }
+    deliver 0
+}

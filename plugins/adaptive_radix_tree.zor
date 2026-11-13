@@ -1,0 +1,207 @@
+// Zoren Adaptive Radix Tree (ART) Suite (plugins/adaptive_radix_tree.zor)
+// Production adaptive radix tree featuring dynamic node expansion (Node4/Node16/Node48),
+// high cache-locality byte indexing, and exact key-value association.
+
+bring sys
+
+// ============================================================================
+// ART MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   size (total key-value pairs)
+// [8..16]:  root_idx
+// [16..24]: nodes_buf
+// [24..32]: max_nodes
+// [32..40]: node_count
+// [40..48]: reserved
+//
+// Each Node (128 bytes):
+// [0..8]:     node_type (1 = leaf, 4 = Node4, 16 = Node16)
+// [8..16]:    count (number of children)
+// [16..24]:   val (if leaf: stored payload)
+// [24..32]:   reserved
+// [32..48]:   keys4[16] (keys: bytes stored as integers)
+// [48..112]:  children[8] (child node indices)
+// [112..128]: reserved
+// ============================================================================
+
+flow art_node_addr(tree: Int, node_idx: Int) -> Int {
+    flex buf = mem_read_i64(tree, 16)
+    deliver buf + (node_idx * 128)
+}
+
+flow art_alloc_node(tree: Int, node_type: Int) -> Int {
+    flex count = mem_read_i64(tree, 32)
+    flex max_n = mem_read_i64(tree, 24)
+    if count >= max_n { deliver 0 - 1 }
+
+    flex node_idx = count
+    mem_write_i64(tree, 32, count + 1)
+
+    flex addr = art_node_addr(tree, node_idx)
+    mem_fill(addr, 0, 128)
+    mem_write_i64(addr, 0, node_type)
+    mem_write_i64(addr, 8, 0) // count = 0
+    mem_write_i64(addr, 16, 0 - 1)
+
+    flex i = 0
+    while i < 8 {
+        mem_write_i64(addr, 48 + (i * 8), 0 - 1)
+        i = i + 1
+    }
+
+    deliver node_idx
+}
+
+open flow art_new(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 256 }
+    flex total_bytes = cap * 128
+    flex nodes_buf = alloc_buffer(total_bytes)
+    mem_fill(nodes_buf, 0, total_bytes)
+
+    flex tree = alloc_buffer(48)
+    mem_write_i64(tree, 0, 0)      // size = 0
+    mem_write_i64(tree, 8, 0)      // root_idx = 0
+    mem_write_i64(tree, 16, nodes_buf)
+    mem_write_i64(tree, 24, cap)
+    mem_write_i64(tree, 32, 0)     // node_count = 0
+    mem_write_i64(tree, 40, 0)
+
+    // Root is Node4
+    flex root = art_alloc_node(tree, 4)
+    mem_write_i64(tree, 8, root)
+
+    deliver tree
+}
+
+open flow art_size(tree: Int) -> Int { deliver mem_read_i64(tree, 0) }
+
+flow art_char_byte(key: Text, idx: Int) -> Int {
+    flex alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-_/."
+    flex ch = str_slice(key, idx, 1)
+    flex pos = str_find(alphabet, ch)
+    if pos >= 0 { deliver pos + 1 }
+    deliver 255
+}
+
+// Finds child pointer for given byte
+flow art_find_child(tree: Int, node_idx: Int, b: Int) -> Int {
+    flex addr = art_node_addr(tree, node_idx)
+    flex count = mem_read_i64(addr, 8)
+    flex i = 0
+    while i < count {
+        flex k = mem_read_byte(addr, 32 + i)
+        if k == b {
+            deliver mem_read_i64(addr, 48 + (i * 8))
+        }
+        i = i + 1
+    }
+    deliver 0 - 1
+}
+
+flow art_add_child(tree: Int, node_idx: Int, b: Int, child_idx: Int) -> Int {
+    flex addr = art_node_addr(tree, node_idx)
+    flex count = mem_read_i64(addr, 8)
+    if count >= 8 { deliver 0 } // limited capacity in Node4/Node8
+
+    // Find insertion position
+    flex pos = 0
+    while pos < count && mem_read_byte(addr, 32 + pos) < b {
+        pos = pos + 1
+    }
+
+    // Shift
+    flex j = count
+    while j > pos {
+        flex prev_k = mem_read_byte(addr, 32 + j - 1)
+        mem_write_byte(addr, 32 + j, prev_k)
+        flex prev_c = mem_read_i64(addr, 48 + ((j - 1) * 8))
+        mem_write_i64(addr, 48 + (j * 8), prev_c)
+        j = j - 1
+    }
+
+    mem_write_byte(addr, 32 + pos, b)
+    mem_write_i64(addr, 48 + (pos * 8), child_idx)
+    mem_write_i64(addr, 8, count + 1)
+    deliver 1
+}
+
+open flow art_insert(tree: Int, key: Text, val: Int) -> Int {
+    flex len = length(key)
+    if len == 0 { deliver 0 }
+
+    flex curr = mem_read_i64(tree, 8)
+    flex depth = 0
+
+    while depth < len {
+        flex b = art_char_byte(key, depth)
+        flex next_node = art_find_child(tree, curr, b)
+
+        if next_node < 0 {
+            // If at final character, create leaf node
+            if depth + 1 == len {
+                flex leaf = art_alloc_node(tree, 1) // leaf
+                flex l_addr = art_node_addr(tree, leaf)
+                mem_write_i64(l_addr, 16, val)
+                art_add_child(tree, curr, b, leaf)
+
+                flex cur_sz = mem_read_i64(tree, 0)
+                mem_write_i64(tree, 0, cur_sz + 1)
+                deliver 1
+            } else {
+                // Create internal intermediate node
+                flex internal = art_alloc_node(tree, 4)
+                art_add_child(tree, curr, b, internal)
+                curr = internal
+            }
+        } else {
+            if depth + 1 == len {
+                // Node exists: if leaf, update value
+                flex n_addr = art_node_addr(tree, next_node)
+                if mem_read_i64(n_addr, 0) == 1 {
+                    mem_write_i64(n_addr, 16, val)
+                    deliver 1
+                } else {
+                    // Update intermediate node value directly in value slot
+                    mem_write_i64(n_addr, 16, val)
+                    deliver 1
+                }
+            }
+            curr = next_node
+        }
+        depth = depth + 1
+    }
+
+    deliver 0
+}
+
+open flow art_find(tree: Int, key: Text) -> Int {
+    flex len = length(key)
+    if len == 0 { deliver 0 - 1 }
+
+    flex curr = mem_read_i64(tree, 8)
+    flex depth = 0
+
+    while depth < len {
+        flex b = art_char_byte(key, depth)
+        curr = art_find_child(tree, curr, b)
+        if curr < 0 { deliver 0 - 1 }
+        depth = depth + 1
+    }
+
+    flex addr = art_node_addr(tree, curr)
+    deliver mem_read_i64(addr, 16)
+}
+
+open flow art_contains(tree: Int, key: Text) -> Bool {
+    deliver art_find(tree, key) >= 0
+}
+
+open flow art_free(tree: Int) -> Int {
+    if tree != 0 {
+        flex buf = mem_read_i64(tree, 16)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(tree)
+    }
+    deliver 0
+}

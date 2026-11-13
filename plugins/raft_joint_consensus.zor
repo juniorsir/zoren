@@ -1,0 +1,98 @@
+// Zoren Raft Joint Consensus Membership Suite (plugins/raft_joint_consensus.zor)
+// Production Raft cluster membership dynamic reconfiguration implementing Ongaro-Ousterhout
+// two-phase joint consensus (C_old -> C_old,new -> C_new) preventing split-brain states.
+
+bring sys
+
+// ============================================================================
+// JOINT CONSENSUS MEMORY LAYOUT (48 bytes)
+// [0..8]:   stage (1 = C_old, 2 = C_old,new joint, 3 = C_new)
+// [8..16]:  old_cluster_size
+// [16..24]: new_cluster_size
+// [24..32]: old_quorum_size ((old_size / 2) + 1)
+// [32..40]: new_quorum_size ((new_size / 2) + 1)
+// [40..48]: transition_epoch
+// ============================================================================
+
+open flow joint_config_new(old_size: Int, new_size: Int) -> Int {
+    flex o_sz = old_size
+    if o_sz <= 0 { o_sz = 3 }
+    flex n_sz = new_size
+    if n_sz <= 0 { n_sz = 3 }
+
+    flex o_q = (o_sz / 2) + 1
+    flex n_q = (n_sz / 2) + 1
+
+    flex jc = alloc_buffer(48)
+    mem_write_i64(jc, 0, 1)    // start at stage 1: C_old
+    mem_write_i64(jc, 8, o_sz)
+    mem_write_i64(jc, 16, n_sz)
+    mem_write_i64(jc, 24, o_q)
+    mem_write_i64(jc, 32, n_q)
+    mem_write_i64(jc, 40, 1)   // epoch = 1
+
+    deliver jc
+}
+
+open flow joint_current_stage(jc: Int) -> Int { deliver mem_read_i64(jc, 0) }
+open flow joint_is_in_transition(jc: Int) -> Bool { deliver mem_read_i64(jc, 0) == 2 }
+
+// Initiates joint consensus transition (C_old -> C_old,new)
+open flow joint_enter_joint_consensus(jc: Int) -> Int {
+    flex stage = mem_read_i64(jc, 0)
+    if stage == 1 {
+        mem_write_i64(jc, 0, 2) // stage 2: joint
+        flex ep = mem_read_i64(jc, 40)
+        mem_write_i64(jc, 40, ep + 1)
+        deliver 1
+    }
+    deliver 0
+}
+
+// Commits transition to new configuration (C_old,new -> C_new)
+open flow joint_commit_transition(jc: Int) -> Int {
+    flex stage = mem_read_i64(jc, 0)
+    if stage == 2 {
+        mem_write_i64(jc, 0, 3) // stage 3: C_new committed
+        flex ep = mem_read_i64(jc, 40)
+        mem_write_i64(jc, 40, ep + 1)
+        deliver 1
+    }
+    deliver 0
+}
+
+// Checks if vote counts satisfy the quorum rules for the active stage:
+// - Stage 1 (C_old): requires majority of C_old
+// - Stage 2 (C_old,new): requires majority of C_old AND majority of C_new simultaneously!
+// - Stage 3 (C_new): requires majority of C_new
+open flow joint_check_quorum(jc: Int, old_votes: Int, new_votes: Int) -> Bool {
+    flex stage = mem_read_i64(jc, 0)
+    flex o_q = mem_read_i64(jc, 24)
+    flex n_q = mem_read_i64(jc, 32)
+
+    if stage == 1 {
+        deliver old_votes >= o_q
+    }
+
+    if stage == 2 {
+        // Must satisfy BOTH quorums simultaneously!
+        if old_votes >= o_q && new_votes >= n_q {
+            deliver true
+        }
+        deliver false
+    }
+
+    if stage == 3 {
+        deliver new_votes >= n_q
+    }
+
+    deliver false
+}
+
+open flow joint_old_quorum(jc: Int) -> Int { deliver mem_read_i64(jc, 24) }
+open flow joint_new_quorum(jc: Int) -> Int { deliver mem_read_i64(jc, 32) }
+
+open flow joint_config_free(jc: Int) -> Int {
+    if jc != 0 { free_buffer(jc) }
+    deliver 0
+}
