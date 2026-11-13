@@ -18,14 +18,12 @@ bring json
 bring fs
 bring rope
 bring fenwick_tree_2d
-
-// Bring enterprise plugins (located in plugins/):
-bring plugins.cuckoo_hash_map
-bring plugins.vector_hnsw
-bring plugins.zstandard_frame
-bring plugins.chandy_lamport_snapshot
-bring plugins.h3_hex_grid
-bring plugins.bloom_blocked_simd
+bring cuckoo_hash_map
+bring vector_hnsw
+bring zstandard_frame
+bring chandy_lamport_snapshot
+bring h3_hex_grid
+bring bloom_blocked_simd
 ```
 
 ---

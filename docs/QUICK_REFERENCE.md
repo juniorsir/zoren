@@ -14,7 +14,7 @@ A concise 1-page reference for developers writing code in the **Zoren Programmin
 | `open` | Mark flow or model field as **public / exported** | `open flow main() -> Int { ... }` |
 | `deliver` | Return an expression from a flow | `deliver true` |
 | `model` | Define a composite data model / struct | `model Point { open x: Int; open y: Int }` |
-| `bring` | Import a module from `std/` or `plugins/` | `bring math` or `bring plugins.vector_hnsw` |
+| `bring` | Import a module from standard library | `bring math` or `bring vector_hnsw` |
 | `if` / `else` | Conditional branching | `if x > 0 { deliver 1 } else { deliver 0 }` |
 | `while` | Condition-controlled loop | `while i < 10 { i = i + 1 }` |
 | `for` | Iterator-controlled loop | `for item in list { post(item) }` |

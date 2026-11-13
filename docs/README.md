@@ -62,7 +62,7 @@ flow print_even_numbers(limit: Int) -> Int {
 bring math
 bring json
 bring fs
-bring plugins.cuckoo_hash_map
+bring cuckoo_hash_map
 ```
 
 ---
