@@ -1,0 +1,151 @@
+// Zoren Google Maglev Consistent Hash Ring Suite (plugins/consistent_ring_maglev.zor)
+// Production Maglev permutation lookup table providing O(1) packet lookup and uniform load balancing.
+
+bring sys
+
+// ============================================================================
+// MAGLEV LOOKUP TABLE MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   backend_count
+// [8..16]:  table_size (M = prime, e.g. 257)
+// [16..24]: lookup_table_buf (M * 8 bytes)
+// [24..32]: backends_buf (16 * 8 bytes)
+// [32..40]: total_lookups
+// [40..48]: reserved
+// ============================================================================
+
+open flow maglev_new(table_size: Int) -> Int {
+    flex m = table_size
+    if m <= 0 { m = 257 } // Default prime 257
+
+    flex table_bytes = m * 8
+    flex lookup_buf = alloc_buffer(table_bytes)
+    // Initialize with -1
+    flex i = 0
+    while i < m {
+        mem_write_i64(lookup_buf, i * 8, 0 - 1)
+        i = i + 1
+    }
+
+    flex backends_buf = alloc_buffer(16 * 8)
+    mem_fill(backends_buf, 0, 16 * 8)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0) // backend_count = 0
+    mem_write_i64(header, 8, m)
+    mem_write_i64(header, 16, lookup_buf)
+    mem_write_i64(header, 24, backends_buf)
+    mem_write_i64(header, 32, 0)
+    mem_write_i64(header, 40, 0)
+
+    deliver header
+}
+
+open flow maglev_backend_count(maglev: Int) -> Int {
+    deliver mem_read_i64(maglev, 0)
+}
+
+open flow maglev_add_backend(maglev: Int, backend_id: Int) -> Bool {
+    flex count = mem_read_i64(maglev, 0)
+    if count >= 16 { deliver false }
+
+    flex backends = mem_read_i64(maglev, 24)
+    mem_write_i64(backends, count * 8, backend_id)
+    mem_write_i64(maglev, 0, count + 1)
+    deliver true
+}
+
+open flow maglev_populate(maglev: Int) -> Bool {
+    flex n = mem_read_i64(maglev, 0)
+    flex m = mem_read_i64(maglev, 8)
+    if n <= 0 { deliver false }
+
+    flex lookup = mem_read_i64(maglev, 16)
+    flex backends = mem_read_i64(maglev, 24)
+
+    // Clear lookup table to -1
+    flex i = 0
+    while i < m {
+        mem_write_i64(lookup, i * 8, 0 - 1)
+        i = i + 1
+    }
+
+    // Allocate offset, skip, and next arrays for each backend
+    flex offsets = alloc_buffer(n * 8)
+    flex skips = alloc_buffer(n * 8)
+    flex next_pos = alloc_buffer(n * 8)
+
+    i = 0
+    while i < n {
+        flex b_id = mem_read_i64(backends, i * 8)
+        // Distinct hash seeds
+        flex h1 = ((b_id + 1337) * 16777619) % m
+        if h1 < 0 { h1 = 0 - h1 }
+        mem_write_i64(offsets, i * 8, h1)
+
+        flex h2 = ((b_id + 7919) * 38642921) % (m - 1)
+        if h2 < 0 { h2 = 0 - h2 }
+        mem_write_i64(skips, i * 8, h2 + 1) // skip >= 1
+
+        mem_write_i64(next_pos, i * 8, 0)
+        i = i + 1
+    }
+
+    // Fill all M slots
+    flex filled = 0
+    while filled < m {
+        i = 0
+        while i < n {
+            if filled < m {
+                flex b_id = mem_read_i64(backends, i * 8)
+                flex off = mem_read_i64(offsets, i * 8)
+                flex sk = mem_read_i64(skips, i * 8)
+                flex cur_j = mem_read_i64(next_pos, i * 8)
+
+                flex slot_found = false
+                while slot_found != true && cur_j < (m * 2) {
+                    flex candidate_slot = (off + (cur_j * sk)) % m
+                    cur_j = cur_j + 1
+                    if mem_read_i64(lookup, candidate_slot * 8) == (0 - 1) {
+                        mem_write_i64(lookup, candidate_slot * 8, b_id)
+                        filled = filled + 1
+                        slot_found = true
+                    }
+                }
+                mem_write_i64(next_pos, i * 8, cur_j)
+            }
+            i = i + 1
+        }
+    }
+
+    free_buffer(offsets)
+    free_buffer(skips)
+    free_buffer(next_pos)
+    deliver true
+}
+
+open flow maglev_lookup_hash(maglev: Int, hash_val: Int) -> Int {
+    flex m = mem_read_i64(maglev, 8)
+    flex lookup = mem_read_i64(maglev, 16)
+
+    flex slot = hash_val % m
+    if slot < 0 { slot = 0 - slot }
+
+    flex lookups = mem_read_i64(maglev, 32) + 1
+    mem_write_i64(maglev, 32, lookups)
+
+    deliver mem_read_i64(lookup, slot * 8)
+}
+
+open flow maglev_lookup(maglev: Int, packet_key: Text) -> Int {
+    flex h = sys_fast_hash(packet_key)
+    deliver maglev_lookup_hash(maglev, h)
+}
+
+open flow maglev_free(maglev: Int) -> Void {
+    flex lookup = mem_read_i64(maglev, 16)
+    flex backends = mem_read_i64(maglev, 24)
+    free_buffer(lookup)
+    free_buffer(backends)
+    free_buffer(maglev)
+}

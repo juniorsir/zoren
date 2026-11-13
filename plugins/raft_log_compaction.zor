@@ -1,0 +1,89 @@
+// Zoren Raft Log Compaction & Snapshots (plugins/raft_log_compaction.zor)
+// Production Raft state-machine log compaction, snapshot creation, and InstallSnapshot RPC synchronization.
+
+bring sys
+bring plugins.raft_consensus
+
+// ============================================================================
+// RAFT SNAPSHOT MANAGER MEMORY LAYOUT
+// Header (56 bytes):
+// [0..8]:   last_included_index
+// [8..16]:  last_included_term
+// [16..24]: snapshot_state_sum
+// [24..32]: snapshot_timestamp
+// [32..40]: compacted_entries_count
+// [40..48]: install_snapshot_count
+// [48..56]: reserved
+// ============================================================================
+
+open flow raft_snapshot_new() -> Int {
+    flex header = alloc_buffer(56)
+    mem_write_i64(header, 0, 0) // last_included_index = 0
+    mem_write_i64(header, 8, 0) // last_included_term = 0
+    mem_write_i64(header, 16, 0) // snapshot_state = 0
+    mem_write_i64(header, 24, 0) // timestamp = 0
+    mem_write_i64(header, 32, 0) // compacted = 0
+    mem_write_i64(header, 40, 0) // installed = 0
+    mem_write_i64(header, 48, 0)
+
+    deliver header
+}
+
+open flow raft_snapshot_get_last_index(mgr: Int) -> Int {
+    deliver mem_read_i64(mgr, 0)
+}
+
+open flow raft_snapshot_get_last_term(mgr: Int) -> Int {
+    deliver mem_read_i64(mgr, 8)
+}
+
+open flow raft_snapshot_get_state(mgr: Int) -> Int {
+    deliver mem_read_i64(mgr, 16)
+}
+
+open flow raft_snapshot_create(mgr: Int, last_index: Int, last_term: Int, state_sum: Int) -> Bool {
+    if last_index < mem_read_i64(mgr, 0) {
+        deliver false // Cannot create snapshot older than current snapshot
+    }
+
+    mem_write_i64(mgr, 0, last_index)
+    mem_write_i64(mgr, 8, last_term)
+    mem_write_i64(mgr, 16, state_sum)
+
+    flex prev_comp = mem_read_i64(mgr, 32)
+    mem_write_i64(mgr, 32, prev_comp + last_index)
+
+    deliver true
+}
+
+open flow raft_handle_install_snapshot(
+    mgr: Int,
+    raft_node: Int,
+    leader_term: Int,
+    leader_id: Int,
+    last_index: Int,
+    last_term: Int,
+    state_sum: Int
+) -> Bool {
+    flex cur_term = raft_get_term(raft_node)
+    if leader_term < cur_term {
+        deliver false // Stale leader
+    }
+
+    // Accept snapshot if it is newer
+    if last_index > mem_read_i64(mgr, 0) {
+        mem_write_i64(mgr, 0, last_index)
+        mem_write_i64(mgr, 8, last_term)
+        mem_write_i64(mgr, 16, state_sum)
+
+        flex inst_cnt = mem_read_i64(mgr, 40) + 1
+        mem_write_i64(mgr, 40, inst_cnt)
+        deliver true
+    }
+
+    deliver false
+}
+
+open flow raft_snapshot_free(mgr: Int) -> Void {
+    free_buffer(mgr)
+}

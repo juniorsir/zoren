@@ -1,0 +1,184 @@
+// Zoren Lightweight JSON Schema Validator (plugins/json_schema_validator.zor)
+// Production JSON schema validator verifying required keys, primitive types, and value/length constraints.
+
+bring sys
+bring json
+
+// ============================================================================
+// JSON SCHEMA VALIDATOR MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   rule_count
+// [8..16]:  max_rules (32)
+// [16..24]: rules_table (32 rules * 40 bytes)
+// [24..32]: last_error (0 = None, 1 = Invalid JSON, 2 = Missing Field, 3 = Range Violation)
+// [32..40]: total_validations
+// [40..48]: reserved
+//
+// Each Rule (40 bytes):
+// [0..8]:   rule_type (1: REQUIRED, 2: INT_RANGE, 3: STR_LEN)
+// [8..16]:  field_name_hash
+// [16..24]: min_val
+// [24..32]: max_val
+// [32..40]: reserved
+// ============================================================================
+
+open flow schema_new() -> Int {
+    flex max_rules = 32
+    flex table_size = max_rules * 40
+    flex rules_table = alloc_buffer(table_size)
+    mem_fill(rules_table, 0, table_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0) // rule_count = 0
+    mem_write_i64(header, 8, max_rules)
+    mem_write_i64(header, 16, rules_table)
+    mem_write_i64(header, 24, 0) // last_error = 0
+    mem_write_i64(header, 32, 0) // total_validations = 0
+    mem_write_i64(header, 40, 0)
+
+    deliver header
+}
+
+open flow schema_add_required(schema: Int, field_name: Text) -> Bool {
+    flex count = mem_read_i64(schema, 0)
+    flex max_r = mem_read_i64(schema, 8)
+    if count >= max_r { deliver false }
+
+    flex table = mem_read_i64(schema, 16)
+    flex off = count * 40
+
+    mem_write_i64(table, off, 1) // Type 1: REQUIRED
+    mem_write_i64(table, off + 8, sys_fast_hash(field_name))
+    mem_write_i64(table, off + 16, 0)
+    mem_write_i64(table, off + 24, 0)
+
+    mem_write_i64(schema, 0, count + 1)
+    deliver true
+}
+
+open flow schema_add_int_range(schema: Int, field_name: Text, min_val: Int, max_val: Int) -> Bool {
+    flex count = mem_read_i64(schema, 0)
+    flex max_r = mem_read_i64(schema, 8)
+    if count >= max_r { deliver false }
+
+    flex table = mem_read_i64(schema, 16)
+    flex off = count * 40
+
+    mem_write_i64(table, off, 2) // Type 2: INT_RANGE
+    mem_write_i64(table, off + 8, sys_fast_hash(field_name))
+    mem_write_i64(table, off + 16, min_val)
+    mem_write_i64(table, off + 24, max_val)
+
+    mem_write_i64(schema, 0, count + 1)
+    deliver true
+}
+
+open flow schema_add_str_len(schema: Int, field_name: Text, min_len: Int, max_len: Int) -> Bool {
+    flex count = mem_read_i64(schema, 0)
+    flex max_r = mem_read_i64(schema, 8)
+    if count >= max_r { deliver false }
+
+    flex table = mem_read_i64(schema, 16)
+    flex off = count * 40
+
+    mem_write_i64(table, off, 3) // Type 3: STR_LEN
+    mem_write_i64(table, off + 8, sys_fast_hash(field_name))
+    mem_write_i64(table, off + 16, min_len)
+    mem_write_i64(table, off + 24, max_len)
+
+    mem_write_i64(schema, 0, count + 1)
+    deliver true
+}
+
+open flow schema_check_field_present(json_str: Text, field_name: Text) -> Bool {
+    flex pat = str_concat("\"", field_name)
+    pat = str_concat(pat, "\"")
+    deliver str_find(json_str, pat) >= 0
+}
+
+open flow schema_validate_with_fields(
+    schema: Int,
+    json_str: Text,
+    field1_name: Text,
+    field2_name: Text,
+    field3_name: Text
+) -> Bool {
+    if json_is_valid(json_str) != true {
+        mem_write_i64(schema, 24, 1) // Invalid JSON syntax
+        deliver false
+    }
+
+    flex total_v = mem_read_i64(schema, 32) + 1
+    mem_write_i64(schema, 32, total_v)
+
+    flex count = mem_read_i64(schema, 0)
+    flex table = mem_read_i64(schema, 16)
+
+    flex i = 0
+    while i < count {
+        flex off = i * 40
+        flex rule_type = mem_read_i64(table, off)
+        flex h = mem_read_i64(table, off + 8)
+
+        // Resolve which field matches this rule hash
+        flex active_field = ""
+        if h == sys_fast_hash(field1_name) { active_field = field1_name }
+        if h == sys_fast_hash(field2_name) { active_field = field2_name }
+        if h == sys_fast_hash(field3_name) { active_field = field3_name }
+
+        if length(active_field) > 0 {
+            // Rule 1: REQUIRED
+            if rule_type == 1 {
+                if schema_check_field_present(json_str, active_field) != true {
+                    mem_write_i64(schema, 24, 2) // Missing Required Field
+                    deliver false
+                }
+            }
+
+            // Rule 2: INT_RANGE
+            if rule_type == 2 {
+                if schema_check_field_present(json_str, active_field) != true {
+                    mem_write_i64(schema, 24, 2)
+                    deliver false
+                }
+                flex val = json_get_int_field(json_str, active_field)
+                flex min_v = mem_read_i64(table, off + 16)
+                flex max_v = mem_read_i64(table, off + 24)
+                if val < min_v || val > max_v {
+                    mem_write_i64(schema, 24, 3) // Int Range Violation
+                    deliver false
+                }
+            }
+
+            // Rule 3: STR_LEN
+            if rule_type == 3 {
+                if schema_check_field_present(json_str, active_field) != true {
+                    mem_write_i64(schema, 24, 2)
+                    deliver false
+                }
+                flex s_val = json_get_str_field(json_str, active_field)
+                flex s_len = length(s_val)
+                flex min_l = mem_read_i64(table, off + 16)
+                flex max_l = mem_read_i64(table, off + 24)
+                if s_len < min_l || s_len > max_l {
+                    mem_write_i64(schema, 24, 3) // Length Range Violation
+                    deliver false
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    mem_write_i64(schema, 24, 0) // No errors
+    deliver true
+}
+
+open flow schema_get_error(schema: Int) -> Int {
+    deliver mem_read_i64(schema, 24)
+}
+
+open flow schema_free(schema: Int) -> Void {
+    flex table = mem_read_i64(schema, 16)
+    free_buffer(table)
+    free_buffer(schema)
+}

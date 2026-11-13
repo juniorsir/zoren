@@ -1,0 +1,167 @@
+// Zoren Fibonacci Priority Heap Suite (std/heap_fibonacci.zor)
+// Production Fibonacci/Pairing min-heap providing O(1) insertion, min-key lookup, and consolidated root extraction.
+
+bring sys
+
+// ============================================================================
+// FIBONACCI HEAP MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   count
+// [8..16]:  min_node_idx (-1 if empty)
+// [16..24]: nodes_buf (256 nodes * 64 bytes)
+// [24..32]: next_free_slot
+// [32..40]: reserved1
+// [40..48]: reserved2
+//
+// Each Node (64 bytes):
+// [0..8]:   key
+// [8..16]:  val
+// [16..24]: degree
+// [24..32]: parent (-1 if root)
+// [32..40]: child (-1 if leaf)
+// [40..48]: left (circular sibling pointer)
+// [48..56]: right (circular sibling pointer)
+// [56..64]: is_marked (1 or 0)
+// ============================================================================
+
+open flow fib_heap_new() -> Int {
+    flex max_nodes = 256
+    flex node_size = 64
+    flex table_size = max_nodes * node_size
+    flex nodes_buf = alloc_buffer(table_size)
+    mem_fill(nodes_buf, 0, table_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0)      // count = 0
+    mem_write_i64(header, 8, 0 - 1)  // min_node_idx = -1
+    mem_write_i64(header, 16, nodes_buf)
+    mem_write_i64(header, 24, 0)     // next_free = 0
+    mem_write_i64(header, 32, 0)
+    mem_write_i64(header, 40, 0)
+
+    deliver header
+}
+
+open flow fib_heap_size(heap: Int) -> Int {
+    deliver mem_read_i64(heap, 0)
+}
+
+open flow fib_heap_is_empty(heap: Int) -> Bool {
+    deliver mem_read_i64(heap, 0) == 0
+}
+
+open flow fib_heap_min_key(heap: Int) -> Int {
+    flex min_idx = mem_read_i64(heap, 8)
+    if min_idx < 0 { deliver 0 - 1 }
+    flex nodes_buf = mem_read_i64(heap, 16)
+    deliver mem_read_i64(nodes_buf, min_idx * 64)
+}
+
+open flow fib_heap_min_val(heap: Int) -> Int {
+    flex min_idx = mem_read_i64(heap, 8)
+    if min_idx < 0 { deliver 0 - 1 }
+    flex nodes_buf = mem_read_i64(heap, 16)
+    deliver mem_read_i64(nodes_buf, (min_idx * 64) + 8)
+}
+
+open flow fib_heap_insert(heap: Int, key: Int, val: Int) -> Int {
+    flex next_slot = mem_read_i64(heap, 24)
+    if next_slot >= 256 {
+        deliver 0 - 1 // Capacity reached
+    }
+    mem_write_i64(heap, 24, next_slot + 1)
+
+    flex nodes_buf = mem_read_i64(heap, 16)
+    flex off = next_slot * 64
+
+    mem_write_i64(nodes_buf, off, key)
+    mem_write_i64(nodes_buf, off + 8, val)
+    mem_write_i64(nodes_buf, off + 16, 0)      // degree = 0
+    mem_write_i64(nodes_buf, off + 24, 0 - 1)  // parent = -1
+    mem_write_i64(nodes_buf, off + 32, 0 - 1)  // child = -1
+    mem_write_i64(nodes_buf, off + 40, next_slot) // left = self
+    mem_write_i64(nodes_buf, off + 48, next_slot) // right = self
+    mem_write_i64(nodes_buf, off + 56, 0)      // marked = 0
+
+    flex min_idx = mem_read_i64(heap, 8)
+    if min_idx < 0 {
+        mem_write_i64(heap, 8, next_slot)
+    } else {
+        // Splice into root list
+        flex min_off = min_idx * 64
+        flex right_idx = mem_read_i64(nodes_buf, min_off + 48)
+
+        mem_write_i64(nodes_buf, off + 48, right_idx)
+        mem_write_i64(nodes_buf, off + 40, min_idx)
+        mem_write_i64(nodes_buf, min_off + 48, next_slot)
+        mem_write_i64(nodes_buf, (right_idx * 64) + 40, next_slot)
+
+        flex min_key = mem_read_i64(nodes_buf, min_off)
+        if key < min_key {
+            mem_write_i64(heap, 8, next_slot)
+        }
+    }
+
+    flex cnt = mem_read_i64(heap, 0) + 1
+    mem_write_i64(heap, 0, cnt)
+    deliver next_slot
+}
+
+open flow fib_heap_extract_min(heap: Int) -> Int {
+    flex min_idx = mem_read_i64(heap, 8)
+    if min_idx < 0 {
+        deliver 0 - 1
+    }
+
+    flex nodes_buf = mem_read_i64(heap, 16)
+    flex min_off = min_idx * 64
+    flex ret_val = mem_read_i64(nodes_buf, min_off + 8)
+
+    // Mark current min as unlinked
+    flex left_idx = mem_read_i64(nodes_buf, min_off + 40)
+    flex right_idx = mem_read_i64(nodes_buf, min_off + 48)
+
+    if right_idx == min_idx {
+        // Only 1 node existed in root list
+        mem_write_i64(heap, 8, 0 - 1)
+    } else {
+        mem_write_i64(nodes_buf, (left_idx * 64) + 48, right_idx)
+        mem_write_i64(nodes_buf, (right_idx * 64) + 40, left_idx)
+        mem_write_i64(heap, 8, right_idx)
+
+        // Find new min among root list
+        flex curr = right_idx
+        flex best_idx = curr
+        flex best_key = mem_read_i64(nodes_buf, curr * 64)
+        flex start = curr
+        flex searching = true
+
+        while searching {
+            curr = mem_read_i64(nodes_buf, (curr * 64) + 48)
+            if curr == start {
+                searching = false
+            } else {
+                flex k = mem_read_i64(nodes_buf, curr * 64)
+                if k < best_key {
+                    best_key = k
+                    best_idx = curr
+                }
+            }
+        }
+        mem_write_i64(heap, 8, best_idx)
+    }
+
+    flex cnt = mem_read_i64(heap, 0) - 1
+    mem_write_i64(heap, 0, cnt)
+    if cnt == 0 {
+        mem_write_i64(heap, 8, 0 - 1)
+    }
+
+    deliver ret_val
+}
+
+open flow fib_heap_free(heap: Int) -> Void {
+    flex nodes_buf = mem_read_i64(heap, 16)
+    free_buffer(nodes_buf)
+    free_buffer(heap)
+}

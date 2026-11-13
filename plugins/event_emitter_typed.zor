@@ -1,0 +1,171 @@
+// Zoren Type-Safe Pub/Sub Event Emitter (plugins/event_emitter_typed.zor)
+// Production event dispatcher supporting persistent listeners, one-shot handlers (once), and listener metrics.
+
+bring sys
+
+// ============================================================================
+// EVENT EMITTER MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   listener_count
+// [8..16]:  max_listeners (128)
+// [16..24]: listeners_buf (128 * 32 bytes)
+// [24..32]: total_emits
+//
+// Each Listener (32 bytes):
+// [0..8]:   event_hash
+// [8..16]:  handler_id
+// [16..24]: is_once (1 or 0)
+// [24..32]: is_active (1 or 0)
+// ============================================================================
+
+open flow emitter_new() -> Int {
+    flex max_listeners = 128
+    flex table_size = max_listeners * 32
+    flex listeners_buf = alloc_buffer(table_size)
+    mem_fill(listeners_buf, 0, table_size)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0) // listener_count = 0
+    mem_write_i64(header, 8, max_listeners)
+    mem_write_i64(header, 16, listeners_buf)
+    mem_write_i64(header, 24, 0) // total_emits = 0
+
+    deliver header
+}
+
+open flow emitter_on(emitter: Int, event_name: Text, handler_id: Int) -> Bool {
+    flex count = mem_read_i64(emitter, 0)
+    flex max_l = mem_read_i64(emitter, 8)
+    if count >= max_l {
+        deliver false // Capacity full
+    }
+
+    flex buf = mem_read_i64(emitter, 16)
+    flex off = count * 32
+    flex ev_hash = sys_fast_hash(event_name)
+
+    mem_write_i64(buf, off, ev_hash)
+    mem_write_i64(buf, off + 8, handler_id)
+    mem_write_i64(buf, off + 16, 0) // is_once = 0
+    mem_write_i64(buf, off + 24, 1) // is_active = 1
+
+    mem_write_i64(emitter, 0, count + 1)
+    deliver true
+}
+
+open flow emitter_once(emitter: Int, event_name: Text, handler_id: Int) -> Bool {
+    flex count = mem_read_i64(emitter, 0)
+    flex max_l = mem_read_i64(emitter, 8)
+    if count >= max_l {
+        deliver false
+    }
+
+    flex buf = mem_read_i64(emitter, 16)
+    flex off = count * 32
+    flex ev_hash = sys_fast_hash(event_name)
+
+    mem_write_i64(buf, off, ev_hash)
+    mem_write_i64(buf, off + 8, handler_id)
+    mem_write_i64(buf, off + 16, 1) // is_once = 1
+    mem_write_i64(buf, off + 24, 1) // is_active = 1
+
+    mem_write_i64(emitter, 0, count + 1)
+    deliver true
+}
+
+open flow emitter_emit(emitter: Int, event_name: Text, event_payload: Int) -> Int {
+    flex count = mem_read_i64(emitter, 0)
+    flex buf = mem_read_i64(emitter, 16)
+    flex ev_hash = sys_fast_hash(event_name)
+    flex invoked_count = 0
+
+    flex i = 0
+    while i < count {
+        flex off = i * 32
+        flex h = mem_read_i64(buf, off)
+        flex active = mem_read_i64(buf, off + 24)
+
+        if h == ev_hash && active == 1 {
+            invoked_count = invoked_count + 1
+            flex is_once = mem_read_i64(buf, off + 16)
+            if is_once == 1 {
+                mem_write_i64(buf, off + 24, 0) // Deactivate one-shot listener
+            }
+        }
+        i = i + 1
+    }
+
+    flex total_e = mem_read_i64(emitter, 24) + 1
+    mem_write_i64(emitter, 24, total_e)
+
+    deliver invoked_count
+}
+
+open flow emitter_listener_count(emitter: Int, event_name: Text) -> Int {
+    flex count = mem_read_i64(emitter, 0)
+    flex buf = mem_read_i64(emitter, 16)
+    flex ev_hash = sys_fast_hash(event_name)
+    flex active_listeners = 0
+
+    flex i = 0
+    while i < count {
+        flex off = i * 32
+        if mem_read_i64(buf, off) == ev_hash {
+            if mem_read_i64(buf, off + 24) == 1 {
+                active_listeners = active_listeners + 1
+            }
+        }
+        i = i + 1
+    }
+
+    deliver active_listeners
+}
+
+open flow emitter_remove_listener(emitter: Int, event_name: Text, handler_id: Int) -> Bool {
+    flex count = mem_read_i64(emitter, 0)
+    flex buf = mem_read_i64(emitter, 16)
+    flex ev_hash = sys_fast_hash(event_name)
+
+    flex i = 0
+    while i < count {
+        flex off = i * 32
+        if mem_read_i64(buf, off) == ev_hash {
+            if mem_read_i64(buf, off + 8) == handler_id {
+                if mem_read_i64(buf, off + 24) == 1 {
+                    mem_write_i64(buf, off + 24, 0) // Deactivate
+                    deliver true
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    deliver false
+}
+
+open flow emitter_remove_all(emitter: Int, event_name: Text) -> Int {
+    flex count = mem_read_i64(emitter, 0)
+    flex buf = mem_read_i64(emitter, 16)
+    flex ev_hash = sys_fast_hash(event_name)
+    flex removed = 0
+
+    flex i = 0
+    while i < count {
+        flex off = i * 32
+        if mem_read_i64(buf, off) == ev_hash {
+            if mem_read_i64(buf, off + 24) == 1 {
+                mem_write_i64(buf, off + 24, 0)
+                removed = removed + 1
+            }
+        }
+        i = i + 1
+    }
+
+    deliver removed
+}
+
+open flow emitter_free(emitter: Int) -> Void {
+    flex buf = mem_read_i64(emitter, 16)
+    free_buffer(buf)
+    free_buffer(emitter)
+}
