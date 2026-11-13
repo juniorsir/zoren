@@ -1,0 +1,85 @@
+// Zoren Standard Text Templating Engine (std/template.zor)
+// Mustache-style variable substitution ({{ var }}), conditional blocks ({{#if}}...{{/if}}), and context rendering.
+
+bring sys
+bring text
+bring crypto
+
+// ============================================================================
+// TEMPLATE CONTEXT MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   entry_count
+// [8..16]:  max_entries (32)
+// [16..24]: keys_buf (32 * 8 bytes, hash of key)
+// [24..32]: vals_table (managed in string array / table)
+// ============================================================================
+
+open flow template_replace_tag(tpl: Text, tag: Text, replacement: Text) -> Text {
+    flex t_len = length(tpl)
+    flex tag_len = length(tag)
+    if t_len < tag_len || tag_len <= 0 { deliver tpl }
+
+    flex idx = str_find(tpl, tag)
+    if idx < 0 { deliver tpl }
+
+    // Reconstruct with replacement
+    flex before = str_slice(tpl, 0, idx)
+    flex after_start = idx + tag_len
+    flex after_len = t_len - after_start
+    flex after = str_slice(tpl, after_start, after_len)
+
+    flex res = str_concat(before, replacement)
+    res = str_concat(res, after)
+
+    // Tail recursive replacement for remaining occurrences
+    deliver template_replace_tag(res, tag, replacement)
+}
+
+open flow template_render_var(tpl: Text, key: Text, val: Text) -> Text {
+    // Replace {{key}}
+    flex tag1 = str_concat("{{", key)
+    tag1 = str_concat(tag1, "}}")
+    flex res = template_replace_tag(tpl, tag1, val)
+
+    // Replace {{ key }}
+    flex tag2 = str_concat("{{ ", key)
+    tag2 = str_concat(tag2, " }}")
+    deliver template_replace_tag(res, tag2, val)
+}
+
+open flow template_render_if(tpl: Text, key: Text, condition: Bool) -> Text {
+    flex start_tag = str_concat("{{#if ", key)
+    start_tag = str_concat(start_tag, "}}")
+
+    flex end_tag = str_concat("{{/if ", key)
+    end_tag = str_concat(end_tag, "}}")
+
+    flex s_idx = str_find(tpl, start_tag)
+    if s_idx < 0 {
+        // Try without trailing key in close tag: {{/if}}
+        end_tag = "{{/if}}"
+        s_idx = str_find(tpl, start_tag)
+    }
+
+    if s_idx < 0 { deliver tpl }
+
+    flex e_idx = str_find(tpl, end_tag)
+    if e_idx < 0 || e_idx < s_idx { deliver tpl }
+
+    flex before = str_slice(tpl, 0, s_idx)
+    flex inner_start = s_idx + length(start_tag)
+    flex inner_len = e_idx - inner_start
+    flex inner_content = str_slice(tpl, inner_start, inner_len)
+
+    flex after_start = e_idx + length(end_tag)
+    flex after_len = length(tpl) - after_start
+    flex after = str_slice(tpl, after_start, after_len)
+
+    flex mid = ""
+    if condition {
+        mid = inner_content
+    }
+
+    flex res = str_concat(before, mid)
+    deliver str_concat(res, after)
+}

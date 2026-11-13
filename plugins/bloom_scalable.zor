@@ -1,0 +1,148 @@
+// Zoren Scalable Dynamic Bloom Filter (plugins/bloom_scalable.zor)
+// Unbounded probabilistic filter chaining multiple sub-slices as capacity grows while bounding false positive rate.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// SCALABLE BLOOM FILTER MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   slice_count
+// [8..16]:  max_slices
+// [16..24]: slice_capacity
+// [24..32]: current_slice_items
+// [32..40]: total_items
+// [40..48]: slices_table (max_slices * 16 bytes: [buf_ptr, num_bits])
+// ============================================================================
+
+open flow sbf_alloc_slice(slice_capacity: Int) -> Int {
+    // 10 bits per item -> num_bits = slice_capacity * 10
+    flex num_bits = slice_capacity * 10
+    flex num_bytes = (num_bits + 7) / 8
+    flex buf = alloc_buffer(num_bytes)
+    mem_fill(buf, 0, num_bytes)
+
+    flex slice_info = alloc_buffer(16)
+    mem_write_i64(slice_info, 0, buf)
+    mem_write_i64(slice_info, 8, num_bits)
+    deliver slice_info
+}
+
+open flow sbf_new(slice_capacity: Int, max_slices: Int) -> Int {
+    if slice_capacity <= 0 { slice_capacity = 64 }
+    if max_slices <= 0 { max_slices = 16 }
+
+    flex table = alloc_buffer(max_slices * 16)
+    mem_fill(table, 0, max_slices * 16)
+
+    // Create first slice
+    flex first_slice = sbf_alloc_slice(slice_capacity)
+    mem_write_i64(table, 0, mem_read_i64(first_slice, 0))
+    mem_write_i64(table, 8, mem_read_i64(first_slice, 8))
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 1) // slice_count = 1
+    mem_write_i64(header, 8, max_slices)
+    mem_write_i64(header, 16, slice_capacity)
+    mem_write_i64(header, 24, 0) // current_slice_items = 0
+    mem_write_i64(header, 32, 0) // total_items = 0
+    mem_write_i64(header, 40, table)
+
+    deliver header
+}
+
+open flow sbf_hash_pos(key_hash: Int, seed: Int, num_bits: Int) -> Int {
+    flex combined = (key_hash + (seed * 2654435761))
+    if combined < 0 { combined = 0 - combined }
+    deliver combined % num_bits
+}
+
+open flow sbf_slice_add(buf: Int, num_bits: Int, key_hash: Int) -> Int {
+    for k in 1..4 {
+        flex bit_pos = sbf_hash_pos(key_hash, k, num_bits)
+        flex byte_idx = bit_pos / 8
+        flex bit_rem = bit_pos % 8
+
+        flex p2 = 1
+        for p in 0..bit_rem { p2 = p2 * 2 }
+
+        flex cur_b = mem_read_byte(buf, byte_idx)
+        if ((cur_b / p2) % 2) == 0 {
+            mem_write_byte(buf, byte_idx, cur_b + p2)
+        }
+    }
+    deliver 0
+}
+
+open flow sbf_slice_test(buf: Int, num_bits: Int, key_hash: Int) -> Bool {
+    for k in 1..4 {
+        flex bit_pos = sbf_hash_pos(key_hash, k, num_bits)
+        flex byte_idx = bit_pos / 8
+        flex bit_rem = bit_pos % 8
+
+        flex p2 = 1
+        for p in 0..bit_rem { p2 = p2 * 2 }
+
+        flex cur_b = mem_read_byte(buf, byte_idx)
+        if ((cur_b / p2) % 2) == 0 {
+            deliver false
+        }
+    }
+    deliver true
+}
+
+open flow sbf_add(sbf_ptr: Int, key: Text) -> Bool {
+    flex cur_items = mem_read_i64(sbf_ptr, 24)
+    flex cap = mem_read_i64(sbf_ptr, 16)
+    flex slice_cnt = mem_read_i64(sbf_ptr, 0)
+    flex max_s = mem_read_i64(sbf_ptr, 8)
+    flex table = mem_read_i64(sbf_ptr, 40)
+
+    if cur_items >= cap {
+        // Need new slice
+        if slice_cnt >= max_s { deliver false } // reached limit
+
+        flex new_slice = sbf_alloc_slice(cap)
+        flex offset = slice_cnt * 16
+        mem_write_i64(table, offset, mem_read_i64(new_slice, 0))
+        mem_write_i64(table, offset + 8, mem_read_i64(new_slice, 8))
+
+        slice_cnt = slice_cnt + 1
+        mem_write_i64(sbf_ptr, 0, slice_cnt)
+        mem_write_i64(sbf_ptr, 24, 0)
+        cur_items = 0
+    }
+
+    flex active_slice_offset = (slice_cnt - 1) * 16
+    flex buf = mem_read_i64(table, active_slice_offset)
+    flex num_bits = mem_read_i64(table, active_slice_offset + 8)
+
+    flex k_hash = sys_fast_hash(key)
+    sbf_slice_add(buf, num_bits, k_hash)
+
+    mem_write_i64(sbf_ptr, 24, cur_items + 1)
+    flex total = mem_read_i64(sbf_ptr, 32)
+    mem_write_i64(sbf_ptr, 32, total + 1)
+
+    deliver true
+}
+
+open flow sbf_contains(sbf_ptr: Int, key: Text) -> Bool {
+    flex slice_cnt = mem_read_i64(sbf_ptr, 0)
+    flex table = mem_read_i64(sbf_ptr, 40)
+    flex k_hash = sys_fast_hash(key)
+
+    for i in 0..slice_cnt {
+        flex offset = i * 16
+        flex buf = mem_read_i64(table, offset)
+        flex num_bits = mem_read_i64(table, offset + 8)
+
+        if sbf_slice_test(buf, num_bits, k_hash) {
+            deliver true
+        }
+    }
+    deliver false
+}
+
+open flow sbf_count(sbf_ptr: Int) -> Int { deliver mem_read_i64(sbf_ptr, 32) }
+open flow sbf_slices(sbf_ptr: Int) -> Int { deliver mem_read_i64(sbf_ptr, 0) }

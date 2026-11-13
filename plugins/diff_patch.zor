@@ -1,0 +1,134 @@
+// Zoren Longest Common Subsequence (LCS) Diff & Patch Engine (plugins/diff_patch.zor)
+// Generates minimal edit scripts (KEEP, INSERT, DELETE) and applies patches to arrays/token streams.
+
+bring sys
+
+// ============================================================================
+// EDIT OPERATION CODES
+// 0: KEEP   (present in both A and B)
+// 1: DELETE (present in A, removed in B)
+// 2: INSERT (added in B, not in A)
+//
+// Each Edit Entry (16 bytes):
+// [0..8]: op_type (0=KEEP, 1=DELETE, 2=INSERT)
+// [8..16]: val (value/hash)
+// ============================================================================
+
+open flow diff_compute_lcs(arr_a: Int, len_a: Int, arr_b: Int, len_b: Int, out_diff: Int) -> Int {
+    if len_a <= 0 && len_b <= 0 { deliver 0 }
+
+    // Allocate DP matrix: (len_a + 1) * (len_b + 1) * 8 bytes
+    flex stride = len_b + 1
+    flex dp_size = (len_a + 1) * stride * 8
+    flex dp = alloc_buffer(dp_size)
+    mem_fill(dp, 0, dp_size)
+
+    // Build DP table
+    for i in 0..len_a {
+        for j in 0..len_b {
+            flex va = mem_read_i64(arr_a, i * 8)
+            flex vb = mem_read_i64(arr_b, j * 8)
+
+            flex cur_slot = ((i + 1) * stride) + (j + 1)
+            if va == vb {
+                flex prev_diag = (i * stride) + j
+                flex val = mem_read_i64(dp, prev_diag * 8) + 1
+                mem_write_i64(dp, cur_slot * 8, val)
+            } else {
+                flex prev_top = (i * stride) + (j + 1)
+                flex prev_left = ((i + 1) * stride) + j
+                flex top_v = mem_read_i64(dp, prev_top * 8)
+                flex left_v = mem_read_i64(dp, prev_left * 8)
+                flex max_v = left_v
+                if top_v > left_v { max_v = top_v }
+                mem_write_i64(dp, cur_slot * 8, max_v)
+            }
+        }
+    }
+
+    // Backtrack from (len_a, len_b) to generate reversed diff
+    flex temp_diff = alloc_buffer((len_a + len_b) * 16)
+    flex op_count = 0
+
+    flex i = len_a
+    flex j = len_b
+
+    repeat while i > 0 || j > 0 {
+        if i > 0 && j > 0 {
+            flex va = mem_read_i64(arr_a, (i - 1) * 8)
+            flex vb = mem_read_i64(arr_b, (j - 1) * 8)
+            if va == vb {
+                flex off = op_count * 16
+                mem_write_i64(temp_diff, off, 0) // KEEP
+                mem_write_i64(temp_diff, off + 8, va)
+                op_count = op_count + 1
+                i = i - 1
+                j = j - 1
+                continue
+            }
+        }
+
+        if j > 0 {
+            flex cur_dp = mem_read_i64(dp, ((i * stride) + j) * 8)
+            flex left_dp = mem_read_i64(dp, ((i * stride) + (j - 1)) * 8)
+            if i == 0 || cur_dp == left_dp {
+                flex vb = mem_read_i64(arr_b, (j - 1) * 8)
+                flex off = op_count * 16
+                mem_write_i64(temp_diff, off, 2) // INSERT
+                mem_write_i64(temp_diff, off + 8, vb)
+                op_count = op_count + 1
+                j = j - 1
+                continue
+            }
+        }
+
+        if i > 0 {
+            flex va = mem_read_i64(arr_a, (i - 1) * 8)
+            flex off = op_count * 16
+            mem_write_i64(temp_diff, off, 1) // DELETE
+            mem_write_i64(temp_diff, off + 8, va)
+            op_count = op_count + 1
+            i = i - 1
+        }
+    }
+
+    // Reverse temp_diff into out_diff
+    for k in 0..op_count {
+        flex src_off = ((op_count - 1) - k) * 16
+        flex dst_off = k * 16
+        mem_write_i64(out_diff, dst_off, mem_read_i64(temp_diff, src_off))
+        mem_write_i64(out_diff, dst_off + 8, mem_read_i64(temp_diff, src_off + 8))
+    }
+
+    deliver op_count
+}
+
+open flow diff_count_changes(diff_buf: Int, edit_count: Int) -> Int {
+    flex changes = 0
+    for i in 0..edit_count {
+        flex op = mem_read_i64(diff_buf, i * 16)
+        if op == 1 || op == 2 { // DELETE or INSERT
+            changes = changes + 1
+        }
+    }
+    deliver changes
+}
+
+open flow diff_apply_patch(arr_a: Int, len_a: Int, diff_buf: Int, edit_count: Int, out_patched: Int) -> Int {
+    flex out_idx = 0
+    for i in 0..edit_count {
+        flex off = i * 16
+        flex op = mem_read_i64(diff_buf, off)
+        flex val = mem_read_i64(diff_buf, off + 8)
+
+        if op == 0 { // KEEP
+            mem_write_i64(out_patched, out_idx * 8, val)
+            out_idx = out_idx + 1
+        } else if op == 2 { // INSERT
+            mem_write_i64(out_patched, out_idx * 8, val)
+            out_idx = out_idx + 1
+        }
+        // op == 1 (DELETE): skip
+    }
+    deliver out_idx
+}

@@ -1,0 +1,138 @@
+// Zoren Precise Sliding Window Log Rate Limiter (plugins/rate_limiter_sliding_log.zor)
+// Sub-millisecond exact timestamped request limiter preventing boundary burst spikes on sensitive endpoints.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// SLIDING WINDOW LOG RATE LIMITER MEMORY LAYOUT
+// Header (40 bytes):
+// [0..8]:   max_clients (64)
+// [8..16]:  client_count
+// [16..24]: window_ms
+// [24..32]: max_requests_per_window
+// [32..40]: clients_table (max_clients * 40 bytes)
+//
+// Each Client Entry (40 bytes):
+// [0..8]:   client_hash
+// [8..16]:  ring_head
+// [16..24]: ring_tail
+// [24..32]: ring_capacity (128)
+// [32..40]: timestamps_buf (128 * 8 bytes)
+// ============================================================================
+
+open flow swl_new(window_ms: Int, max_requests: Int) -> Int {
+    if window_ms <= 0 { window_ms = 1000 }
+    if max_requests <= 0 { max_requests = 10 }
+
+    flex max_clients = 64
+    flex table_size = max_clients * 40
+    flex table = alloc_buffer(table_size)
+    mem_fill(table, 0, table_size)
+
+    flex header = alloc_buffer(40)
+    mem_write_i64(header, 0, max_clients)
+    mem_write_i64(header, 8, 0) // count = 0
+    mem_write_i64(header, 16, window_ms)
+    mem_write_i64(header, 24, max_requests)
+    mem_write_i64(header, 32, table)
+
+    deliver header
+}
+
+open flow swl_find_or_add_client(limiter_ptr: Int, client_id: Text) -> Int {
+    flex c_hash = sys_fast_hash(client_id)
+    flex count = mem_read_i64(limiter_ptr, 8)
+    flex max_c = mem_read_i64(limiter_ptr, 0)
+    flex table = mem_read_i64(limiter_ptr, 32)
+
+    for i in 0..count {
+        flex offset = i * 40
+        if mem_read_i64(table, offset) == c_hash {
+            deliver i
+        }
+    }
+
+    if count >= max_c { deliver -1 }
+
+    flex new_idx = count
+    flex offset = new_idx * 40
+    flex ring_cap = 128
+    flex ts_buf = alloc_buffer(ring_cap * 8)
+    mem_fill(ts_buf, 0, ring_cap * 8)
+
+    mem_write_i64(table, offset, c_hash)
+    mem_write_i64(table, offset + 8, 0)        // ring_head = 0
+    mem_write_i64(table, offset + 16, 0)       // ring_tail = 0
+    mem_write_i64(table, offset + 24, ring_cap)
+    mem_write_i64(table, offset + 32, ts_buf)
+
+    mem_write_i64(limiter_ptr, 8, count + 1)
+    deliver new_idx
+}
+
+open flow swl_purge_expired(table: Int, client_idx: Int, window_ms: Int, now_ms: Int) -> Int {
+    flex offset = client_idx * 40
+    flex head = mem_read_i64(table, offset + 8)
+    flex tail = mem_read_i64(table, offset + 16)
+    flex ring_cap = mem_read_i64(table, offset + 24)
+    flex ts_buf = mem_read_i64(table, offset + 32)
+
+    repeat while head < tail {
+        flex slot = head % ring_cap
+        flex ts = mem_read_i64(ts_buf, slot * 8)
+        if (now_ms - ts) >= window_ms {
+            head = head + 1
+        } else {
+            break
+        }
+    }
+
+    mem_write_i64(table, offset + 8, head)
+    deliver tail - head
+}
+
+open flow swl_allow(limiter_ptr: Int, client_id: Text, now_ms: Int) -> Bool {
+    flex c_idx = swl_find_or_add_client(limiter_ptr, client_id)
+    if c_idx < 0 { deliver false }
+
+    flex window_ms = mem_read_i64(limiter_ptr, 16)
+    flex max_reqs = mem_read_i64(limiter_ptr, 24)
+    flex table = mem_read_i64(limiter_ptr, 32)
+
+    flex active_reqs = swl_purge_expired(table, c_idx, window_ms, now_ms)
+    if active_reqs >= max_reqs {
+        deliver false
+    }
+
+    flex offset = c_idx * 40
+    flex tail = mem_read_i64(table, offset + 16)
+    flex ring_cap = mem_read_i64(table, offset + 24)
+    flex ts_buf = mem_read_i64(table, offset + 32)
+
+    flex slot = tail % ring_cap
+    mem_write_i64(ts_buf, slot * 8, now_ms)
+    mem_write_i64(table, offset + 16, tail + 1)
+
+    deliver true
+}
+
+open flow swl_current_count(limiter_ptr: Int, client_id: Text, now_ms: Int) -> Int {
+    flex c_idx = swl_find_or_add_client(limiter_ptr, client_id)
+    if c_idx < 0 { deliver 0 }
+
+    flex window_ms = mem_read_i64(limiter_ptr, 16)
+    flex table = mem_read_i64(limiter_ptr, 32)
+    deliver swl_purge_expired(table, c_idx, window_ms, now_ms)
+}
+
+open flow swl_reset_client(limiter_ptr: Int, client_id: Text) -> Int {
+    flex c_idx = swl_find_or_add_client(limiter_ptr, client_id)
+    if c_idx < 0 { deliver 0 }
+
+    flex table = mem_read_i64(limiter_ptr, 32)
+    flex offset = c_idx * 40
+    mem_write_i64(table, offset + 8, 0)
+    mem_write_i64(table, offset + 16, 0)
+    deliver 0
+}

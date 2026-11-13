@@ -1,0 +1,83 @@
+// Zoren Streaming Descriptive Statistics Engine (std/stats.zor)
+// Online Welford algorithm for running Mean, Variance, Standard Deviation, and Min/Max in O(1) memory.
+
+bring sys
+
+// ============================================================================
+// STATS ACCUMULATOR MEMORY LAYOUT (64 bytes)
+// [0..8]:   count
+// [8..16]:  min_val
+// [16..24]: max_val
+// [24..32]: sum_val
+// [32..40]: mean_scaled (mean * 1000)
+// [40..48]: m2_scaled   (M2 * 1000)
+// ============================================================================
+
+open flow stats_new() -> Int {
+    flex st = alloc_buffer(64)
+    mem_fill(st, 0, 64)
+    mem_write_i64(st, 8, 9223372036854775807)  // min = INF
+    mem_write_i64(st, 16, -9223372036854775807) // max = -INF
+    deliver st
+}
+
+open flow stats_count(st: Int) -> Int { deliver mem_read_i64(st, 0) }
+open flow stats_min(st: Int) -> Int { deliver mem_read_i64(st, 8) }
+open flow stats_max(st: Int) -> Int { deliver mem_read_i64(st, 16) }
+open flow stats_sum(st: Int) -> Int { deliver mem_read_i64(st, 24) }
+open flow stats_mean_scaled(st: Int) -> Int { deliver mem_read_i64(st, 32) }
+open flow stats_mean(st: Int) -> Int { deliver mem_read_i64(st, 32) / 1000 }
+
+open flow stats_add(st: Int, val: Int) -> Int {
+    flex count = mem_read_i64(st, 0) + 1
+    flex min_v = mem_read_i64(st, 8)
+    flex max_v = mem_read_i64(st, 16)
+    flex sum_v = mem_read_i64(st, 24) + val
+    flex old_mean = mem_read_i64(st, 32) // scaled x1000
+    flex m2 = mem_read_i64(st, 40)       // scaled x1000
+
+    flex new_min = min_v
+    if val < min_v { new_min = val }
+    flex new_max = max_v
+    if val > max_v { new_max = val }
+
+    // Welford update
+    // delta = (val * 1000) - old_mean
+    flex delta = (val * 1000) - old_mean
+    flex new_mean = old_mean + (delta / count)
+    flex delta2 = (val * 1000) - new_mean
+    flex new_m2 = m2 + ((delta / 1000) * delta2)
+
+    mem_write_i64(st, 0, count)
+    mem_write_i64(st, 8, new_min)
+    mem_write_i64(st, 16, new_max)
+    mem_write_i64(st, 24, sum_v)
+    mem_write_i64(st, 32, new_mean)
+    mem_write_i64(st, 40, new_m2)
+
+    deliver count
+}
+
+open flow stats_variance_scaled(st: Int) -> Int {
+    flex count = mem_read_i64(st, 0)
+    if count <= 1 { deliver 0 }
+    flex m2 = mem_read_i64(st, 40)
+    deliver m2 / (count - 1)
+}
+
+open flow stats_std_dev_scaled(st: Int) -> Int {
+    flex var_scaled = stats_variance_scaled(st)
+    if var_scaled <= 0 { deliver 0 }
+    // sqrt(var_scaled * 1000) so that result is scaled x1000
+    deliver sys_isqrt(var_scaled * 1000)
+}
+
+open flow stats_reset(st: Int) -> Int {
+    mem_write_i64(st, 0, 0)
+    mem_write_i64(st, 8, 9223372036854775807)
+    mem_write_i64(st, 16, -9223372036854775807)
+    mem_write_i64(st, 24, 0)
+    mem_write_i64(st, 32, 0)
+    mem_write_i64(st, 40, 0)
+    deliver 0
+}

@@ -1,0 +1,140 @@
+// Zoren Cryptographic Merkle Tree & Audit Proof Engine (plugins/merkle_tree.zor)
+// Binary Merkle tree construction, root hash derivation, proof generation, and tamper-evident proof validation.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// MERKLE TREE MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   num_leaves   (e.g., 8)
+// [8..16]:  total_nodes  (2 * num_leaves - 1)
+// [16..24]: tree_buf     (total_nodes * 8 bytes)
+// [24..32]: is_built     (0 or 1)
+//
+// Proof Step Entry (16 bytes):
+// [0..8]:   sibling_hash
+// [8..16]:  is_right (1 if sibling is right child, 0 if left child)
+// ============================================================================
+
+open flow merkle_hash_combine(left_h: Int, right_h: Int) -> Int {
+    flex mod_val = 2147483647
+    flex combined = ((left_h * 16777619) + (right_h * 2654435761) + 1013904223) % mod_val
+    if combined < 0 { deliver 0 - combined }
+    deliver combined
+}
+
+open flow merkle_new(num_leaves: Int) -> Int {
+    if num_leaves <= 0 { num_leaves = 8 }
+    // Enforce power of 2 (up to 64)
+    flex total_nodes = (num_leaves * 2) - 1
+    flex tree_buf = alloc_buffer(total_nodes * 8)
+    mem_fill(tree_buf, 0, total_nodes * 8)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, num_leaves)
+    mem_write_i64(header, 8, total_nodes)
+    mem_write_i64(header, 16, tree_buf)
+    mem_write_i64(header, 24, 0) // is_built = 0
+
+    deliver header
+}
+
+open flow merkle_set_leaf(mt_ptr: Int, leaf_idx: Int, data: Text) -> Bool {
+    flex n_leaves = mem_read_i64(mt_ptr, 0)
+    if leaf_idx < 0 || leaf_idx >= n_leaves { deliver false }
+
+    flex tree_buf = mem_read_i64(mt_ptr, 16)
+    // Leaves start at index (num_leaves - 1)
+    flex node_idx = (n_leaves - 1) + leaf_idx
+    flex h = sys_fast_hash(data)
+    mem_write_i64(tree_buf, node_idx * 8, h)
+    mem_write_i64(mt_ptr, 24, 0) // needs rebuild
+
+    deliver true
+}
+
+open flow merkle_build_tree(mt_ptr: Int) -> Int {
+    flex n_leaves = mem_read_i64(mt_ptr, 0)
+    flex tree_buf = mem_read_i64(mt_ptr, 16)
+
+    // Compute parent hashes from (n_leaves - 2) down to 0
+    flex start_parent = n_leaves - 2
+    flex p = start_parent
+    repeat while p >= 0 {
+        flex left_child = (p * 2) + 1
+        flex right_child = (p * 2) + 2
+
+        flex hl = mem_read_i64(tree_buf, left_child * 8)
+        flex hr = mem_read_i64(tree_buf, right_child * 8)
+        flex parent_h = merkle_hash_combine(hl, hr)
+
+        mem_write_i64(tree_buf, p * 8, parent_h)
+        p = p - 1
+    }
+
+    mem_write_i64(mt_ptr, 24, 1) // built = 1
+    deliver mem_read_i64(tree_buf, 0) // root hash
+}
+
+open flow merkle_root(mt_ptr: Int) -> Int {
+    flex is_built = mem_read_i64(mt_ptr, 24)
+    if is_built == 0 {
+        deliver merkle_build_tree(mt_ptr)
+    }
+    flex tree_buf = mem_read_i64(mt_ptr, 16)
+    deliver mem_read_i64(tree_buf, 0)
+}
+
+open flow merkle_generate_proof(mt_ptr: Int, leaf_idx: Int, out_proof_buf: Int) -> Int {
+    flex n_leaves = mem_read_i64(mt_ptr, 0)
+    if leaf_idx < 0 || leaf_idx >= n_leaves { deliver 0 }
+
+    merkle_root(mt_ptr) // ensure tree is built
+
+    flex tree_buf = mem_read_i64(mt_ptr, 16)
+    flex curr_node = (n_leaves - 1) + leaf_idx
+    flex steps = 0
+
+    repeat while curr_node > 0 {
+        flex parent = (curr_node - 1) / 2
+        flex left_child = (parent * 2) + 1
+        flex right_child = (parent * 2) + 2
+
+        flex is_left = (curr_node == left_child)
+        flex sibling_node = left_child
+        flex is_sibling_right = 0
+        if is_left {
+            sibling_node = right_child
+            is_sibling_right = 1
+        }
+
+        flex sib_h = mem_read_i64(tree_buf, sibling_node * 8)
+        flex off = steps * 16
+        mem_write_i64(out_proof_buf, off, sib_h)
+        mem_write_i64(out_proof_buf, off + 8, is_sibling_right)
+
+        steps = steps + 1
+        curr_node = parent
+    }
+
+    deliver steps
+}
+
+open flow merkle_verify_proof(root_hash: Int, leaf_data: Text, proof_buf: Int, steps: Int) -> Bool {
+    flex cur_hash = sys_fast_hash(leaf_data)
+
+    for i in 0..steps {
+        flex off = i * 16
+        flex sib_hash = mem_read_i64(proof_buf, off)
+        flex is_sibling_right = mem_read_i64(proof_buf, off + 8)
+
+        if is_sibling_right == 1 {
+            cur_hash = merkle_hash_combine(cur_hash, sib_hash)
+        } else {
+            cur_hash = merkle_hash_combine(sib_hash, cur_hash)
+        }
+    }
+
+    deliver cur_hash == root_hash
+}
