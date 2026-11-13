@@ -1,0 +1,266 @@
+// Zoren Cap'n Proto Wire Frame Suite (plugins/capnproto_frame.zor)
+// Production zero-copy serialization wire framing codec conforming to the Cap'n Proto specification.
+// Handles multi-segment table headers, 8-byte word alignment padding, and segment payload extraction.
+
+bring sys
+
+// ============================================================================
+// CAP'N PROTO SPECIFICATION OVERVIEW
+// 1. Framing Header:
+//    - 4 bytes (u32 little-endian): (segment_count - 1)
+//    - For each segment: 4 bytes (u32 little-endian): segment_size in 8-byte words
+//    - Padding: If segment_count is even, 4 zero bytes are added for 8-byte alignment.
+// 2. Segment Bodies:
+//    - Follows header immediately, each segment size = words * 8 bytes.
+// ============================================================================
+
+flow capnp_hex_nibble(n: Int) -> Text {
+    flex v = n % 16
+    if v < 0 { v = v + 16 }
+    if v == 0 { deliver "0" }
+    if v == 1 { deliver "1" }
+    if v == 2 { deliver "2" }
+    if v == 3 { deliver "3" }
+    if v == 4 { deliver "4" }
+    if v == 5 { deliver "5" }
+    if v == 6 { deliver "6" }
+    if v == 7 { deliver "7" }
+    if v == 8 { deliver "8" }
+    if v == 9 { deliver "9" }
+    if v == 10 { deliver "a" }
+    if v == 11 { deliver "b" }
+    if v == 12 { deliver "c" }
+    if v == 13 { deliver "d" }
+    if v == 14 { deliver "e" }
+    deliver "f"
+}
+
+open flow capnp_byte_to_hex(b: Int) -> Text {
+    flex val = b % 256
+    if val < 0 { val = val + 256 }
+    flex hi = val / 16
+    flex lo = val % 16
+    deliver str_concat(capnp_hex_nibble(hi), capnp_hex_nibble(lo))
+}
+
+flow capnp_hex_digit(hex_str: Text, idx: Int) -> Int {
+    if idx < 0 || idx >= length(hex_str) { deliver 0 }
+    flex ch = str_slice(hex_str, idx, 1)
+    flex digits = "0123456789abcdef"
+    flex pos = str_find(digits, str_lower(ch))
+    if pos >= 0 { deliver pos }
+    deliver 0
+}
+
+flow capnp_hex_byte(hex_str: Text, byte_offset: Int) -> Int {
+    flex idx = byte_offset * 2
+    flex d0 = capnp_hex_digit(hex_str, idx)
+    flex d1 = capnp_hex_digit(hex_str, idx + 1)
+    deliver (d0 * 16) + d1
+}
+
+open flow capnp_encode_u32_le(val: Int) -> Text {
+    flex b0 = val % 256
+    flex b1 = (val / 256) % 256
+    flex b2 = (val / 65536) % 256
+    flex b3 = (val / 16777216) % 256
+    flex s0 = capnp_byte_to_hex(b0)
+    flex s1 = capnp_byte_to_hex(b1)
+    flex s2 = capnp_byte_to_hex(b2)
+    flex s3 = capnp_byte_to_hex(b3)
+    flex r12 = str_concat(s0, s1)
+    flex r123 = str_concat(r12, s2)
+    deliver str_concat(r123, s3)
+}
+
+open flow capnp_decode_u32_le(hex_str: Text, byte_offset: Int) -> Int {
+    flex b0 = capnp_hex_byte(hex_str, byte_offset)
+    flex b1 = capnp_hex_byte(hex_str, byte_offset + 1)
+    flex b2 = capnp_hex_byte(hex_str, byte_offset + 2)
+    flex b3 = capnp_hex_byte(hex_str, byte_offset + 3)
+    deliver b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+}
+
+// ============================================================================
+// CAPNP MESSAGE BUFFER LAYOUT
+// Header (40 bytes):
+// [0..8]:   num_segments
+// [8..16]:  words_buf (16 * 8 = 128 bytes)
+// [16..24]: data_len_buf (16 * 8 = 128 bytes)
+// [24..32]: total_words
+// [32..40]: reserved
+// ============================================================================
+
+open flow capnp_create(num_segments: Int) -> Int {
+    flex n = num_segments
+    if n <= 0 { n = 1 }
+    if n > 16 { n = 16 }
+
+    flex words_buf = alloc_buffer(16 * 8)
+    mem_fill(words_buf, 0, 16 * 8)
+
+    flex data_len_buf = alloc_buffer(16 * 8)
+    mem_fill(data_len_buf, 0, 16 * 8)
+
+    flex header = alloc_buffer(40)
+    mem_write_i64(header, 0, n)
+    mem_write_i64(header, 8, words_buf)
+    mem_write_i64(header, 16, data_len_buf)
+    mem_write_i64(header, 24, 0) // total_words
+    mem_write_i64(header, 32, 0) // reserved
+
+    deliver header
+}
+
+open flow capnp_get_segment_count(msg: Int) -> Int {
+    deliver mem_read_i64(msg, 0)
+}
+
+open flow capnp_set_segment(msg: Int, seg_idx: Int, word_count: Int) -> Int {
+    flex num = mem_read_i64(msg, 0)
+    if seg_idx < 0 || seg_idx >= num { deliver 0 }
+    flex words_buf = mem_read_i64(msg, 8)
+    flex prev_words = mem_read_i64(words_buf, seg_idx * 8)
+    mem_write_i64(words_buf, seg_idx * 8, word_count)
+
+    flex total = mem_read_i64(msg, 24)
+    total = total - prev_words + word_count
+    mem_write_i64(msg, 24, total)
+    deliver 0
+}
+
+open flow capnp_get_segment_words(msg: Int, seg_idx: Int) -> Int {
+    flex num = mem_read_i64(msg, 0)
+    if seg_idx < 0 || seg_idx >= num { deliver 0 }
+    flex words_buf = mem_read_i64(msg, 8)
+    deliver mem_read_i64(words_buf, seg_idx * 8)
+}
+
+open flow capnp_total_words(msg: Int) -> Int {
+    deliver mem_read_i64(msg, 24)
+}
+
+open flow capnp_encode_frame_with_data(msg: Int, seg_data_hex: Text) -> Text {
+    flex seg_count = mem_read_i64(msg, 0)
+    flex out = capnp_encode_u32_le(seg_count - 1)
+
+    flex words_buf = mem_read_i64(msg, 8)
+    flex i = 0
+    while i < seg_count {
+        flex w = mem_read_i64(words_buf, i * 8)
+        out = str_concat(out, capnp_encode_u32_le(w))
+        i = i + 1
+    }
+
+    // 4-byte zero padding if seg_count is even
+    if (seg_count % 2) == 0 {
+        out = str_concat(out, "00000000")
+    }
+
+    out = str_concat(out, seg_data_hex)
+    deliver out
+}
+
+open flow capnp_encode_empty_frame(msg: Int) -> Text {
+    flex seg_count = mem_read_i64(msg, 0)
+    flex out = capnp_encode_u32_le(seg_count - 1)
+
+    flex words_buf = mem_read_i64(msg, 8)
+    flex total_bytes = 0
+    flex i = 0
+    while i < seg_count {
+        flex w = mem_read_i64(words_buf, i * 8)
+        out = str_concat(out, capnp_encode_u32_le(w))
+        total_bytes = total_bytes + (w * 8)
+        i = i + 1
+    }
+
+    if (seg_count % 2) == 0 {
+        out = str_concat(out, "00000000")
+    }
+
+    flex k = 0
+    while k < total_bytes {
+        out = str_concat(out, "00")
+        k = k + 1
+    }
+
+    deliver out
+}
+
+open flow capnp_verify_alignment(frame_hex: Text) -> Bool {
+    flex hex_len = length(frame_hex)
+    if hex_len < 8 { deliver false } // at least 4 bytes
+    flex byte_len = hex_len / 2
+    if (byte_len % 8) != 0 { deliver false } // total length must be 8-byte aligned
+
+    flex seg_count_minus_one = capnp_decode_u32_le(frame_hex, 0)
+    if seg_count_minus_one < 0 || seg_count_minus_one >= 16 { deliver false }
+    flex seg_count = seg_count_minus_one + 1
+
+    flex header_bytes = 4 + (seg_count * 4)
+    if (seg_count % 2) == 0 {
+        header_bytes = header_bytes + 4
+    }
+    if (header_bytes % 8) != 0 { deliver false }
+
+    flex expected_payload_bytes = 0
+    flex i = 0
+    while i < seg_count {
+        flex w = capnp_decode_u32_le(frame_hex, 4 + (i * 4))
+        expected_payload_bytes = expected_payload_bytes + (w * 8)
+        i = i + 1
+    }
+
+    deliver byte_len == (header_bytes + expected_payload_bytes)
+}
+
+open flow capnp_decode_frame(frame_hex: Text) -> Int {
+    flex hex_len = length(frame_hex)
+    if hex_len < 8 { deliver 0 }
+
+    flex seg_count_minus_one = capnp_decode_u32_le(frame_hex, 0)
+    if seg_count_minus_one < 0 || seg_count_minus_one >= 16 { deliver 0 }
+    flex seg_count = seg_count_minus_one + 1
+
+    flex msg = capnp_create(seg_count)
+    flex i = 0
+    while i < seg_count {
+        flex w = capnp_decode_u32_le(frame_hex, 4 + (i * 4))
+        capnp_set_segment(msg, i, w)
+        i = i + 1
+    }
+
+    deliver msg
+}
+
+open flow capnp_extract_segment_from_msg(frame_hex: Text, msg: Int, seg_idx: Int) -> Text {
+    flex seg_count = capnp_get_segment_count(msg)
+    if seg_idx < 0 || seg_idx >= seg_count { deliver "" }
+
+    flex header_bytes = 4 + (seg_count * 4)
+    if (seg_count % 2) == 0 {
+        header_bytes = header_bytes + 4
+    }
+
+    flex byte_offset = header_bytes
+    flex i = 0
+    while i < seg_idx {
+        flex w = capnp_get_segment_words(msg, i)
+        byte_offset = byte_offset + (w * 8)
+        i = i + 1
+    }
+
+    flex seg_words = capnp_get_segment_words(msg, seg_idx)
+    flex seg_bytes = seg_words * 8
+
+    flex start_char = byte_offset * 2
+    flex char_len = seg_bytes * 2
+    deliver str_slice(frame_hex, start_char, char_len)
+}
+
+open flow capnp_extract_segment_hex(frame_hex: Text, seg_idx: Int) -> Text {
+    flex msg = capnp_decode_frame(frame_hex)
+    if msg == 0 { deliver "" }
+    deliver capnp_extract_segment_from_msg(frame_hex, msg, seg_idx)
+}

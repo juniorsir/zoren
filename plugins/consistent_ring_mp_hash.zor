@@ -1,0 +1,199 @@
+// Zoren Multi-Probe Consistent Hash Ring Suite (plugins/consistent_ring_mp_hash.zor)
+// Production Multi-Probe Consistent Hashing (MP-Hash) engine.
+// Balances cluster load variance without virtual node memory overhead by evaluating M deterministic key probes.
+
+bring sys
+
+// ============================================================================
+// MULTI-PROBE CONSISTENT HASH MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   node_count
+// [8..16]:  m_probes (number of probes, default 11)
+// [16..24]: nodes_buf (64 slots * 48 bytes = 3072 bytes)
+// [24..32]: ring_size (2147483647)
+// [32..40]: total_lookups
+// [40..48]: reserved
+//
+// Each Node Slot (48 bytes):
+// [0..8]:   active (1 or 0)
+// [8..16]:  position (0 .. ring_size - 1)
+// [16..24]: node_id_hash (sys_fast_hash of node_id)
+// [24..32]: lookup_hits
+// [32..40]: node_idx (0..63)
+// [40..48]: reserved
+// ============================================================================
+
+open flow mp_ring_new(m_probes: Int) -> Int {
+    flex probes = m_probes
+    if probes <= 0 { probes = 11 }
+    flex max_nodes = 64
+    flex slot_size = 48
+    flex nodes_buf = alloc_buffer(max_nodes * slot_size)
+    mem_fill(nodes_buf, 0, max_nodes * slot_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0)          // node_count = 0
+    mem_write_i64(header, 8, probes)
+    mem_write_i64(header, 16, nodes_buf)
+    mem_write_i64(header, 24, 2147483647) // ring_size
+    mem_write_i64(header, 32, 0)         // total_lookups = 0
+    mem_write_i64(header, 40, 0)
+
+    deliver header
+}
+
+open flow mp_ring_node_count(ring: Int) -> Int {
+    deliver mem_read_i64(ring, 0)
+}
+
+open flow mp_ring_get_probes(ring: Int) -> Int {
+    deliver mem_read_i64(ring, 8)
+}
+
+open flow mp_ring_total_lookups(ring: Int) -> Int {
+    deliver mem_read_i64(ring, 32)
+}
+
+flow mp_ring_find_node_slot(ring: Int, node_id: Text) -> Int {
+    flex h = sys_fast_hash(node_id)
+    flex nodes_buf = mem_read_i64(ring, 16)
+    flex i = 0
+    while i < 64 {
+        flex base = i * 48
+        if mem_read_i64(nodes_buf, base + 0) == 1 {
+            if mem_read_i64(nodes_buf, base + 16) == h {
+                deliver i
+            }
+        }
+        i = i + 1
+    }
+    deliver 0 - 1
+}
+
+open flow mp_ring_add_node(ring: Int, node_id: Text, pos: Int) -> Bool {
+    flex existing = mp_ring_find_node_slot(ring, node_id)
+    flex ring_size = mem_read_i64(ring, 24)
+    flex norm_pos = pos % ring_size
+    if norm_pos < 0 { norm_pos = norm_pos + ring_size }
+
+    flex nodes_buf = mem_read_i64(ring, 16)
+
+    if existing >= 0 {
+        // Update position
+        mem_write_i64(nodes_buf, existing * 48 + 8, norm_pos)
+        deliver true
+    }
+
+    // Find free slot
+    flex slot = 0 - 1
+    flex i = 0
+    while i < 64 && slot < 0 {
+        if mem_read_i64(nodes_buf, i * 48 + 0) == 0 {
+            slot = i
+        }
+        i = i + 1
+    }
+
+    if slot < 0 { deliver false } // ring full
+
+    flex base = slot * 48
+    flex h = sys_fast_hash(node_id)
+
+    mem_write_i64(nodes_buf, base + 0, 1)        // active
+    mem_write_i64(nodes_buf, base + 8, norm_pos) // position
+    mem_write_i64(nodes_buf, base + 16, h)       // node_id_hash
+    mem_write_i64(nodes_buf, base + 24, 0)       // lookup_hits
+    mem_write_i64(nodes_buf, base + 32, slot)    // node_idx
+
+    flex count = mem_read_i64(ring, 0)
+    mem_write_i64(ring, 0, count + 1)
+    deliver true
+}
+
+open flow mp_ring_remove_node(ring: Int, node_id: Text) -> Bool {
+    flex slot = mp_ring_find_node_slot(ring, node_id)
+    if slot < 0 { deliver false }
+
+    flex nodes_buf = mem_read_i64(ring, 16)
+    mem_write_i64(nodes_buf, slot * 48 + 0, 0) // mark inactive
+
+    flex count = mem_read_i64(ring, 0)
+    mem_write_i64(ring, 0, count - 1)
+    deliver true
+}
+
+open flow mp_ring_has_node(ring: Int, node_id: Text) -> Bool {
+    deliver mp_ring_find_node_slot(ring, node_id) >= 0
+}
+
+flow mp_ring_clockwise_dist(probe: Int, node_pos: Int, ring_size: Int) -> Int {
+    flex d = node_pos - probe
+    if d < 0 { d = d + ring_size }
+    deliver d
+}
+
+open flow mp_ring_lookup_idx(ring: Int, key: Text) -> Int {
+    flex count = mem_read_i64(ring, 0)
+    if count == 0 { deliver 0 - 1 }
+
+    flex nodes_buf = mem_read_i64(ring, 16)
+    flex m_probes = mem_read_i64(ring, 8)
+    flex ring_size = mem_read_i64(ring, 24)
+
+    flex key_hash = sys_fast_hash(key)
+    if key_hash < 0 { key_hash = 0 - key_hash }
+
+    flex best_node_slot = 0 - 1
+    flex min_distance = ring_size + 100
+
+    flex j = 0
+    while j < m_probes {
+        // Multi-probe pseudo-random generator: P_j = (key_hash + j * 2654435761 + j * j * 101) % ring_size
+        flex step = (j * 26544357) + (j * j * 1013)
+        flex probe_pt = (key_hash + step) % ring_size
+        if probe_pt < 0 { probe_pt = probe_pt + ring_size }
+
+        // Find nearest active clockwise node for probe_pt
+        flex closest_slot = 0 - 1
+        flex closest_dist = ring_size + 100
+
+        flex i = 0
+        while i < 64 {
+            flex base = i * 48
+            if mem_read_i64(nodes_buf, base + 0) == 1 {
+                flex node_pos = mem_read_i64(nodes_buf, base + 8)
+                flex d = mp_ring_clockwise_dist(probe_pt, node_pos, ring_size)
+                if d < closest_dist {
+                    closest_dist = d
+                    closest_slot = i
+                }
+            }
+            i = i + 1
+        }
+
+        // Among all probes, pick the node that achieves the minimum probe distance
+        if closest_dist < min_distance {
+            min_distance = closest_dist
+            best_node_slot = closest_slot
+        }
+
+        j = j + 1
+    }
+
+    if best_node_slot >= 0 {
+        flex hits = mem_read_i64(nodes_buf, best_node_slot * 48 + 24)
+        mem_write_i64(nodes_buf, best_node_slot * 48 + 24, hits + 1)
+
+        flex lookups = mem_read_i64(ring, 32)
+        mem_write_i64(ring, 32, lookups + 1)
+    }
+
+    deliver best_node_slot
+}
+
+open flow mp_ring_get_hits(ring: Int, node_idx: Int) -> Int {
+    if node_idx < 0 || node_idx >= 64 { deliver 0 }
+    flex nodes_buf = mem_read_i64(ring, 16)
+    if mem_read_i64(nodes_buf, node_idx * 48 + 0) == 0 { deliver 0 }
+    deliver mem_read_i64(nodes_buf, node_idx * 48 + 24)
+}

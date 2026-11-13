@@ -1,0 +1,299 @@
+// Zoren Aho-Corasick Multi-Pattern Search Automaton Suite (plugins/aho_corasick.zor)
+// Production linear-time multi-pattern keyword matching finite-state automaton.
+// Matches K patterns simultaneously in O(N + M) time with BFS failure and output suffix links.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// AHO-CORASICK MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   node_count (starts at 1, node 0 is root)
+// [8..16]:  max_nodes
+// [16..24]: nodes_buf
+// [24..32]: pattern_count
+// [32..40]: built_flag (1 if BFS links built, 0 otherwise)
+// [40..48]: reserved
+//
+// Each Node (56 bytes):
+// [0..8]:   char_byte (0..255)
+// [8..16]:  pattern_id (-1 if not terminal)
+// [16..24]: pattern_len (0 if not terminal)
+// [24..32]: fail (failure transition node index, root = 0)
+// [32..40]: output_link (suffix link to previous terminal match, or -1)
+// [40..48]: first_child (node index of first child, or -1)
+// [48..56]: next_sibling (node index of sibling, or -1)
+// ============================================================================
+
+flow ac_char_to_byte(ch: Text) -> Int {
+    flex ascii_str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    flex pos = str_find(ascii_str, ch)
+    if pos >= 0 {
+        deliver pos + 32
+    }
+    if constant_time_compare(ch, "\n") { deliver 10 }
+    if constant_time_compare(ch, "\t") { deliver 9 }
+    if constant_time_compare(ch, "\r") { deliver 13 }
+    if constant_time_compare(ch, "\0") { deliver 0 }
+
+    flex h = sys_hex_encode(ch)
+    if length(h) >= 2 {
+        flex hex_digits = "0123456789abcdef"
+        flex n0 = str_find(hex_digits, str_slice(h, 0, 1))
+        flex n1 = str_find(hex_digits, str_slice(h, 1, 1))
+        if n0 >= 0 && n1 >= 0 {
+            deliver n0 * 16 + n1
+        }
+    }
+    deliver 0
+}
+
+open flow ac_new(max_nodes: Int) -> Int {
+    flex cap = max_nodes
+    if cap <= 0 { cap = 512 }
+    flex node_size = 56
+    flex table_size = cap * node_size
+    flex nodes_buf = alloc_buffer(table_size)
+    mem_fill(nodes_buf, 0, table_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 1)          // node_count = 1 (root node at 0)
+    mem_write_i64(header, 8, cap)
+    mem_write_i64(header, 16, nodes_buf)
+    mem_write_i64(header, 24, 0)         // pattern_count = 0
+    mem_write_i64(header, 32, 0)         // built = 0
+    mem_write_i64(header, 40, 0)
+
+    // Initialize root node
+    mem_write_i64(nodes_buf, 0, 0)          // char = 0
+    mem_write_i64(nodes_buf, 8, 0 - 1)      // pattern_id = -1
+    mem_write_i64(nodes_buf, 16, 0)         // pattern_len = 0
+    mem_write_i64(nodes_buf, 24, 0)         // fail = 0
+    mem_write_i64(nodes_buf, 32, 0 - 1)     // output_link = -1
+    mem_write_i64(nodes_buf, 40, 0 - 1)     // first_child = -1
+    mem_write_i64(nodes_buf, 48, 0 - 1)     // next_sibling = -1
+
+    deliver header
+}
+
+open flow ac_node_count(ac: Int) -> Int {
+    deliver mem_read_i64(ac, 0)
+}
+
+open flow ac_pattern_count(ac: Int) -> Int {
+    deliver mem_read_i64(ac, 24)
+}
+
+flow ac_find_child(nodes_buf: Int, parent: Int, ch_byte: Int) -> Int {
+    flex curr = mem_read_i64(nodes_buf, parent * 56 + 40)
+    while curr >= 0 {
+        if mem_read_i64(nodes_buf, curr * 56 + 0) == ch_byte {
+            deliver curr
+        }
+        curr = mem_read_i64(nodes_buf, curr * 56 + 48)
+    }
+    deliver 0 - 1
+}
+
+open flow ac_add_pattern(ac: Int, pattern: Text, pattern_id: Int) -> Int {
+    flex p_len = length(pattern)
+    if p_len == 0 { deliver 0 - 1 }
+
+    flex nodes_buf = mem_read_i64(ac, 16)
+    flex max_n = mem_read_i64(ac, 8)
+    flex curr = 0
+
+    flex i = 0
+    while i < p_len {
+        flex ch = str_slice(pattern, i, 1)
+        flex b = ac_char_to_byte(ch)
+
+        flex child = ac_find_child(nodes_buf, curr, b)
+        if child < 0 {
+            flex next_idx = mem_read_i64(ac, 0)
+            if next_idx >= max_n { deliver 0 - 1 }
+            mem_write_i64(ac, 0, next_idx + 1)
+
+            flex base = next_idx * 56
+            mem_write_i64(nodes_buf, base + 0, b)
+            mem_write_i64(nodes_buf, base + 8, 0 - 1)
+            mem_write_i64(nodes_buf, base + 16, 0)
+            mem_write_i64(nodes_buf, base + 24, 0)
+            mem_write_i64(nodes_buf, base + 32, 0 - 1)
+            mem_write_i64(nodes_buf, base + 40, 0 - 1)
+
+            flex old_head = mem_read_i64(nodes_buf, curr * 56 + 40)
+            mem_write_i64(nodes_buf, base + 48, old_head)
+            mem_write_i64(nodes_buf, curr * 56 + 40, next_idx)
+
+            child = next_idx
+        }
+        curr = child
+        i = i + 1
+    }
+
+    mem_write_i64(nodes_buf, curr * 56 + 8, pattern_id)
+    mem_write_i64(nodes_buf, curr * 56 + 16, p_len)
+
+    flex p_count = mem_read_i64(ac, 24)
+    mem_write_i64(ac, 24, p_count + 1)
+    mem_write_i64(ac, 32, 0) // mark unbuilt
+    deliver curr
+}
+
+open flow ac_build(ac: Int) -> Int {
+    flex node_count = mem_read_i64(ac, 0)
+    flex nodes_buf = mem_read_i64(ac, 16)
+
+    flex queue = alloc_buffer(node_count * 8 + 64)
+    flex q_head = 0
+    flex q_tail = 0
+
+    mem_write_i64(nodes_buf, 0 * 56 + 24, 0)
+    mem_write_i64(nodes_buf, 0 * 56 + 32, 0 - 1)
+
+    // For all depth-1 direct children of root
+    flex child = mem_read_i64(nodes_buf, 0 * 56 + 40)
+    while child >= 0 {
+        mem_write_i64(nodes_buf, child * 56 + 24, 0)
+        mem_write_i64(nodes_buf, child * 56 + 32, 0 - 1)
+        mem_write_i64(queue, q_tail * 8, child)
+        q_tail = q_tail + 1
+        child = mem_read_i64(nodes_buf, child * 56 + 48)
+    }
+
+    // BFS
+    while q_head < q_tail {
+        flex u = mem_read_i64(queue, q_head * 8)
+        q_head = q_head + 1
+
+        flex v = mem_read_i64(nodes_buf, u * 56 + 40)
+        while v >= 0 {
+            flex v_byte = mem_read_i64(nodes_buf, v * 56 + 0)
+
+            flex fallback = mem_read_i64(nodes_buf, u * 56 + 24)
+            flex target = 0 - 1
+            while fallback > 0 && target < 0 {
+                target = ac_find_child(nodes_buf, fallback, v_byte)
+                if target < 0 {
+                    fallback = mem_read_i64(nodes_buf, fallback * 56 + 24)
+                }
+            }
+            if target < 0 {
+                target = ac_find_child(nodes_buf, fallback, v_byte)
+            }
+            if target < 0 {
+                target = 0
+            }
+
+            mem_write_i64(nodes_buf, v * 56 + 24, target)
+
+            flex f_pat = mem_read_i64(nodes_buf, target * 56 + 8)
+            if f_pat >= 0 {
+                mem_write_i64(nodes_buf, v * 56 + 32, target)
+            } else {
+                flex f_out = mem_read_i64(nodes_buf, target * 56 + 32)
+                mem_write_i64(nodes_buf, v * 56 + 32, f_out)
+            }
+
+            mem_write_i64(queue, q_tail * 8, v)
+            q_tail = q_tail + 1
+
+            v = mem_read_i64(nodes_buf, v * 56 + 48)
+        }
+    }
+
+    mem_write_i64(ac, 32, 1)
+    deliver 0
+}
+
+open flow ac_search(ac: Int, text: Text) -> Int {
+    if mem_read_i64(ac, 32) == 0 {
+        ac_build(ac)
+    }
+
+    flex t_len = length(text)
+    if t_len == 0 { deliver 0 }
+
+    flex nodes_buf = mem_read_i64(ac, 16)
+    flex curr = 0
+    flex total_matches = 0
+
+    flex i = 0
+    while i < t_len {
+        flex ch = str_slice(text, i, 1)
+        flex b = ac_char_to_byte(ch)
+
+        flex nxt = ac_find_child(nodes_buf, curr, b)
+        while curr > 0 && nxt < 0 {
+            curr = mem_read_i64(nodes_buf, curr * 56 + 24)
+            nxt = ac_find_child(nodes_buf, curr, b)
+        }
+
+        if nxt >= 0 {
+            curr = nxt
+        } else {
+            curr = 0
+        }
+
+        flex temp = curr
+        while temp > 0 {
+            flex pid = mem_read_i64(nodes_buf, temp * 56 + 8)
+            if pid >= 0 {
+                total_matches = total_matches + 1
+            }
+            temp = mem_read_i64(nodes_buf, temp * 56 + 32)
+        }
+
+        i = i + 1
+    }
+
+    deliver total_matches
+}
+
+open flow ac_contains_any(ac: Int, text: Text) -> Bool {
+    deliver ac_search(ac, text) > 0
+}
+
+open flow ac_find_first(ac: Int, text: Text) -> Int {
+    if mem_read_i64(ac, 32) == 0 {
+        ac_build(ac)
+    }
+
+    flex t_len = length(text)
+    if t_len == 0 { deliver 0 - 1 }
+
+    flex nodes_buf = mem_read_i64(ac, 16)
+    flex curr = 0
+
+    flex i = 0
+    while i < t_len {
+        flex ch = str_slice(text, i, 1)
+        flex b = ac_char_to_byte(ch)
+
+        flex nxt = ac_find_child(nodes_buf, curr, b)
+        while curr > 0 && nxt < 0 {
+            curr = mem_read_i64(nodes_buf, curr * 56 + 24)
+            nxt = ac_find_child(nodes_buf, curr, b)
+        }
+
+        if nxt >= 0 {
+            curr = nxt
+        } else {
+            curr = 0
+        }
+
+        if mem_read_i64(nodes_buf, curr * 56 + 8) >= 0 {
+            deliver mem_read_i64(nodes_buf, curr * 56 + 8)
+        }
+
+        flex out = mem_read_i64(nodes_buf, curr * 56 + 32)
+        if out > 0 {
+            deliver mem_read_i64(nodes_buf, out * 56 + 8)
+        }
+
+        i = i + 1
+    }
+
+    deliver 0 - 1
+}

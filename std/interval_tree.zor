@@ -1,0 +1,294 @@
+// Zoren Interval Tree Suite (std/interval_tree.zor)
+// Production 1D range search tree storing intervals [low, high] with augmented subtree maximums.
+// Enables O(log N) overlap detection, range intersection counting, and interval scheduling.
+
+bring sys
+
+// ============================================================================
+// INTERVAL TREE MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   count
+// [8..16]:  root_idx (-1 if empty)
+// [16..24]: nodes_buf
+// [24..32]: capacity
+// [32..40]: min_low
+// [40..48]: max_high
+//
+// Each Node (64 bytes):
+// [0..8]:   low
+// [8..16]:  high
+// [16..24]: max_high (maximum high endpoint in this subtree)
+// [24..32]: val
+// [32..40]: left (-1 if none)
+// [40..48]: right (-1 if none)
+// [48..56]: parent (-1 if none)
+// [56..64]: reserved
+// ============================================================================
+
+open flow itree_new(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 256 }
+    flex node_size = 64
+    flex table_size = cap * node_size
+    flex nodes_buf = alloc_buffer(table_size)
+    mem_fill(nodes_buf, 0, table_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0)          // count = 0
+    mem_write_i64(header, 8, 0 - 1)      // root_idx = -1
+    mem_write_i64(header, 16, nodes_buf)
+    mem_write_i64(header, 24, cap)
+    mem_write_i64(header, 32, 0)         // min_low
+    mem_write_i64(header, 40, 0)         // max_high
+
+    deliver header
+}
+
+open flow itree_size(tree: Int) -> Int {
+    deliver mem_read_i64(tree, 0)
+}
+
+open flow itree_is_empty(tree: Int) -> Bool {
+    deliver mem_read_i64(tree, 0) == 0
+}
+
+open flow itree_min_low(tree: Int) -> Int {
+    if mem_read_i64(tree, 0) == 0 { deliver 0 }
+    deliver mem_read_i64(tree, 32)
+}
+
+open flow itree_max_high(tree: Int) -> Int {
+    if mem_read_i64(tree, 0) == 0 { deliver 0 }
+    deliver mem_read_i64(tree, 40)
+}
+
+flow itree_update_max(tree: Int, node_idx: Int) -> Int {
+    if node_idx < 0 { deliver 0 }
+    flex nodes_buf = mem_read_i64(tree, 16)
+    flex base = node_idx * 64
+    flex h = mem_read_i64(nodes_buf, base + 8)
+    flex l_child = mem_read_i64(nodes_buf, base + 32)
+    flex r_child = mem_read_i64(nodes_buf, base + 40)
+
+    flex m = h
+    if l_child >= 0 {
+        flex l_max = mem_read_i64(nodes_buf, l_child * 64 + 16)
+        if l_max > m { m = l_max }
+    }
+    if r_child >= 0 {
+        flex r_max = mem_read_i64(nodes_buf, r_child * 64 + 16)
+        if r_max > m { m = r_max }
+    }
+    mem_write_i64(nodes_buf, base + 16, m)
+    deliver 0
+}
+
+open flow itree_insert(tree: Int, low: Int, high: Int, val: Int) -> Int {
+    flex count = mem_read_i64(tree, 0)
+    flex cap = mem_read_i64(tree, 24)
+    if count >= cap { deliver 0 - 1 }
+
+    flex new_idx = count
+    flex nodes_buf = mem_read_i64(tree, 16)
+    flex base = new_idx * 64
+
+    mem_write_i64(nodes_buf, base + 0, low)
+    mem_write_i64(nodes_buf, base + 8, high)
+    mem_write_i64(nodes_buf, base + 16, high) // initial max_high is high
+    mem_write_i64(nodes_buf, base + 24, val)
+    mem_write_i64(nodes_buf, base + 32, 0 - 1) // left = -1
+    mem_write_i64(nodes_buf, base + 40, 0 - 1) // right = -1
+    mem_write_i64(nodes_buf, base + 48, 0 - 1) // parent = -1
+
+    if count == 0 {
+        mem_write_i64(tree, 8, new_idx)
+        mem_write_i64(tree, 32, low)
+        mem_write_i64(tree, 40, high)
+        mem_write_i64(tree, 0, count + 1)
+        deliver new_idx
+    }
+
+    // Update global bounds
+    flex cur_min = mem_read_i64(tree, 32)
+    if low < cur_min { mem_write_i64(tree, 32, low) }
+    flex cur_max = mem_read_i64(tree, 40)
+    if high > cur_max { mem_write_i64(tree, 40, high) }
+
+    // BST insertion by low endpoint
+    flex root = mem_read_i64(tree, 8)
+    flex curr = root
+    flex parent = 0 - 1
+    flex is_left = true
+
+    while curr >= 0 {
+        parent = curr
+        flex c_base = curr * 64
+        flex c_low = mem_read_i64(nodes_buf, c_base + 0)
+
+        // update subtree max along the path
+        flex c_max = mem_read_i64(nodes_buf, c_base + 16)
+        if high > c_max {
+            mem_write_i64(nodes_buf, c_base + 16, high)
+        }
+
+        if low < c_low {
+            curr = mem_read_i64(nodes_buf, c_base + 32)
+            is_left = true
+        } else {
+            curr = mem_read_i64(nodes_buf, c_base + 40)
+            is_left = false
+        }
+    }
+
+    mem_write_i64(nodes_buf, base + 48, parent)
+    flex p_base = parent * 64
+    if is_left {
+        mem_write_i64(nodes_buf, p_base + 32, new_idx)
+    } else {
+        mem_write_i64(nodes_buf, p_base + 40, new_idx)
+    }
+
+    mem_write_i64(tree, 0, count + 1)
+    deliver new_idx
+}
+
+flow itree_check_overlap(l1: Int, h1: Int, l2: Int, h2: Int) -> Bool {
+    // Two intervals [l1, h1] and [l2, h2] overlap if l1 <= h2 and l2 <= h1
+    deliver (l1 <= h2) && (l2 <= h1)
+}
+
+open flow itree_overlaps(tree: Int, q_low: Int, q_high: Int) -> Bool {
+    if mem_read_i64(tree, 0) == 0 { deliver false }
+    flex root = mem_read_i64(tree, 8)
+    flex nodes_buf = mem_read_i64(tree, 16)
+
+    // Stack-based search using fixed array
+    flex stack = alloc_buffer(256 * 8)
+    flex sp = 0
+    mem_write_i64(stack, sp * 8, root)
+    sp = sp + 1
+
+    flex found = false
+    while sp > 0 && !found {
+        sp = sp - 1
+        flex curr = mem_read_i64(stack, sp * 8)
+        if curr >= 0 {
+            flex c_base = curr * 64
+            flex c_low = mem_read_i64(nodes_buf, c_base + 0)
+            flex c_high = mem_read_i64(nodes_buf, c_base + 8)
+            flex c_max = mem_read_i64(nodes_buf, c_base + 16)
+
+            if itree_check_overlap(c_low, c_high, q_low, q_high) {
+                found = true
+            } else {
+                // If left child has max_high >= q_low, search left
+                flex left_child = mem_read_i64(nodes_buf, c_base + 32)
+                flex right_child = mem_read_i64(nodes_buf, c_base + 40)
+
+                // Push right child if q_high >= c_low
+                if right_child >= 0 && q_high >= c_low {
+                    mem_write_i64(stack, sp * 8, right_child)
+                    sp = sp + 1
+                }
+
+                // Push left child if left_child exists and its max_high >= q_low
+                if left_child >= 0 {
+                    flex left_max = mem_read_i64(nodes_buf, left_child * 64 + 16)
+                    if left_max >= q_low {
+                        mem_write_i64(stack, sp * 8, left_child)
+                        sp = sp + 1
+                    }
+                }
+            }
+        }
+    }
+
+    deliver found
+}
+
+open flow itree_find_first(tree: Int, q_low: Int, q_high: Int) -> Int {
+    if mem_read_i64(tree, 0) == 0 { deliver 0 - 1 }
+    flex root = mem_read_i64(tree, 8)
+    flex nodes_buf = mem_read_i64(tree, 16)
+
+    flex stack = alloc_buffer(256 * 8)
+    flex sp = 0
+    mem_write_i64(stack, sp * 8, root)
+    sp = sp + 1
+
+    while sp > 0 {
+        sp = sp - 1
+        flex curr = mem_read_i64(stack, sp * 8)
+        if curr >= 0 {
+            flex c_base = curr * 64
+            flex c_low = mem_read_i64(nodes_buf, c_base + 0)
+            flex c_high = mem_read_i64(nodes_buf, c_base + 8)
+
+            if itree_check_overlap(c_low, c_high, q_low, q_high) {
+                deliver mem_read_i64(nodes_buf, c_base + 24)
+            }
+
+            flex left_child = mem_read_i64(nodes_buf, c_base + 32)
+            flex right_child = mem_read_i64(nodes_buf, c_base + 40)
+
+            if right_child >= 0 && q_high >= c_low {
+                mem_write_i64(stack, sp * 8, right_child)
+                sp = sp + 1
+            }
+
+            if left_child >= 0 {
+                flex left_max = mem_read_i64(nodes_buf, left_child * 64 + 16)
+                if left_max >= q_low {
+                    mem_write_i64(stack, sp * 8, left_child)
+                    sp = sp + 1
+                }
+            }
+        }
+    }
+
+    deliver 0 - 1
+}
+
+open flow itree_count_overlaps(tree: Int, q_low: Int, q_high: Int) -> Int {
+    if mem_read_i64(tree, 0) == 0 { deliver 0 }
+    flex root = mem_read_i64(tree, 8)
+    flex nodes_buf = mem_read_i64(tree, 16)
+
+    flex stack = alloc_buffer(256 * 8)
+    flex sp = 0
+    mem_write_i64(stack, sp * 8, root)
+    sp = sp + 1
+
+    flex count = 0
+    while sp > 0 {
+        sp = sp - 1
+        flex curr = mem_read_i64(stack, sp * 8)
+        if curr >= 0 {
+            flex c_base = curr * 64
+            flex c_low = mem_read_i64(nodes_buf, c_base + 0)
+            flex c_high = mem_read_i64(nodes_buf, c_base + 8)
+
+            if itree_check_overlap(c_low, c_high, q_low, q_high) {
+                count = count + 1
+            }
+
+            flex left_child = mem_read_i64(nodes_buf, c_base + 32)
+            flex right_child = mem_read_i64(nodes_buf, c_base + 40)
+
+            if right_child >= 0 && q_high >= c_low {
+                mem_write_i64(stack, sp * 8, right_child)
+                sp = sp + 1
+            }
+
+            if left_child >= 0 {
+                flex left_max = mem_read_i64(nodes_buf, left_child * 64 + 16)
+                if left_max >= q_low {
+                    mem_write_i64(stack, sp * 8, left_child)
+                    sp = sp + 1
+                }
+            }
+        }
+    }
+
+    deliver count
+}

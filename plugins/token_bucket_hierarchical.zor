@@ -1,0 +1,225 @@
+// Zoren Hierarchical Token Bucket Rate Limiter Suite (plugins/token_bucket_hierarchical.zor)
+// Production multi-tenant rate limiter coordinating tenant burst quotas with global infrastructure caps.
+// Provides sub-millisecond fractional replenishment, dual-bucket token deduction, and rejection auditing.
+
+bring sys
+
+// ============================================================================
+// HIERARCHICAL RATE LIMITER MEMORY LAYOUT
+// Header (64 bytes):
+// [0..8]:   global_capacity
+// [8..16]:  global_tokens
+// [16..24]: global_refill_rate (tokens / second)
+// [24..32]: global_last_time (ms)
+// [32..40]: tenant_count
+// [40..48]: tenants_buf (64 slots * 64 bytes = 4096 bytes)
+// [48..56]: max_tenants (64)
+// [56..64]: total_global_rejections
+//
+// Tenant Slot (64 bytes):
+// [0..8]:   active flag (1 if active, 0 if unused)
+// [8..16]:  capacity
+// [16..24]: tokens
+// [24..32]: refill_rate (tokens / second)
+// [32..40]: last_refill_time (ms)
+// [40..48]: rejections
+// [48..56]: total_consumed
+// [56..64]: tenant_id_hash (sys_fast_hash for O(1) matching)
+// ============================================================================
+
+open flow htbl_new(global_cap: Int, global_refill_rate: Int, now_ms: Int) -> Int {
+    flex max_tenants = 64
+    flex slot_size = 64
+    flex tenants_buf = alloc_buffer(max_tenants * slot_size)
+    mem_fill(tenants_buf, 0, max_tenants * slot_size)
+
+    flex header = alloc_buffer(64)
+    mem_write_i64(header, 0, global_cap)
+    mem_write_i64(header, 8, global_cap) // starts full
+    mem_write_i64(header, 16, global_refill_rate)
+    mem_write_i64(header, 24, now_ms)
+    mem_write_i64(header, 32, 0)         // tenant_count = 0
+    mem_write_i64(header, 40, tenants_buf)
+    mem_write_i64(header, 48, max_tenants)
+    mem_write_i64(header, 56, 0)         // global rejections = 0
+
+    deliver header
+}
+
+flow htbl_find_slot(limiter: Int, tenant_id: Text) -> Int {
+    flex h = sys_fast_hash(tenant_id)
+    flex count = mem_read_i64(limiter, 32)
+    flex max_t = mem_read_i64(limiter, 48)
+    flex tenants_buf = mem_read_i64(limiter, 40)
+
+    flex i = 0
+    while i < max_t {
+        flex base = i * 64
+        flex active = mem_read_i64(tenants_buf, base + 0)
+        if active == 1 {
+            flex slot_h = mem_read_i64(tenants_buf, base + 56)
+            if slot_h == h {
+                deliver i
+            }
+        }
+        i = i + 1
+    }
+    deliver 0 - 1
+}
+
+open flow htbl_tenant_exists(limiter: Int, tenant_id: Text) -> Bool {
+    deliver htbl_find_slot(limiter, tenant_id) >= 0
+}
+
+open flow htbl_tenant_count(limiter: Int) -> Int {
+    deliver mem_read_i64(limiter, 32)
+}
+
+open flow htbl_add_tenant(limiter: Int, tenant_id: Text, capacity: Int, refill_rate: Int, now_ms: Int) -> Bool {
+    flex existing = htbl_find_slot(limiter, tenant_id)
+    if existing >= 0 {
+        // Update existing tenant config
+        flex tenants_buf = mem_read_i64(limiter, 40)
+        flex base = existing * 64
+        mem_write_i64(tenants_buf, base + 8, capacity)
+        mem_write_i64(tenants_buf, base + 24, refill_rate)
+        deliver true
+    }
+
+    flex max_t = mem_read_i64(limiter, 48)
+    flex tenants_buf = mem_read_i64(limiter, 40)
+
+    // Find free slot
+    flex slot = 0 - 1
+    flex i = 0
+    while i < max_t && slot < 0 {
+        flex base = i * 64
+        if mem_read_i64(tenants_buf, base + 0) == 0 {
+            slot = i
+        }
+        i = i + 1
+    }
+
+    if slot < 0 { deliver false } // table full
+
+    flex base = slot * 64
+    flex h = sys_fast_hash(tenant_id)
+
+    mem_write_i64(tenants_buf, base + 0, 1)          // active
+    mem_write_i64(tenants_buf, base + 8, capacity)   // capacity
+    mem_write_i64(tenants_buf, base + 16, capacity)  // tokens start full
+    mem_write_i64(tenants_buf, base + 24, refill_rate)
+    mem_write_i64(tenants_buf, base + 32, now_ms)
+    mem_write_i64(tenants_buf, base + 40, 0)         // rejections
+    mem_write_i64(tenants_buf, base + 48, 0)         // total_consumed
+    mem_write_i64(tenants_buf, base + 56, h)         // hash
+
+    flex count = mem_read_i64(limiter, 32)
+    mem_write_i64(limiter, 32, count + 1)
+    deliver true
+}
+
+flow htbl_refill_global(limiter: Int, now_ms: Int) -> Int {
+    flex cap = mem_read_i64(limiter, 0)
+    flex tokens = mem_read_i64(limiter, 8)
+    flex rate = mem_read_i64(limiter, 16)
+    flex last_time = mem_read_i64(limiter, 24)
+
+    if now_ms <= last_time { deliver 0 }
+    flex elapsed = now_ms - last_time
+    flex added = (elapsed * rate) / 1000
+
+    if added > 0 {
+        tokens = tokens + added
+        if tokens > cap { tokens = cap }
+        mem_write_i64(limiter, 8, tokens)
+        mem_write_i64(limiter, 24, now_ms)
+    }
+    deliver 0
+}
+
+flow htbl_refill_tenant(limiter: Int, slot: Int, now_ms: Int) -> Int {
+    flex tenants_buf = mem_read_i64(limiter, 40)
+    flex base = slot * 64
+
+    flex cap = mem_read_i64(tenants_buf, base + 8)
+    flex tokens = mem_read_i64(tenants_buf, base + 16)
+    flex rate = mem_read_i64(tenants_buf, base + 24)
+    flex last_time = mem_read_i64(tenants_buf, base + 32)
+
+    if now_ms <= last_time { deliver 0 }
+    flex elapsed = now_ms - last_time
+    flex added = (elapsed * rate) / 1000
+
+    if added > 0 {
+        tokens = tokens + added
+        if tokens > cap { tokens = cap }
+        mem_write_i64(tenants_buf, base + 16, tokens)
+        mem_write_i64(tenants_buf, base + 32, now_ms)
+    }
+    deliver 0
+}
+
+open flow htbl_get_global_tokens(limiter: Int, now_ms: Int) -> Int {
+    htbl_refill_global(limiter, now_ms)
+    deliver mem_read_i64(limiter, 8)
+}
+
+open flow htbl_get_tenant_tokens(limiter: Int, tenant_id: Text, now_ms: Int) -> Int {
+    flex slot = htbl_find_slot(limiter, tenant_id)
+    if slot < 0 { deliver 0 }
+    htbl_refill_tenant(limiter, slot, now_ms)
+    flex tenants_buf = mem_read_i64(limiter, 40)
+    deliver mem_read_i64(tenants_buf, slot * 64 + 16)
+}
+
+open flow htbl_try_consume(limiter: Int, tenant_id: Text, tokens: Int, now_ms: Int) -> Bool {
+    flex slot = htbl_find_slot(limiter, tenant_id)
+    if slot < 0 { deliver false } // unregistered tenant rejected
+
+    htbl_refill_global(limiter, now_ms)
+    htbl_refill_tenant(limiter, slot, now_ms)
+
+    flex g_tokens = mem_read_i64(limiter, 8)
+    flex tenants_buf = mem_read_i64(limiter, 40)
+    flex base = slot * 64
+    flex t_tokens = mem_read_i64(tenants_buf, base + 16)
+
+    // Check dual constraints: both tenant and global must have sufficient tokens
+    if t_tokens >= tokens && g_tokens >= tokens {
+        // Grant tokens
+        mem_write_i64(limiter, 8, g_tokens - tokens)
+        mem_write_i64(tenants_buf, base + 16, t_tokens - tokens)
+
+        flex consumed = mem_read_i64(tenants_buf, base + 48)
+        mem_write_i64(tenants_buf, base + 48, consumed + tokens)
+        deliver true
+    }
+
+    // Record rejection
+    flex rej = mem_read_i64(tenants_buf, base + 40)
+    mem_write_i64(tenants_buf, base + 40, rej + 1)
+
+    flex g_rej = mem_read_i64(limiter, 56)
+    mem_write_i64(limiter, 56, g_rej + 1)
+
+    deliver false
+}
+
+open flow htbl_get_rejections(limiter: Int, tenant_id: Text) -> Int {
+    flex slot = htbl_find_slot(limiter, tenant_id)
+    if slot < 0 { deliver 0 }
+    flex tenants_buf = mem_read_i64(limiter, 40)
+    deliver mem_read_i64(tenants_buf, slot * 64 + 40)
+}
+
+open flow htbl_get_global_rejections(limiter: Int) -> Int {
+    deliver mem_read_i64(limiter, 56)
+}
+
+open flow htbl_get_tenant_consumed(limiter: Int, tenant_id: Text) -> Int {
+    flex slot = htbl_find_slot(limiter, tenant_id)
+    if slot < 0 { deliver 0 }
+    flex tenants_buf = mem_read_i64(limiter, 40)
+    deliver mem_read_i64(tenants_buf, slot * 64 + 48)
+}
