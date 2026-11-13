@@ -1,0 +1,92 @@
+// Enterprise OAuth2 & OpenID Connect Client Protocol Engine
+// Supports Authorization Flow, PKCE S256 Challenge Verification, Bearer Auth, and Token Lease Tracking
+bring crypto
+
+open flow oauth2_build_auth_url(endpoint: Text, client_id: Text, redirect_uri: Text, scope: Text, state: Text, code_challenge: Text) -> Text {
+    flex url = str_concat(endpoint, "?response_type=code")
+    url = str_concat(url, str_concat("&client_id=", client_id))
+    url = str_concat(url, str_concat("&redirect_uri=", redirect_uri))
+    if length(scope) > 0 {
+        url = str_concat(url, str_concat("&scope=", scope))
+    }
+    if length(state) > 0 {
+        url = str_concat(url, str_concat("&state=", state))
+    }
+    if length(code_challenge) > 0 {
+        url = str_concat(url, str_concat("&code_challenge=", code_challenge))
+        url = str_concat(url, "&code_challenge_method=S256")
+    }
+    deliver url
+}
+
+open flow oauth2_generate_pkce_challenge(verifier: Text) -> Text {
+    // S256 PKCE challenge uses SHA-256 hash of the code verifier
+    deliver sys_sha256_hex(verifier)
+}
+
+open flow oauth2_build_token_request_body(grant_type: Text, code: Text, redirect_uri: Text, client_id: Text, client_secret: Text, code_verifier: Text) -> Text {
+    flex body = str_concat("grant_type=", grant_type)
+    if length(code) > 0 {
+        body = str_concat(body, str_concat("&code=", code))
+    }
+    if length(redirect_uri) > 0 {
+        body = str_concat(body, str_concat("&redirect_uri=", redirect_uri))
+    }
+    if length(client_id) > 0 {
+        body = str_concat(body, str_concat("&client_id=", client_id))
+    }
+    if length(client_secret) > 0 {
+        body = str_concat(body, str_concat("&client_secret=", client_secret))
+    }
+    if length(code_verifier) > 0 {
+        body = str_concat(body, str_concat("&code_verifier=", code_verifier))
+    }
+    deliver body
+}
+
+open flow oauth2_build_refresh_request_body(refresh_token: Text, client_id: Text, client_secret: Text) -> Text {
+    flex body = str_concat("grant_type=refresh_token&refresh_token=", refresh_token)
+    if length(client_id) > 0 {
+        body = str_concat(body, str_concat("&client_id=", client_id))
+    }
+    if length(client_secret) > 0 {
+        body = str_concat(body, str_concat("&client_secret=", client_secret))
+    }
+    deliver body
+}
+
+// Token session struct:
+// [0..8]:   expires_at (Int, epoch sec)
+// [8..16]:  issued_at (Int, epoch sec)
+// [16..24]: access_token pointer
+// [24..32]: refresh_token pointer
+open flow oauth2_token_create(access_token: Text, refresh_token: Text, expires_in_sec: Int, now_sec: Int) -> Int {
+    flex header = alloc_buffer(32)
+    flex exp = now_sec + expires_in_sec
+
+    mem_write_i64(header, 0, exp)
+    mem_write_i64(header, 8, now_sec)
+    deliver header
+}
+
+open flow oauth2_token_is_expired(token_ptr: Int, now_sec: Int) -> Bool {
+    flex exp = mem_read_i64(token_ptr, 0)
+    deliver now_sec >= exp
+}
+
+open flow oauth2_token_get_expires_in(token_ptr: Int, now_sec: Int) -> Int {
+    flex exp = mem_read_i64(token_ptr, 0)
+    if now_sec >= exp {
+        deliver 0
+    }
+    deliver exp - now_sec
+}
+
+open flow oauth2_build_bearer_header(access_token: Text) -> Text {
+    deliver str_concat("Bearer ", access_token)
+}
+
+open flow oauth2_token_free(token_ptr: Int) -> Int {
+    free_buffer(token_ptr)
+    deliver 0
+}

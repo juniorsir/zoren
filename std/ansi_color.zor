@@ -1,0 +1,132 @@
+// Standard ANSI Terminal Styling and 256-Color Engine for Zoren CLI & TUI
+// High-performance escape sequences with styling, background, 256-color palette, and code stripping
+
+open flow ansi_reset() -> Text {
+    deliver "\e[0m"
+}
+
+open flow ansi_wrap(code: Text, s: Text) -> Text {
+    flex p = str_concat(code, s)
+    deliver str_concat(p, "\e[0m")
+}
+
+open flow ansi_bold(s: Text) -> Text {
+    deliver ansi_wrap("\e[1m", s)
+}
+
+open flow ansi_dim(s: Text) -> Text {
+    deliver ansi_wrap("\e[2m", s)
+}
+
+open flow ansi_italic(s: Text) -> Text {
+    deliver ansi_wrap("\e[3m", s)
+}
+
+open flow ansi_underline(s: Text) -> Text {
+    deliver ansi_wrap("\e[4m", s)
+}
+
+open flow ansi_black(s: Text) -> Text {
+    deliver ansi_wrap("\e[30m", s)
+}
+
+open flow ansi_red(s: Text) -> Text {
+    deliver ansi_wrap("\e[31m", s)
+}
+
+open flow ansi_green(s: Text) -> Text {
+    deliver ansi_wrap("\e[32m", s)
+}
+
+open flow ansi_yellow(s: Text) -> Text {
+    deliver ansi_wrap("\e[33m", s)
+}
+
+open flow ansi_blue(s: Text) -> Text {
+    deliver ansi_wrap("\e[34m", s)
+}
+
+open flow ansi_magenta(s: Text) -> Text {
+    deliver ansi_wrap("\e[35m", s)
+}
+
+open flow ansi_cyan(s: Text) -> Text {
+    deliver ansi_wrap("\e[36m", s)
+}
+
+open flow ansi_white(s: Text) -> Text {
+    deliver ansi_wrap("\e[37m", s)
+}
+
+open flow ansi_gray(s: Text) -> Text {
+    deliver ansi_wrap("\e[90m", s)
+}
+
+open flow ansi_bg_black(s: Text) -> Text {
+    deliver ansi_wrap("\e[40m", s)
+}
+
+open flow ansi_bg_red(s: Text) -> Text {
+    deliver ansi_wrap("\e[41m", s)
+}
+
+open flow ansi_bg_green(s: Text) -> Text {
+    deliver ansi_wrap("\e[42m", s)
+}
+
+open flow ansi_bg_yellow(s: Text) -> Text {
+    deliver ansi_wrap("\e[43m", s)
+}
+
+open flow ansi_bg_blue(s: Text) -> Text {
+    deliver ansi_wrap("\e[44m", s)
+}
+
+open flow ansi_bg_magenta(s: Text) -> Text {
+    deliver ansi_wrap("\e[45m", s)
+}
+
+open flow ansi_bg_cyan(s: Text) -> Text {
+    deliver ansi_wrap("\e[46m", s)
+}
+
+open flow ansi_bg_white(s: Text) -> Text {
+    deliver ansi_wrap("\e[47m", s)
+}
+
+open flow ansi_color_256(s: Text, code: Int) -> Text {
+    flex p1 = str_concat("\e[38;5;", int_to_str(code))
+    flex p2 = str_concat(p1, "m")
+    deliver ansi_wrap(p2, s)
+}
+
+open flow ansi_bg_256(s: Text, code: Int) -> Text {
+    flex p1 = str_concat("\e[48;5;", int_to_str(code))
+    flex p2 = str_concat(p1, "m")
+    deliver ansi_wrap(p2, s)
+}
+
+// Strips ANSI escape sequences from text to calculate true visual length and clean plain text
+open flow ansi_strip(s: Text) -> Text {
+    flex esc_pos = str_find(s, "\e")
+    if esc_pos < 0 {
+        deliver s
+    }
+    flex len = length(s)
+    flex prefix = str_slice(s, 0, esc_pos)
+    flex rest = str_slice(s, esc_pos, len - esc_pos)
+    flex m_pos = str_find(rest, "m")
+    if m_pos < 0 {
+        deliver prefix
+    }
+    flex after_start = esc_pos + m_pos + 1
+    flex after = str_slice(s, after_start, len - after_start)
+    flex cleaned_after = ansi_strip(after)
+    deliver str_concat(prefix, cleaned_after)
+}
+
+// True visible column width of terminal text ignoring escape sequences
+open flow ansi_visible_len(s: Text) -> Int {
+    flex clean = ansi_strip(s)
+    deliver length(clean)
+}

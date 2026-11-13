@@ -1,0 +1,192 @@
+// High-Performance Generic Connection Pool for Database & Network Sockets
+// Manages Idle vs In-Use Connection Leases, Lifecycles, and Idle Timeout Eviction
+
+// Slot layout (32 bytes):
+// [0..8]:   conn_id (Int)
+// [8..16]:  status (0 = FREE, 1 = IDLE, 2 = IN_USE)
+// [16..24]: last_activity_sec (Int timestamp)
+// [24..32]: lease_start_sec (Int timestamp)
+
+// Header layout (48 bytes):
+// [0..8]:   max_conns (Int)
+// [8..16]:  active_count (Int)
+// [16..24]: idle_count (Int)
+// [24..32]: idle_timeout_sec (Int)
+// [32..40]: slots_buf (Int pointer)
+// [40..48]: total_evicted (Int)
+
+open flow cpool_create(max_conns: Int, idle_timeout_sec: Int) -> Int {
+    flex cap = max_conns
+    if cap < 2 {
+        cap = 2
+    }
+    flex slots_buf = alloc_buffer(cap * 32)
+    flex header = alloc_buffer(48)
+
+    // Zero-initialize slots
+    flex i = 0
+    while i < cap {
+        mem_write_i64(slots_buf, i * 32 + 0, -1) // conn_id
+        mem_write_i64(slots_buf, i * 32 + 8, 0)  // FREE
+        mem_write_i64(slots_buf, i * 32 + 16, 0)
+        mem_write_i64(slots_buf, i * 32 + 24, 0)
+        i = i + 1
+    }
+
+    mem_write_i64(header, 0, cap)
+    mem_write_i64(header, 8, 0)  // active_count
+    mem_write_i64(header, 16, 0) // idle_count
+    mem_write_i64(header, 24, idle_timeout_sec)
+    mem_write_i64(header, 32, slots_buf)
+    mem_write_i64(header, 40, 0) // total_evicted
+
+    deliver header
+}
+
+open flow cpool_add_conn(pool: Int, conn_id: Int, now_sec: Int) -> Bool {
+    flex cap = mem_read_i64(pool, 0)
+    flex slots = mem_read_i64(pool, 32)
+
+    flex i = 0
+    flex found_slot = -1
+    while i < cap {
+        if found_slot == -1 {
+            flex st = mem_read_i64(slots, i * 32 + 8)
+            if st == 0 {
+                found_slot = i
+            }
+        }
+        i = i + 1
+    }
+
+    if found_slot == -1 {
+        deliver false
+    }
+
+    mem_write_i64(slots, found_slot * 32 + 0, conn_id)
+    mem_write_i64(slots, found_slot * 32 + 8, 1) // IDLE
+    mem_write_i64(slots, found_slot * 32 + 16, now_sec)
+    mem_write_i64(slots, found_slot * 32 + 24, 0)
+
+    flex idle_count = mem_read_i64(pool, 16)
+    mem_write_i64(pool, 16, idle_count + 1)
+    deliver true
+}
+
+open flow cpool_acquire(pool: Int, now_sec: Int) -> Int {
+    flex cap = mem_read_i64(pool, 0)
+    flex slots = mem_read_i64(pool, 32)
+
+    flex i = 0
+    flex chosen_idx = -1
+    while i < cap {
+        if chosen_idx == -1 {
+            flex st = mem_read_i64(slots, i * 32 + 8)
+            if st == 1 { // IDLE
+                chosen_idx = i
+            }
+        }
+        i = i + 1
+    }
+
+    if chosen_idx == -1 {
+        deliver -1 // Pool exhausted
+    }
+
+    flex conn_id = mem_read_i64(slots, chosen_idx * 32 + 0)
+    mem_write_i64(slots, chosen_idx * 32 + 8, 2) // IN_USE
+    mem_write_i64(slots, chosen_idx * 32 + 16, now_sec)
+    mem_write_i64(slots, chosen_idx * 32 + 24, now_sec)
+
+    flex active = mem_read_i64(pool, 8)
+    flex idle = mem_read_i64(pool, 16)
+    mem_write_i64(pool, 8, active + 1)
+    mem_write_i64(pool, 16, idle - 1)
+
+    deliver conn_id
+}
+
+open flow cpool_release(pool: Int, conn_id: Int, now_sec: Int) -> Bool {
+    flex cap = mem_read_i64(pool, 0)
+    flex slots = mem_read_i64(pool, 32)
+
+    flex i = 0
+    flex found_idx = -1
+    while i < cap {
+        if found_idx == -1 {
+            flex cid = mem_read_i64(slots, i * 32 + 0)
+            flex st = mem_read_i64(slots, i * 32 + 8)
+            if cid == conn_id {
+                if st == 2 { // IN_USE
+                    found_idx = i
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    if found_idx == -1 {
+        deliver false
+    }
+
+    mem_write_i64(slots, found_idx * 32 + 8, 1) // Back to IDLE
+    mem_write_i64(slots, found_idx * 32 + 16, now_sec)
+    mem_write_i64(slots, found_idx * 32 + 24, 0)
+
+    flex active = mem_read_i64(pool, 8)
+    flex idle = mem_read_i64(pool, 16)
+    mem_write_i64(pool, 8, active - 1)
+    mem_write_i64(pool, 16, idle + 1)
+
+    deliver true
+}
+
+open flow cpool_evict_idle(pool: Int, now_sec: Int) -> Int {
+    flex cap = mem_read_i64(pool, 0)
+    flex timeout = mem_read_i64(pool, 24)
+    flex slots = mem_read_i64(pool, 32)
+
+    flex evicted = 0
+    flex i = 0
+    while i < cap {
+        flex st = mem_read_i64(slots, i * 32 + 8)
+        if st == 1 { // IDLE
+            flex last_act = mem_read_i64(slots, i * 32 + 16)
+            if now_sec - last_act >= timeout {
+                // Evict connection
+                mem_write_i64(slots, i * 32 + 0, -1)
+                mem_write_i64(slots, i * 32 + 8, 0) // FREE
+                evicted = evicted + 1
+            }
+        }
+        i = i + 1
+    }
+
+    if evicted > 0 {
+        flex idle = mem_read_i64(pool, 16)
+        flex total_ev = mem_read_i64(pool, 40)
+        mem_write_i64(pool, 16, idle - evicted)
+        mem_write_i64(pool, 40, total_ev + evicted)
+    }
+
+    deliver evicted
+}
+
+open flow cpool_get_active_count(pool: Int) -> Int {
+    deliver mem_read_i64(pool, 8)
+}
+
+open flow cpool_get_idle_count(pool: Int) -> Int {
+    deliver mem_read_i64(pool, 16)
+}
+
+open flow cpool_get_evicted_count(pool: Int) -> Int {
+    deliver mem_read_i64(pool, 40)
+}
+
+open flow cpool_free(pool: Int) -> Int {
+    flex slots = mem_read_i64(pool, 32)
+    free_buffer(slots)
+    free_buffer(pool)
+    deliver 0
+}

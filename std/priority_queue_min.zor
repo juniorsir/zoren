@@ -1,0 +1,174 @@
+// Binary Min-Heap Priority Queue for Dijkstra, A*, Huffman, and Event Scheduling
+// Elements are ordered by lowest priority value first (ascending min-heap)
+
+// Header layout:
+// [0..8]:   capacity (Int)
+// [8..16]:  size (Int)
+// [16..24]: priorities_buf pointer
+// [24..32]: items_buf pointer
+
+open flow min_pq_create(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap < 4 {
+        cap = 4
+    }
+    flex prio_buf = alloc_buffer(cap * 8)
+    flex item_buf = alloc_buffer(cap * 8)
+    flex header = alloc_buffer(32)
+
+    mem_write_i64(header, 0, cap)
+    mem_write_i64(header, 8, 0)
+    mem_write_i64(header, 16, prio_buf)
+    mem_write_i64(header, 24, item_buf)
+
+    deliver header
+}
+
+open flow min_pq_size(pq: Int) -> Int {
+    deliver mem_read_i64(pq, 8)
+}
+
+open flow min_pq_is_empty(pq: Int) -> Bool {
+    flex sz = mem_read_i64(pq, 8)
+    deliver sz == 0
+}
+
+open flow min_pq_peek_min_priority(pq: Int) -> Int {
+    flex sz = mem_read_i64(pq, 8)
+    if sz == 0 {
+        deliver -1
+    }
+    flex prio_buf = mem_read_i64(pq, 16)
+    deliver mem_read_i64(prio_buf, 0)
+}
+
+open flow min_pq_peek_min_item(pq: Int) -> Int {
+    flex sz = mem_read_i64(pq, 8)
+    if sz == 0 {
+        deliver -1
+    }
+    flex item_buf = mem_read_i64(pq, 24)
+    deliver mem_read_i64(item_buf, 0)
+}
+
+open flow min_pq_push(pq: Int, priority: Int, item_id: Int) -> Bool {
+    flex cap = mem_read_i64(pq, 0)
+    flex sz = mem_read_i64(pq, 8)
+    if sz >= cap {
+        deliver false
+    }
+
+    flex prio_buf = mem_read_i64(pq, 16)
+    flex item_buf = mem_read_i64(pq, 24)
+
+    // Insert at end
+    flex curr = sz
+    mem_write_i64(prio_buf, curr * 8, priority)
+    mem_write_i64(item_buf, curr * 8, item_id)
+    mem_write_i64(pq, 8, sz + 1)
+
+    // Bubble up
+    flex running = 1
+    while curr > 0 {
+        if running == 1 {
+            flex parent = (curr - 1) / 2
+            flex p_prio = mem_read_i64(prio_buf, parent * 8)
+            flex c_prio = mem_read_i64(prio_buf, curr * 8)
+
+            if c_prio < p_prio {
+                // Swap parent and curr
+                flex c_item = mem_read_i64(item_buf, curr * 8)
+                flex p_item = mem_read_i64(item_buf, parent * 8)
+
+                mem_write_i64(prio_buf, parent * 8, c_prio)
+                mem_write_i64(item_buf, parent * 8, c_item)
+                mem_write_i64(prio_buf, curr * 8, p_prio)
+                mem_write_i64(item_buf, curr * 8, p_item)
+
+                curr = parent
+            } else {
+                running = 0
+            }
+        } else {
+            escape
+        }
+    }
+
+    deliver true
+}
+
+open flow min_pq_pop_min(pq: Int) -> Int {
+    flex sz = mem_read_i64(pq, 8)
+    if sz == 0 {
+        deliver -1
+    }
+
+    flex prio_buf = mem_read_i64(pq, 16)
+    flex item_buf = mem_read_i64(pq, 24)
+
+    // Minimum item is at root
+    flex min_item = mem_read_i64(item_buf, 0)
+
+    // Move last element to root
+    flex last = sz - 1
+    flex last_prio = mem_read_i64(prio_buf, last * 8)
+    flex last_item = mem_read_i64(item_buf, last * 8)
+
+    mem_write_i64(prio_buf, 0, last_prio)
+    mem_write_i64(item_buf, 0, last_item)
+    mem_write_i64(pq, 8, last)
+
+    sz = last
+    if sz <= 1 {
+        deliver min_item
+    }
+
+    // Sift down
+    flex curr = 0
+    flex running = 1
+    while curr * 2 + 1 < sz {
+        if running == 1 {
+            flex left = curr * 2 + 1
+            flex right = left + 1
+            flex smallest = left
+            flex left_prio = mem_read_i64(prio_buf, left * 8)
+
+            if right < sz {
+                flex right_prio = mem_read_i64(prio_buf, right * 8)
+                if right_prio < left_prio {
+                    smallest = right
+                }
+            }
+
+            flex curr_prio = mem_read_i64(prio_buf, curr * 8)
+            flex sm_prio = mem_read_i64(prio_buf, smallest * 8)
+
+            if sm_prio < curr_prio {
+                flex curr_item = mem_read_i64(item_buf, curr * 8)
+                flex sm_item = mem_read_i64(item_buf, smallest * 8)
+
+                mem_write_i64(prio_buf, curr * 8, sm_prio)
+                mem_write_i64(item_buf, curr * 8, sm_item)
+                mem_write_i64(prio_buf, smallest * 8, curr_prio)
+                mem_write_i64(item_buf, smallest * 8, curr_item)
+
+                curr = smallest
+            } else {
+                running = 0
+            }
+        } else {
+            escape
+        }
+    }
+
+    deliver min_item
+}
+
+open flow min_pq_free(pq: Int) -> Int {
+    flex prio_buf = mem_read_i64(pq, 16)
+    flex item_buf = mem_read_i64(pq, 24)
+    free_buffer(prio_buf)
+    free_buffer(item_buf)
+    free_buffer(pq)
+    deliver 0
+}

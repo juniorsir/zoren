@@ -1,0 +1,129 @@
+// Event Sourcing & CQRS Aggregate Engine with Deterministic State Projections and Snapshots
+// Events: Append-only log with immutable sequence numbers and state replay
+
+// Event record (32 bytes):
+// [0..8]:   seq_num (Int)
+// [8..16]:  event_type (Int: 1=ADD/CREDIT, 2=SUB/DEBIT, 3=SET, 4=MULTIPLY)
+// [16..24]: payload_val (Int)
+// [24..32]: timestamp_sec (Int)
+
+// Stream Header (48 bytes):
+// [0..8]:   capacity (Int)
+// [8..16]:  event_count (Int)
+// [16..24]: events_buf (Int pointer)
+// [24..32]: snapshot_version (Int)
+// [32..40]: snapshot_state (Int)
+// [40..48]: current_state (Int)
+
+open flow es_create_stream(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap < 16 {
+        cap = 16
+    }
+    flex events_buf = alloc_buffer(cap * 32)
+    flex header = alloc_buffer(48)
+
+    mem_write_i64(header, 0, cap)
+    mem_write_i64(header, 8, 0)  // event_count
+    mem_write_i64(header, 16, events_buf)
+    mem_write_i64(header, 24, 0) // snapshot_version
+    mem_write_i64(header, 32, 0) // snapshot_state
+    mem_write_i64(header, 40, 0) // current_state
+
+    deliver header
+}
+
+open flow es_append_event(stream: Int, event_type: Int, payload: Int, now_sec: Int) -> Int {
+    flex cap = mem_read_i64(stream, 0)
+    flex count = mem_read_i64(stream, 8)
+    if count >= cap {
+        deliver -1 // Stream full
+    }
+
+    flex events = mem_read_i64(stream, 16)
+    flex seq = count + 1
+
+    mem_write_i64(events, count * 32 + 0, seq)
+    mem_write_i64(events, count * 32 + 8, event_type)
+    mem_write_i64(events, count * 32 + 16, payload)
+    mem_write_i64(events, count * 32 + 24, now_sec)
+
+    // Update current projected state
+    flex curr_state = mem_read_i64(stream, 40)
+    if event_type == 1 { // ADD/CREDIT
+        curr_state = curr_state + payload
+    }
+    if event_type == 2 { // SUB/DEBIT
+        curr_state = curr_state - payload
+    }
+    if event_type == 3 { // SET
+        curr_state = payload
+    }
+    if event_type == 4 { // MULTIPLY
+        curr_state = curr_state * payload
+    }
+
+    mem_write_i64(stream, 8, count + 1)
+    mem_write_i64(stream, 40, curr_state)
+
+    deliver seq
+}
+
+open flow es_create_snapshot(stream: Int) -> Int {
+    flex count = mem_read_i64(stream, 8)
+    flex state = mem_read_i64(stream, 40)
+
+    mem_write_i64(stream, 24, count) // snapshot_version
+    mem_write_i64(stream, 32, state) // snapshot_state
+    deliver count
+}
+
+open flow es_replay_from_snapshot(stream: Int) -> Int {
+    flex snap_ver = mem_read_i64(stream, 24)
+    flex snap_state = mem_read_i64(stream, 32)
+    flex count = mem_read_i64(stream, 8)
+    flex events = mem_read_i64(stream, 16)
+
+    flex state = snap_state
+    flex i = snap_ver
+    while i < count {
+        flex etype = mem_read_i64(events, i * 32 + 8)
+        flex payload = mem_read_i64(events, i * 32 + 16)
+
+        if etype == 1 {
+            state = state + payload
+        }
+        if etype == 2 {
+            state = state - payload
+        }
+        if etype == 3 {
+            state = payload
+        }
+        if etype == 4 {
+            state = state * payload
+        }
+
+        i = i + 1
+    }
+
+    deliver state
+}
+
+open flow es_get_event_count(stream: Int) -> Int {
+    deliver mem_read_i64(stream, 8)
+}
+
+open flow es_get_snapshot_version(stream: Int) -> Int {
+    deliver mem_read_i64(stream, 24)
+}
+
+open flow es_get_projected_state(stream: Int) -> Int {
+    deliver mem_read_i64(stream, 40)
+}
+
+open flow es_free(stream: Int) -> Int {
+    flex events = mem_read_i64(stream, 16)
+    free_buffer(events)
+    free_buffer(stream)
+    deliver 0
+}
