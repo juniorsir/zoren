@@ -1,0 +1,87 @@
+// Zoren Base62 & Base58 Compact Encoding Module (std/base62.zor)
+// URL shortening, compact cryptographic IDs, and base-58 (Bitcoin/IPFS) alphanumeric conversions.
+
+bring sys
+
+// ----------------------------------------------------------------------------
+// BASE-62 ENCODING & DECODING
+// Alphabet (62 chars): 0-9, a-z, A-Z
+// ----------------------------------------------------------------------------
+
+open flow base62_char_at(idx: Int) -> Text {
+    flex alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    deliver str_slice(alphabet, idx % 62, 1)
+}
+
+open flow base62_val_of(ch: Text) -> Int {
+    flex alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    deliver str_find(alphabet, ch)
+}
+
+open flow base62_encode_int(val: Int) -> Text {
+    if val <= 0 { deliver "0" }
+    flex res = ""
+    flex v = val
+    repeat while v > 0 {
+        flex rem = v % 62
+        flex ch = base62_char_at(rem)
+        res = str_concat(ch, res)
+        v = v / 62
+    }
+    deliver res
+}
+
+open flow base62_decode_int(s: Text) -> Int {
+    flex s_len = length(s)
+    if s_len <= 0 { deliver 0 }
+    flex total = 0
+    for i in 0..s_len {
+        flex ch = str_slice(s, i, 1)
+        flex val = base62_val_of(ch)
+        if val < 0 { deliver -1 }
+        total = (total * 62) + val
+    }
+    deliver total
+}
+
+// ----------------------------------------------------------------------------
+// BASE-58 ENCODING & DECODING (Bitcoin/IPFS alphabet)
+// Excludes confusing characters: 0, O, I, l
+// Alphabet (58 chars): 1-9, A-H, J-N, P-Z, a-k, m-z
+// ----------------------------------------------------------------------------
+
+open flow base58_char_at(idx: Int) -> Text {
+    flex alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    deliver str_slice(alphabet, idx % 58, 1)
+}
+
+open flow base58_val_of(ch: Text) -> Int {
+    flex alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    deliver str_find(alphabet, ch)
+}
+
+open flow base58_encode_int(val: Int) -> Text {
+    if val <= 0 { deliver "1" }
+    flex res = ""
+    flex v = val
+    repeat while v > 0 {
+        flex rem = v % 58
+        flex ch = base58_char_at(rem)
+        res = str_concat(ch, res)
+        v = v / 58
+    }
+    deliver res
+}
+
+open flow base58_decode_int(s: Text) -> Int {
+    flex s_len = length(s)
+    if s_len <= 0 { deliver 0 }
+    flex total = 0
+    for i in 0..s_len {
+        flex ch = str_slice(s, i, 1)
+        flex val = base58_val_of(ch)
+        if val < 0 { deliver -1 }
+        total = (total * 58) + val
+    }
+    deliver total
+}

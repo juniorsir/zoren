@@ -1,0 +1,58 @@
+// Zoren Geospatial & Proximity Distance Engine (plugins/geo_spatial.zor)
+// Fixed-point microdegree coordinate arithmetic, Euclidean/Equirectangular distance, and bounding box filtering.
+
+bring sys
+
+// ============================================================================
+// GEOSPATIAL FIXED-POINT UTILITIES
+// Coordinates are represented as microdegrees (degrees * 1,000,000).
+// Example: San Francisco: Lat 37.774929 -> 37774929, Lon -122.419416 -> -122419416.
+// 1 degree latitude = ~111,139 meters. 1 microdegree = ~0.1111 meters.
+// ============================================================================
+
+open flow geo_abs(val: Int) -> Int {
+    if val < 0 { deliver 0 - val }
+    deliver val
+}
+
+// Approximates cos(lat_deg) scaled by 1,000 for lat 0..90 degrees.
+// cos(0) = 1000, cos(30) = 866, cos(45) = 707, cos(60) = 500, cos(90) = 0.
+open flow geo_cos_scaled(lat_micro: Int) -> Int {
+    flex deg = geo_abs(lat_micro) / 1000000
+    if deg >= 90 { deliver 0 }
+    // Taylor approximation: 1000 - (deg^2 * 61) / 100
+    flex penalty = (deg * deg * 61) / 1000
+    flex res = 1000 - penalty
+    if res < 0 { deliver 0 }
+    deliver res
+}
+
+open flow geo_distance_meters(lat1_micro: Int, lon1_micro: Int, lat2_micro: Int, lon2_micro: Int) -> Int {
+    flex d_lat = geo_abs(lat1_micro - lat2_micro)
+    flex d_lon = geo_abs(lon1_micro - lon2_micro)
+
+    // dy in meters: (d_lat_micro * 111) / 1000
+    flex dy = (d_lat * 111) / 1000
+
+    // Average latitude for longitude cos scaling
+    flex avg_lat = (geo_abs(lat1_micro) + geo_abs(lat2_micro)) / 2
+    flex cos_factor = geo_cos_scaled(avg_lat)
+
+    // dx in meters: ((d_lon_micro * 111) / 1000) * cos_factor / 1000
+    flex dx = (((d_lon * 111) / 1000) * cos_factor) / 1000
+
+    // Euclidean hypotenuse: sqrt(dx^2 + dy^2)
+    flex dist_sq = (dx * dx) + (dy * dy)
+    deliver sys_isqrt(dist_sq)
+}
+
+open flow geo_in_bounding_box(lat_micro: Int, lon_micro: Int, min_lat: Int, max_lat: Int, min_lon: Int, max_lon: Int) -> Bool {
+    if lat_micro < min_lat || lat_micro > max_lat { deliver false }
+    if lon_micro < min_lon || lon_micro > max_lon { deliver false }
+    deliver true
+}
+
+open flow geo_is_within_radius(lat1_micro: Int, lon1_micro: Int, lat2_micro: Int, lon2_micro: Int, radius_meters: Int) -> Bool {
+    flex d = geo_distance_meters(lat1_micro, lon1_micro, lat2_micro, lon2_micro)
+    deliver d <= radius_meters
+}

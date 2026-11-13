@@ -1,0 +1,114 @@
+// Zoren Finite State Machine & Workflow Engine (plugins/state_machine.zor)
+// Event-driven state transitions, guard verification, action callbacks, and transition history tracking.
+
+bring sys
+
+// ============================================================================
+// STATE MACHINE MEMORY LAYOUT
+// Header (40 bytes):
+// [0..8]:   current_state
+// [8..16]:  transition_count
+// [16..24]: max_transitions (e.g., 64)
+// [24..32]: transitions_table (max_transitions * 32 bytes)
+// [32..40]: history_count
+//
+// Transition Entry (32 bytes):
+// [0..8]:   from_state
+// [8..16]:  event_id
+// [16..24]: to_state
+// [24..32]: action_id
+// ============================================================================
+
+open flow fsm_new(initial_state: Int, max_transitions: Int) -> Int {
+    if max_transitions <= 0 { max_transitions = 64 }
+    flex table_size = max_transitions * 32
+    flex table = alloc_buffer(table_size)
+    mem_fill(table, 0, table_size)
+
+    flex header = alloc_buffer(40)
+    mem_write_i64(header, 0, initial_state) // current_state
+    mem_write_i64(header, 8, 0)             // transition_count = 0
+    mem_write_i64(header, 16, max_transitions)
+    mem_write_i64(header, 24, table)
+    mem_write_i64(header, 32, 0)            // history_count = 0
+
+    deliver header
+}
+
+open flow fsm_current_state(fsm_ptr: Int) -> Int {
+    deliver mem_read_i64(fsm_ptr, 0)
+}
+
+open flow fsm_history_count(fsm_ptr: Int) -> Int {
+    deliver mem_read_i64(fsm_ptr, 32)
+}
+
+open flow fsm_set_state(fsm_ptr: Int, new_state: Int) -> Int {
+    mem_write_i64(fsm_ptr, 0, new_state)
+    deliver new_state
+}
+
+open flow fsm_add_transition(fsm_ptr: Int, from_state: Int, event_id: Int, to_state: Int, action_id: Int) -> Bool {
+    flex count = mem_read_i64(fsm_ptr, 8)
+    flex max_t = mem_read_i64(fsm_ptr, 16)
+    if count >= max_t { deliver false }
+
+    flex table = mem_read_i64(fsm_ptr, 24)
+    flex offset = count * 32
+
+    mem_write_i64(table, offset, from_state)
+    mem_write_i64(table, offset + 8, event_id)
+    mem_write_i64(table, offset + 16, to_state)
+    mem_write_i64(table, offset + 24, action_id)
+
+    mem_write_i64(fsm_ptr, 8, count + 1)
+    deliver true
+}
+
+open flow fsm_find_transition(fsm_ptr: Int, from_state: Int, event_id: Int) -> Int {
+    flex count = mem_read_i64(fsm_ptr, 8)
+    flex table = mem_read_i64(fsm_ptr, 24)
+
+    for i in 0..count {
+        flex offset = i * 32
+        flex from_st = mem_read_i64(table, offset)
+        flex ev = mem_read_i64(table, offset + 8)
+        if from_st == from_state && ev == event_id {
+            deliver i
+        }
+    }
+    deliver -1
+}
+
+open flow fsm_can_trigger(fsm_ptr: Int, event_id: Int) -> Bool {
+    flex cur = mem_read_i64(fsm_ptr, 0)
+    flex idx = fsm_find_transition(fsm_ptr, cur, event_id)
+    deliver idx >= 0
+}
+
+open flow fsm_trigger(fsm_ptr: Int, event_id: Int) -> Int {
+    flex cur = mem_read_i64(fsm_ptr, 0)
+    flex idx = fsm_find_transition(fsm_ptr, cur, event_id)
+    if idx < 0 {
+        deliver -1 // invalid transition
+    }
+
+    flex table = mem_read_i64(fsm_ptr, 24)
+    flex offset = idx * 32
+    flex to_state = mem_read_i64(table, offset + 16)
+    flex action_id = mem_read_i64(table, offset + 24)
+
+    mem_write_i64(fsm_ptr, 0, to_state)
+
+    flex h_count = mem_read_i64(fsm_ptr, 32)
+    mem_write_i64(fsm_ptr, 32, h_count + 1)
+
+    if action_id == 0 { deliver 1 }
+    deliver action_id
+}
+
+open flow fsm_reset(fsm_ptr: Int, initial_state: Int) -> Int {
+    mem_write_i64(fsm_ptr, 0, initial_state)
+    mem_write_i64(fsm_ptr, 32, 0)
+    deliver initial_state
+}

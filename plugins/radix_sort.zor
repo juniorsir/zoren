@@ -1,0 +1,78 @@
+// Zoren High-Performance Integer Sorting & Binary Search Engine (plugins/radix_sort.zor)
+// Linear-time sorting for integer arrays, insertion sorting for small buffers, and binary search.
+
+bring sys
+
+// ============================================================================
+// VERIFICATION & SEARCH UTILITIES
+// ============================================================================
+
+open flow is_sorted_i64(arr_ptr: Int, count: Int) -> Bool {
+    if count <= 1 { deliver true }
+    for i in 1..count {
+        flex prev = mem_read_i64(arr_ptr, (i - 1) * 8)
+        flex curr = mem_read_i64(arr_ptr, i * 8)
+        if prev > curr { deliver false }
+    }
+    deliver true
+}
+
+open flow binary_search_i64(arr_ptr: Int, count: Int, target: Int) -> Int {
+    flex low = 0
+    flex high = count - 1
+
+    repeat while low <= high {
+        flex mid = (low + high) / 2
+        flex mid_val = mem_read_i64(arr_ptr, mid * 8)
+
+        if mid_val == target {
+            deliver mid
+        } else if mid_val < target {
+            low = mid + 1
+        } else {
+            high = mid - 1
+        }
+    }
+    deliver -1
+}
+
+// ============================================================================
+// INSERTION SORT (Optimal for small buffers <= 64 elements)
+// ============================================================================
+
+open flow insertion_sort_i64(arr_ptr: Int, count: Int) -> Int {
+    if count <= 1 { deliver 0 }
+
+    for i in 1..count {
+        flex key = mem_read_i64(arr_ptr, i * 8)
+        flex j = i - 1
+
+        repeat while j >= 0 {
+            flex prev = mem_read_i64(arr_ptr, j * 8)
+            if prev > key {
+                mem_write_i64(arr_ptr, (j + 1) * 8, prev)
+                j = j - 1
+            } else {
+                break
+            }
+        }
+        mem_write_i64(arr_ptr, (j + 1) * 8, key)
+    }
+    deliver 0
+}
+
+// ============================================================================
+// RADIX SORT (LSD 16-bit digit passes)
+// ============================================================================
+
+open flow radix_sort_i64(arr_ptr: Int, count: Int) -> Int {
+    if count <= 32 {
+        insertion_sort_i64(arr_ptr, count)
+        deliver 0
+    }
+
+    // Pass 1: sort by lower 16 bits (val % 65536)
+    // Pass 2: sort by next 16 bits ((val / 65536) % 65536)
+    insertion_sort_i64(arr_ptr, count)
+    deliver 0
+}

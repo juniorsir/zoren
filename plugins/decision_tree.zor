@@ -1,0 +1,124 @@
+// Zoren Embedded Decision Tree & Rule Evaluation Engine (plugins/decision_tree.zor)
+// Production rule-based classification, fraud detection scoring, and business logic decision trees.
+
+bring sys
+
+// ============================================================================
+// DECISION TREE MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   node_count
+// [8..16]:  max_nodes
+// [16..24]: nodes_table (max_nodes * 48 bytes)
+// [24..32]: reserved
+//
+// Each Node (48 bytes):
+// [0..8]:   is_leaf      (1 = leaf, 0 = split)
+// [8..16]:  feature_idx  (which feature in vector to test)
+// [16..24]: threshold    (comparison value)
+// [24..32]: operator     (1: LT, 2: LTE, 3: GT, 4: GTE, 5: EQ)
+// [32..40]: left_child   (node idx if true, or prediction if leaf)
+// [40..48]: right_child  (node idx if false)
+// ============================================================================
+
+open flow dt_new(max_nodes: Int) -> Int {
+    if max_nodes <= 0 { max_nodes = 64 }
+    flex table_size = max_nodes * 48
+    flex table = alloc_buffer(table_size)
+    mem_fill(table, 0, table_size)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0)         // count = 0
+    mem_write_i64(header, 8, max_nodes) // max_nodes
+    mem_write_i64(header, 16, table)
+    mem_write_i64(header, 24, 0)
+
+    deliver header
+}
+
+open flow dt_add_split_node(dt_ptr: Int, feature_idx: Int, op: Int, threshold: Int, left_child: Int, right_child: Int) -> Int {
+    flex count = mem_read_i64(dt_ptr, 0)
+    flex max_n = mem_read_i64(dt_ptr, 8)
+    if count >= max_n { deliver -1 }
+
+    flex table = mem_read_i64(dt_ptr, 16)
+    flex offset = count * 48
+
+    mem_write_i64(table, offset, 0)           // is_leaf = 0
+    mem_write_i64(table, offset + 8, feature_idx)
+    mem_write_i64(table, offset + 16, threshold)
+    mem_write_i64(table, offset + 24, op)
+    mem_write_i64(table, offset + 32, left_child)
+    mem_write_i64(table, offset + 40, right_child)
+
+    mem_write_i64(dt_ptr, 0, count + 1)
+    deliver count
+}
+
+open flow dt_set_root(dt_ptr: Int, root_idx: Int) -> Int {
+    mem_write_i64(dt_ptr, 24, root_idx)
+    deliver root_idx
+}
+
+open flow dt_add_leaf_node(dt_ptr: Int, prediction: Int) -> Int {
+    flex count = mem_read_i64(dt_ptr, 0)
+    flex max_n = mem_read_i64(dt_ptr, 8)
+    if count >= max_n { deliver -1 }
+
+    flex table = mem_read_i64(dt_ptr, 16)
+    flex offset = count * 48
+
+    mem_write_i64(table, offset, 1)          // is_leaf = 1
+    mem_write_i64(table, offset + 8, 0)
+    mem_write_i64(table, offset + 16, 0)
+    mem_write_i64(table, offset + 24, 0)
+    mem_write_i64(table, offset + 32, prediction) // class prediction
+    mem_write_i64(table, offset + 40, 0)
+
+    mem_write_i64(dt_ptr, 0, count + 1)
+    deliver count
+}
+
+open flow dt_test_condition(feat_val: Int, op: Int, threshold: Int) -> Bool {
+    if op == 1 { deliver feat_val < threshold }  // LT
+    if op == 2 { deliver feat_val <= threshold } // LTE
+    if op == 3 { deliver feat_val > threshold }  // GT
+    if op == 4 { deliver feat_val >= threshold } // GTE
+    if op == 5 { deliver feat_val == threshold } // EQ
+    deliver false
+}
+
+open flow dt_evaluate(dt_ptr: Int, features_ptr: Int, num_features: Int) -> Int {
+    flex count = mem_read_i64(dt_ptr, 0)
+    if count <= 0 { deliver -1 }
+
+    flex table = mem_read_i64(dt_ptr, 16)
+    flex curr_node = mem_read_i64(dt_ptr, 24)
+
+    repeat while curr_node >= 0 && curr_node < count {
+        flex offset = curr_node * 48
+        flex is_leaf = mem_read_i64(table, offset)
+
+        if is_leaf == 1 {
+            deliver mem_read_i64(table, offset + 32) // return prediction
+        }
+
+        flex f_idx = mem_read_i64(table, offset + 8)
+        flex threshold = mem_read_i64(table, offset + 16)
+        flex op = mem_read_i64(table, offset + 24)
+        flex left_child = mem_read_i64(table, offset + 32)
+        flex right_child = mem_read_i64(table, offset + 40)
+
+        flex f_val = 0
+        if f_idx >= 0 && f_idx < num_features {
+            f_val = mem_read_i64(features_ptr, f_idx * 8)
+        }
+
+        if dt_test_condition(f_val, op, threshold) {
+            curr_node = left_child
+        } else {
+            curr_node = right_child
+        }
+    }
+
+    deliver -1
+}

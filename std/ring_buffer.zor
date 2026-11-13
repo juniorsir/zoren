@@ -1,0 +1,103 @@
+// Zoren High-Throughput Circular Ring Buffer (std/ring_buffer.zor)
+// Cache-friendly circular FIFO queue for pipeline stages, event streaming, and producer-consumer buffers.
+
+bring sys
+
+// ============================================================================
+// RING BUFFER MEMORY LAYOUT (32 bytes)
+// [0..8]:   capacity
+// [8..16]:  head     (read cursor)
+// [16..24]: tail     (write cursor)
+// [24..32]: data_buf (capacity * 8 bytes)
+// ============================================================================
+
+open flow ring_buffer_new(capacity: Int) -> Int {
+    if capacity <= 0 { capacity = 64 }
+    flex buf = alloc_buffer(capacity * 8)
+    mem_fill(buf, 0, capacity * 8)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, capacity)
+    mem_write_i64(header, 8, 0)        // head = 0
+    mem_write_i64(header, 16, 0)       // tail = 0
+    mem_write_i64(header, 24, buf)
+
+    deliver header
+}
+
+open flow ring_buffer_capacity(rb_ptr: Int) -> Int {
+    deliver mem_read_i64(rb_ptr, 0)
+}
+
+open flow ring_buffer_size(rb_ptr: Int) -> Int {
+    flex head = mem_read_i64(rb_ptr, 8)
+    flex tail = mem_read_i64(rb_ptr, 16)
+    deliver tail - head
+}
+
+open flow ring_buffer_is_empty(rb_ptr: Int) -> Bool {
+    flex head = mem_read_i64(rb_ptr, 8)
+    flex tail = mem_read_i64(rb_ptr, 16)
+    deliver head == tail
+}
+
+open flow ring_buffer_is_full(rb_ptr: Int) -> Bool {
+    flex cap = mem_read_i64(rb_ptr, 0)
+    flex head = mem_read_i64(rb_ptr, 8)
+    flex tail = mem_read_i64(rb_ptr, 16)
+    deliver (tail - head) >= cap
+}
+
+open flow ring_buffer_push(rb_ptr: Int, val: Int) -> Bool {
+    flex cap = mem_read_i64(rb_ptr, 0)
+    flex head = mem_read_i64(rb_ptr, 8)
+    flex tail = mem_read_i64(rb_ptr, 16)
+
+    if (tail - head) >= cap {
+        deliver false // buffer full
+    }
+
+    flex buf = mem_read_i64(rb_ptr, 24)
+    flex slot = tail % cap
+    mem_write_i64(buf, slot * 8, val)
+    mem_write_i64(rb_ptr, 16, tail + 1)
+
+    deliver true
+}
+
+open flow ring_buffer_pop(rb_ptr: Int) -> Int {
+    flex head = mem_read_i64(rb_ptr, 8)
+    flex tail = mem_read_i64(rb_ptr, 16)
+
+    if head == tail {
+        deliver -1 // empty
+    }
+
+    flex cap = mem_read_i64(rb_ptr, 0)
+    flex buf = mem_read_i64(rb_ptr, 24)
+    flex slot = head % cap
+    flex val = mem_read_i64(buf, slot * 8)
+    mem_write_i64(rb_ptr, 8, head + 1)
+
+    deliver val
+}
+
+open flow ring_buffer_peek(rb_ptr: Int) -> Int {
+    flex head = mem_read_i64(rb_ptr, 8)
+    flex tail = mem_read_i64(rb_ptr, 16)
+
+    if head == tail {
+        deliver -1
+    }
+
+    flex cap = mem_read_i64(rb_ptr, 0)
+    flex buf = mem_read_i64(rb_ptr, 24)
+    flex slot = head % cap
+    deliver mem_read_i64(buf, slot * 8)
+}
+
+open flow ring_buffer_clear(rb_ptr: Int) -> Int {
+    mem_write_i64(rb_ptr, 8, 0)
+    mem_write_i64(rb_ptr, 16, 0)
+    deliver 0
+}
