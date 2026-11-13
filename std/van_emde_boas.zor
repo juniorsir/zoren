@@ -1,0 +1,334 @@
+// Zoren Van Emde Boas (vEB) Tree Suite (std/van_emde_boas.zor)
+// Production integer priority queue achieving O(log log U) predecessor, successor,
+// minimum, maximum, and member queries over universe U.
+
+bring sys
+
+// ============================================================================
+// vEB TREE MEMORY LAYOUT (Recursive Flattened Hierarchy)
+// Header (48 bytes):
+// [0..8]:   universe_size (U, e.g. 16, 64, 256)
+// [8..16]:  root_idx (0)
+// [16..24]: nodes_buf
+// [24..32]: max_nodes
+// [32..40]: node_count
+// [40..48]: count (total stored elements)
+//
+// Each Node (64 bytes):
+// [0..8]:   u (universe of this node)
+// [8..16]:  min_val (-1 if empty)
+// [16..24]: max_val (-1 if empty)
+// [24..32]: summary_idx (-1 if none/base)
+// [32..40]: clusters_buf (pointer to array of cluster node indices, 0 if base)
+// [40..48]: is_base (1 if u <= 2, 0 otherwise)
+// [48..56]: base_bits (stores bits when u <= 2)
+// [56..64]: reserved
+// ============================================================================
+
+flow veb_node_addr(tree: Int, node_idx: Int) -> Int {
+    flex buf = mem_read_i64(tree, 16)
+    deliver buf + (node_idx * 64)
+}
+
+flow veb_sqrt_u(u: Int) -> Int {
+    if u <= 2 { deliver 2 }
+    if u <= 4 { deliver 2 }
+    if u <= 16 { deliver 4 }
+    if u <= 64 { deliver 8 }
+    if u <= 256 { deliver 16 }
+    deliver 16
+}
+
+flow veb_get_cluster(tree: Int, node_idx: Int, high: Int) -> Int {
+    flex addr = veb_node_addr(tree, node_idx)
+    flex c_buf = mem_read_i64(addr, 32)
+    deliver mem_read_i64(c_buf, high * 8)
+}
+
+flow veb_alloc_node(tree: Int, u: Int) -> Int {
+    flex count = mem_read_i64(tree, 32)
+    flex max_n = mem_read_i64(tree, 24)
+    if count >= max_n { deliver 0 - 1 }
+
+    flex node_idx = count
+    mem_write_i64(tree, 32, count + 1)
+
+    flex addr = veb_node_addr(tree, node_idx)
+    mem_fill(addr, 0, 64)
+    mem_write_i64(addr, 0, u)
+    mem_write_i64(addr, 8, 0 - 1)  // min = -1
+    mem_write_i64(addr, 16, 0 - 1) // max = -1
+    mem_write_i64(addr, 24, 0 - 1) // summary = -1
+    mem_write_i64(addr, 32, 0)     // clusters_buf = 0
+
+    if u <= 2 {
+        mem_write_i64(addr, 40, 1) // is_base = 1
+        mem_write_i64(addr, 48, 0) // base_bits = 0
+    } else {
+        mem_write_i64(addr, 40, 0) // not base
+        flex sqrt_u = veb_sqrt_u(u)
+
+        // Summary has universe sqrt_u
+        flex summary_idx = veb_alloc_node(tree, sqrt_u)
+        mem_write_i64(addr, 24, summary_idx)
+
+        // Allocate clusters buffer for sqrt_u child node indices
+        flex c_buf = alloc_buffer(sqrt_u * 8)
+        mem_write_i64(addr, 32, c_buf)
+
+        flex i = 0
+        while i < sqrt_u {
+            flex c_idx = veb_alloc_node(tree, sqrt_u)
+            mem_write_i64(c_buf, i * 8, c_idx)
+            i = i + 1
+        }
+    }
+
+    deliver node_idx
+}
+
+open flow veb_new(universe_size: Int) -> Int {
+    flex u = universe_size
+    if u <= 2 { u = 2 }
+    else if u <= 4 { u = 4 }
+    else if u <= 16 { u = 16 }
+    else if u <= 64 { u = 64 }
+    else { u = 256 }
+
+    flex max_nodes = 512
+    flex total_bytes = max_nodes * 64
+    flex nodes_buf = alloc_buffer(total_bytes)
+    mem_fill(nodes_buf, 0, total_bytes)
+
+    flex tree = alloc_buffer(48)
+    mem_write_i64(tree, 0, u)
+    mem_write_i64(tree, 8, 0)      // root_idx = 0
+    mem_write_i64(tree, 16, nodes_buf)
+    mem_write_i64(tree, 24, max_nodes)
+    mem_write_i64(tree, 32, 0)     // node_count = 0
+    mem_write_i64(tree, 40, 0)     // count = 0
+
+    veb_alloc_node(tree, u)
+
+    deliver tree
+}
+
+open flow veb_min(tree: Int) -> Int {
+    flex addr = veb_node_addr(tree, 0)
+    deliver mem_read_i64(addr, 8)
+}
+
+open flow veb_max(tree: Int) -> Int {
+    flex addr = veb_node_addr(tree, 0)
+    deliver mem_read_i64(addr, 16)
+}
+
+open flow veb_is_empty(tree: Int) -> Bool {
+    flex addr = veb_node_addr(tree, 0)
+    deliver mem_read_i64(addr, 8) < 0
+}
+
+flow veb_node_min(tree: Int, node_idx: Int) -> Int {
+    flex addr = veb_node_addr(tree, node_idx)
+    deliver mem_read_i64(addr, 8)
+}
+
+flow veb_node_max(tree: Int, node_idx: Int) -> Int {
+    flex addr = veb_node_addr(tree, node_idx)
+    deliver mem_read_i64(addr, 16)
+}
+
+flow veb_contains_recursive(tree: Int, node_idx: Int, x: Int) -> Bool {
+    flex addr = veb_node_addr(tree, node_idx)
+    flex u = mem_read_i64(addr, 0)
+    if x < 0 || x >= u { deliver false }
+
+    flex min_v = mem_read_i64(addr, 8)
+    flex max_v = mem_read_i64(addr, 16)
+    if min_v < 0 { deliver false }
+    if x == min_v || x == max_v { deliver true }
+
+    flex is_base = mem_read_i64(addr, 40)
+    if is_base == 1 { deliver false }
+
+    flex sqrt_u = veb_sqrt_u(u)
+    flex high = x / sqrt_u
+    flex low = x % sqrt_u
+
+    flex cluster_idx = veb_get_cluster(tree, node_idx, high)
+    deliver veb_contains_recursive(tree, cluster_idx, low)
+}
+
+open flow veb_contains(tree: Int, x: Int) -> Bool {
+    deliver veb_contains_recursive(tree, 0, x)
+}
+
+flow veb_insert_recursive(tree: Int, node_idx: Int, x: Int) -> Int {
+    flex addr = veb_node_addr(tree, node_idx)
+    flex min_v = mem_read_i64(addr, 8)
+    flex max_v = mem_read_i64(addr, 16)
+
+    // If node is empty
+    if min_v < 0 {
+        mem_write_i64(addr, 8, x)
+        mem_write_i64(addr, 16, x)
+        deliver 1
+    }
+
+    if x == min_v || x == max_v { deliver 0 }
+
+    flex val_to_insert = x
+    if val_to_insert < min_v {
+        // Swap val_to_insert with min_v
+        flex temp = min_v
+        min_v = val_to_insert
+        val_to_insert = temp
+        mem_write_i64(addr, 8, min_v)
+    }
+
+    flex is_base = mem_read_i64(addr, 40)
+    if is_base == 1 {
+        if val_to_insert > max_v {
+            mem_write_i64(addr, 16, val_to_insert)
+        }
+        deliver 1
+    }
+
+    flex u = mem_read_i64(addr, 0)
+    flex sqrt_u = veb_sqrt_u(u)
+    flex high = val_to_insert / sqrt_u
+    flex low = val_to_insert % sqrt_u
+
+    flex cluster_idx = veb_get_cluster(tree, node_idx, high)
+    flex c_min = veb_node_min(tree, cluster_idx)
+
+    if c_min < 0 {
+        flex summary_idx = mem_read_i64(addr, 24)
+        veb_insert_recursive(tree, summary_idx, high)
+        // Insert into empty cluster
+        flex c_addr = veb_node_addr(tree, cluster_idx)
+        mem_write_i64(c_addr, 8, low)
+        mem_write_i64(c_addr, 16, low)
+    } else {
+        veb_insert_recursive(tree, cluster_idx, low)
+    }
+
+    if val_to_insert > max_v {
+        mem_write_i64(addr, 16, val_to_insert)
+    }
+
+    deliver 1
+}
+
+open flow veb_insert(tree: Int, x: Int) -> Int {
+    flex u = mem_read_i64(tree, 0)
+    if x < 0 || x >= u { deliver 0 }
+    if veb_contains(tree, x) { deliver 0 }
+
+    veb_insert_recursive(tree, 0, x)
+    flex cnt = mem_read_i64(tree, 40)
+    mem_write_i64(tree, 40, cnt + 1)
+    deliver 1
+}
+
+flow veb_successor_recursive(tree: Int, node_idx: Int, x: Int) -> Int {
+    flex addr = veb_node_addr(tree, node_idx)
+    flex min_v = mem_read_i64(addr, 8)
+    flex max_v = mem_read_i64(addr, 16)
+
+    if min_v < 0 || x >= max_v { deliver 0 - 1 }
+    if x < min_v { deliver min_v }
+
+    flex is_base = mem_read_i64(addr, 40)
+    if is_base == 1 {
+        if x == 0 && max_v == 1 { deliver 1 }
+        deliver 0 - 1
+    }
+
+    flex u = mem_read_i64(addr, 0)
+    flex sqrt_u = veb_sqrt_u(u)
+    flex high = x / sqrt_u
+    flex low = x % sqrt_u
+
+    flex cluster_idx = veb_get_cluster(tree, node_idx, high)
+    flex max_low = veb_node_max(tree, cluster_idx)
+
+    if max_low >= 0 && low < max_low {
+        flex offset = veb_successor_recursive(tree, cluster_idx, low)
+        deliver (high * sqrt_u) + offset
+    }
+
+    flex summary_idx = mem_read_i64(addr, 24)
+    flex succ_cluster = veb_successor_recursive(tree, summary_idx, high)
+    if succ_cluster < 0 { deliver 0 - 1 }
+
+    flex next_cluster_idx = veb_get_cluster(tree, node_idx, succ_cluster)
+    flex next_min = veb_node_min(tree, next_cluster_idx)
+    deliver (succ_cluster * sqrt_u) + next_min
+}
+
+open flow veb_successor(tree: Int, x: Int) -> Int {
+    deliver veb_successor_recursive(tree, 0, x)
+}
+
+flow veb_predecessor_recursive(tree: Int, node_idx: Int, x: Int) -> Int {
+    flex addr = veb_node_addr(tree, node_idx)
+    flex min_v = mem_read_i64(addr, 8)
+    flex max_v = mem_read_i64(addr, 16)
+
+    if min_v < 0 || x <= min_v { deliver 0 - 1 }
+    if x > max_v { deliver max_v }
+
+    flex is_base = mem_read_i64(addr, 40)
+    if is_base == 1 {
+        if x == 1 && min_v == 0 { deliver 0 }
+        deliver 0 - 1
+    }
+
+    flex u = mem_read_i64(addr, 0)
+    flex sqrt_u = veb_sqrt_u(u)
+    flex high = x / sqrt_u
+    flex low = x % sqrt_u
+
+    flex cluster_idx = veb_get_cluster(tree, node_idx, high)
+    flex min_low = veb_node_min(tree, cluster_idx)
+
+    if min_low >= 0 && low > min_low {
+        flex offset = veb_predecessor_recursive(tree, cluster_idx, low)
+        deliver (high * sqrt_u) + offset
+    }
+
+    flex summary_idx = mem_read_i64(addr, 24)
+    flex pred_cluster = veb_predecessor_recursive(tree, summary_idx, high)
+    if pred_cluster < 0 {
+        if min_v >= 0 && x > min_v { deliver min_v }
+        deliver 0 - 1
+    }
+
+    flex prev_cluster_idx = veb_get_cluster(tree, node_idx, pred_cluster)
+    flex prev_max = veb_node_max(tree, prev_cluster_idx)
+    deliver (pred_cluster * sqrt_u) + prev_max
+}
+
+open flow veb_predecessor(tree: Int, x: Int) -> Int {
+    deliver veb_predecessor_recursive(tree, 0, x)
+}
+
+open flow veb_free(tree: Int) -> Int {
+    if tree != 0 {
+        flex count = mem_read_i64(tree, 32)
+        flex i = 0
+        while i < count {
+            flex n_addr = veb_node_addr(tree, i)
+            flex c_buf = mem_read_i64(n_addr, 32)
+            if c_buf > 0 {
+                free_buffer(c_buf)
+            }
+            i = i + 1
+        }
+        flex buf = mem_read_i64(tree, 16)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(tree)
+    }
+    deliver 0
+}

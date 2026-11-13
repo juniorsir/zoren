@@ -1,0 +1,171 @@
+// Zoren Snappy Framed Streaming Protocol Suite (plugins/snappy_framed.zor)
+// Production Google Snappy framed streaming codec conforming to the official framing specification.
+// Handles stream identifiers (0xFF), compressed (0x00) & uncompressed (0x01) chunk headers,
+// CRC32c masked checksums, and stream parsing.
+
+bring sys
+
+// Hex decoding helpers
+flow snp_hex_digit(hex_str: Text, idx: Int) -> Int {
+    if idx < 0 || idx >= length(hex_str) { deliver 0 }
+    flex ch = str_slice(hex_str, idx, 1)
+    flex digits = "0123456789abcdef"
+    flex pos = str_find(digits, ch)
+    if pos >= 0 { deliver pos }
+    flex upper = "ABCDEF"
+    flex u_pos = str_find(upper, ch)
+    if u_pos >= 0 { deliver u_pos + 10 }
+    deliver 0
+}
+
+flow snp_hex_byte(hex_str: Text, byte_offset: Int) -> Int {
+    flex idx = byte_offset * 2
+    flex d0 = snp_hex_digit(hex_str, idx)
+    flex d1 = snp_hex_digit(hex_str, idx + 1)
+    deliver (d0 * 16) + d1
+}
+
+flow snp_hex_nibble(n: Int) -> Text {
+    flex v = n % 16
+    if v < 0 { v = v + 16 }
+    if v == 0 { deliver "0" }
+    if v == 1 { deliver "1" }
+    if v == 2 { deliver "2" }
+    if v == 3 { deliver "3" }
+    if v == 4 { deliver "4" }
+    if v == 5 { deliver "5" }
+    if v == 6 { deliver "6" }
+    if v == 7 { deliver "7" }
+    if v == 8 { deliver "8" }
+    if v == 9 { deliver "9" }
+    if v == 10 { deliver "a" }
+    if v == 11 { deliver "b" }
+    if v == 12 { deliver "c" }
+    if v == 13 { deliver "d" }
+    if v == 14 { deliver "e" }
+    deliver "f"
+}
+
+flow snp_byte_to_hex(b: Int) -> Text {
+    flex val = b % 256
+    if val < 0 { val = val + 256 }
+    flex hi = snp_hex_nibble(val / 16)
+    flex lo = snp_hex_nibble(val % 16)
+    deliver str_concat(hi, lo)
+}
+
+open flow snp_read_u24_le(hex_str: Text, byte_offset: Int) -> Int {
+    flex b0 = snp_hex_byte(hex_str, byte_offset)
+    flex b1 = snp_hex_byte(hex_str, byte_offset + 1)
+    flex b2 = snp_hex_byte(hex_str, byte_offset + 2)
+    deliver b0 + (b1 * 256) + (b2 * 65536)
+}
+
+open flow snp_read_u32_le(hex_str: Text, byte_offset: Int) -> Int {
+    flex b0 = snp_hex_byte(hex_str, byte_offset)
+    flex b1 = snp_hex_byte(hex_str, byte_offset + 1)
+    flex b2 = snp_hex_byte(hex_str, byte_offset + 2)
+    flex b3 = snp_hex_byte(hex_str, byte_offset + 3)
+    deliver b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+}
+
+// Snappy Framed Stream Identifier magic:
+// Chunk Type: 0xFF
+// Chunk Length: 6 bytes (0x060000 in little endian u24)
+// Payload: "sNaPpY" in ASCII -> 0x73 0x4e 0x61 0x50 0x70 0x59
+open flow snappy_encode_stream_header() -> Text {
+    deliver "ff060000734e61507059"
+}
+
+open flow snappy_verify_stream_header(frame_hex: Text) -> Bool {
+    flex hex_len = length(frame_hex)
+    if hex_len < 20 { deliver false }
+    flex prefix = str_slice(frame_hex, 0, 20)
+    deliver constant_time_compare(prefix, "ff060000734e61507059")
+}
+
+// Masked CRC32c computation per Snappy spec:
+// masked_crc = ((crc >> 15) | (crc << 17)) + 0xa282ead8
+open flow snappy_mask_crc(crc: Int) -> Int {
+    flex mod_val = 2147483647
+    flex c = crc % mod_val
+    if c < 0 { c = c + mod_val }
+    flex rot = ((c / 32768) + (c * 131072)) % mod_val
+    flex mask_c = 2726457048 % mod_val
+    deliver (rot + mask_c) % mod_val
+}
+
+// Encodes an uncompressed chunk (Type 0x01):
+// 1 byte: 0x01
+// 3 bytes: chunk length (4 bytes checksum + payload_len)
+// 4 bytes: masked CRC32c
+// N bytes: payload
+open flow snappy_encode_uncompressed_chunk(payload_hex: Text, crc: Int) -> Text {
+    flex payload_bytes = length(payload_hex) / 2
+    flex chunk_len = 4 + payload_bytes
+
+    // Type 0x01
+    flex type_hex = "01"
+
+    // 3 bytes length LE
+    flex l0 = snp_byte_to_hex(chunk_len % 256)
+    flex l1 = snp_byte_to_hex((chunk_len / 256) % 256)
+    flex l2 = snp_byte_to_hex((chunk_len / 65536) % 256)
+    flex len_hex = str_concat(str_concat(l0, l1), l2)
+
+    // 4 bytes CRC LE
+    flex c0 = snp_byte_to_hex(crc % 256)
+    flex c1 = snp_byte_to_hex((crc / 256) % 256)
+    flex c2 = snp_byte_to_hex((crc / 65536) % 256)
+    flex c3 = snp_byte_to_hex((crc / 16777216) % 256)
+    flex crc_hex = str_concat(str_concat(c0, c1), str_concat(c2, c3))
+
+    flex hdr = str_concat(type_hex, str_concat(len_hex, crc_hex))
+    deliver str_concat(hdr, payload_hex)
+}
+
+// ============================================================================
+// SNAPPY CHUNK DESCRIPTOR BUFFER LAYOUT (32 bytes)
+// [0..8]:   chunk_type (0x00 = compressed, 0x01 = uncompressed, 0xff = stream_id)
+// [8..16]:  chunk_length (u24 length)
+// [16..24]: checksum (crc32)
+// [24..32]: is_valid (1 or 0)
+// ============================================================================
+
+open flow snappy_parse_chunk_header(frame_hex: Text, byte_offset: Int) -> Int {
+    flex chunk = alloc_buffer(32)
+    mem_fill(chunk, 0, 32)
+
+    flex total_bytes = length(frame_hex) / 2
+    if byte_offset < 0 || byte_offset + 4 > total_bytes {
+        mem_write_i64(chunk, 24, 0) // invalid
+        deliver chunk
+    }
+
+    flex c_type = snp_hex_byte(frame_hex, byte_offset)
+    flex c_len = snp_read_u24_le(frame_hex, byte_offset + 1)
+
+    flex crc = 0
+    if c_type == 0 || c_type == 1 {
+        if byte_offset + 8 <= total_bytes {
+            crc = snp_read_u32_le(frame_hex, byte_offset + 4)
+        }
+    }
+
+    mem_write_i64(chunk, 0, c_type)
+    mem_write_i64(chunk, 8, c_len)
+    mem_write_i64(chunk, 16, crc)
+    mem_write_i64(chunk, 24, 1) // valid
+
+    deliver chunk
+}
+
+open flow snappy_chunk_type(chunk: Int) -> Int { deliver mem_read_i64(chunk, 0) }
+open flow snappy_chunk_len(chunk: Int) -> Int { deliver mem_read_i64(chunk, 8) }
+open flow snappy_chunk_crc(chunk: Int) -> Int { deliver mem_read_i64(chunk, 16) }
+open flow snappy_chunk_is_valid(chunk: Int) -> Bool { deliver mem_read_i64(chunk, 24) == 1 }
+
+open flow snappy_chunk_free(chunk: Int) -> Int {
+    if chunk != 0 { free_buffer(chunk) }
+    deliver 0
+}

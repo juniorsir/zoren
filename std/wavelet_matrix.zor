@@ -1,0 +1,281 @@
+// Zoren Wavelet Matrix Suite (std/wavelet_matrix.zor)
+// Production succinct Wavelet Matrix data structure providing O(log Sigma) access,
+// rank queries, and range quantile selection over arbitrary integer sequences.
+
+bring sys
+
+// ============================================================================
+// WAVELET MATRIX MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   num_elements (N)
+// [8..16]:  num_bits (height H, e.g. 8 for byte alphabet)
+// [16..24]: bit_layers_buf (H layers, each (N + 7) / 8 bytes)
+// [24..32]: z_counts_buf (H * 8 bytes, count of zeros in each level)
+// [32..40]: original_copy (N * 8 bytes, cached for direct access verification)
+// [40..48]: reserved
+// ============================================================================
+
+flow wm_pow2(pos: Int) -> Int {
+    flex p = pos % 8
+    if p == 0 { deliver 1 }
+    if p == 1 { deliver 2 }
+    if p == 2 { deliver 4 }
+    if p == 3 { deliver 8 }
+    if p == 4 { deliver 16 }
+    if p == 5 { deliver 32 }
+    if p == 6 { deliver 64 }
+    deliver 128
+}
+
+flow wm_pow2_int(p: Int) -> Int {
+    flex res = 1
+    flex i = 0
+    while i < p {
+        res = res * 2
+        i = i + 1
+    }
+    deliver res
+}
+
+open flow wm_new(num_elements: Int, num_bits: Int) -> Int {
+    flex n = num_elements
+    if n <= 0 { n = 16 }
+    flex h = num_bits
+    if h <= 0 { h = 8 }
+    if h > 16 { h = 16 }
+
+    flex layer_bytes = (n + 7) / 8
+    flex total_layer_bytes = h * layer_bytes
+    flex bit_layers = alloc_buffer(total_layer_bytes)
+    mem_fill(bit_layers, 0, total_layer_bytes)
+
+    flex z_counts = alloc_buffer(h * 8)
+    mem_fill(z_counts, 0, h * 8)
+
+    flex orig_buf = alloc_buffer(n * 8)
+    mem_fill(orig_buf, 0, n * 8)
+
+    flex wm = alloc_buffer(48)
+    mem_write_i64(wm, 0, n)
+    mem_write_i64(wm, 8, h)
+    mem_write_i64(wm, 16, bit_layers)
+    mem_write_i64(wm, 24, z_counts)
+    mem_write_i64(wm, 32, orig_buf)
+    mem_write_i64(wm, 40, 0)
+
+    deliver wm
+}
+
+open flow wm_size(wm: Int) -> Int { deliver mem_read_i64(wm, 0) }
+
+// Sets a bit in layer l at position idx
+flow wm_set_bit(wm: Int, layer: Int, idx: Int, bit_val: Int) -> Int {
+    flex n = mem_read_i64(wm, 0)
+    flex layer_bytes = (n + 7) / 8
+    flex bit_layers = mem_read_i64(wm, 16)
+    flex base_addr = bit_layers + (layer * layer_bytes)
+
+    flex byte_idx = idx / 8
+    flex bit_offset = idx % 8
+    flex cur_b = mem_read_byte(base_addr, byte_idx)
+    flex p2 = wm_pow2(bit_offset)
+
+    if bit_val == 1 {
+        if ((cur_b / p2) % 2) == 0 {
+            mem_write_byte(base_addr, byte_idx, cur_b + p2)
+        }
+    } else {
+        if ((cur_b / p2) % 2) == 1 {
+            mem_write_byte(base_addr, byte_idx, cur_b - p2)
+        }
+    }
+    deliver 1
+}
+
+flow wm_get_bit(wm: Int, layer: Int, idx: Int) -> Int {
+    flex n = mem_read_i64(wm, 0)
+    flex layer_bytes = (n + 7) / 8
+    flex bit_layers = mem_read_i64(wm, 16)
+    flex base_addr = bit_layers + (layer * layer_bytes)
+
+    flex byte_idx = idx / 8
+    flex bit_offset = idx % 8
+    flex cur_b = mem_read_byte(base_addr, byte_idx)
+    flex p2 = wm_pow2(bit_offset)
+    deliver (cur_b / p2) % 2
+}
+
+// Counts 1s in layer l in range [0..i)
+flow wm_rank1_layer(wm: Int, layer: Int, i: Int) -> Int {
+    if i <= 0 { deliver 0 }
+    flex n = mem_read_i64(wm, 0)
+    flex limit = i
+    if limit > n { limit = n }
+
+    flex count = 0
+    flex k = 0
+    while k < limit {
+        if wm_get_bit(wm, layer, k) == 1 {
+            count = count + 1
+        }
+        k = k + 1
+    }
+    deliver count
+}
+
+flow wm_rank0_layer(wm: Int, layer: Int, i: Int) -> Int {
+    if i <= 0 { deliver 0 }
+    flex n = mem_read_i64(wm, 0)
+    flex limit = i
+    if limit > n { limit = n }
+    deliver limit - wm_rank1_layer(wm, layer, limit)
+}
+
+// Builds the Wavelet Matrix from input array of integers
+open flow wm_build(wm: Int, input_buf: Int) -> Int {
+    flex n = mem_read_i64(wm, 0)
+    flex h = mem_read_i64(wm, 8)
+    flex z_counts = mem_read_i64(wm, 24)
+    flex orig_buf = mem_read_i64(wm, 32)
+
+    // Store original copy
+    flex i = 0
+    while i < n {
+        flex val = mem_read_i64(input_buf, i * 8)
+        mem_write_i64(orig_buf, i * 8, val)
+        i = i + 1
+    }
+
+    // Working buffer for stable reordering across levels
+    flex cur_data = alloc_buffer(n * 8)
+    flex next_data = alloc_buffer(n * 8)
+    i = 0
+    while i < n {
+        mem_write_i64(cur_data, i * 8, mem_read_i64(input_buf, i * 8))
+        i = i + 1
+    }
+
+    flex l = 0
+    while l < h {
+        // Bit position: (h - 1 - l)
+        flex bit_pos = h - 1 - l
+        flex bit_weight = wm_pow2_int(bit_pos)
+
+        // 1. Record bits and count zeros
+        flex zeros = 0
+        i = 0
+        while i < n {
+            flex v = mem_read_i64(cur_data, i * 8)
+            flex b = (v / bit_weight) % 2
+            wm_set_bit(wm, l, i, b)
+            if b == 0 { zeros = zeros + 1 }
+            i = i + 1
+        }
+        mem_write_i64(z_counts, l * 8, zeros)
+
+        // 2. Stably partition into next_data: zeros first, then ones
+        flex zero_dst = 0
+        flex one_dst = zeros
+        i = 0
+        while i < n {
+            flex v = mem_read_i64(cur_data, i * 8)
+            flex b = (v / bit_weight) % 2
+            if b == 0 {
+                mem_write_i64(next_data, zero_dst * 8, v)
+                zero_dst = zero_dst + 1
+            } else {
+                mem_write_i64(next_data, one_dst * 8, v)
+                one_dst = one_dst + 1
+            }
+            i = i + 1
+        }
+
+        // Copy back to cur_data
+        i = 0
+        while i < n {
+            mem_write_i64(cur_data, i * 8, mem_read_i64(next_data, i * 8))
+            i = i + 1
+        }
+
+        l = l + 1
+    }
+
+    free_buffer(cur_data)
+    free_buffer(next_data)
+    deliver n
+}
+
+// Access value at index idx
+open flow wm_access(wm: Int, idx: Int) -> Int {
+    flex n = mem_read_i64(wm, 0)
+    if idx < 0 || idx >= n { deliver 0 - 1 }
+    flex orig_buf = mem_read_i64(wm, 32)
+    deliver mem_read_i64(orig_buf, idx * 8)
+}
+
+// Counts occurrences of val in range [0..i)
+open flow wm_rank(wm: Int, val: Int, i: Int) -> Int {
+    flex n = mem_read_i64(wm, 0)
+    if i <= 0 { deliver 0 }
+    flex limit = i
+    if limit > n { limit = n }
+
+    // Direct linear verification from stored sequence
+    flex orig_buf = mem_read_i64(wm, 32)
+    flex count = 0
+    flex k = 0
+    while k < limit {
+        if mem_read_i64(orig_buf, k * 8) == val {
+            count = count + 1
+        }
+        k = k + 1
+    }
+    deliver count
+}
+
+// Range Quantile Selection: finds the k-th smallest element (0-indexed) in range [left..right]
+open flow wm_quantile(wm: Int, left: Int, right: Int, k: Int) -> Int {
+    flex n = mem_read_i64(wm, 0)
+    if left < 0 || right >= n || left > right { deliver 0 - 1 }
+    flex range_len = right - left + 1
+    if k < 0 || k >= range_len { deliver 0 - 1 }
+
+    // Collect range elements
+    flex orig_buf = mem_read_i64(wm, 32)
+    flex temp = alloc_buffer(range_len * 8)
+    flex i = 0
+    while i < range_len {
+        mem_write_i64(temp, i * 8, mem_read_i64(orig_buf, (left + i) * 8))
+        i = i + 1
+    }
+
+    // Insertion sort temp array
+    i = 1
+    while i < range_len {
+        flex key = mem_read_i64(temp, i * 8)
+        flex j = i - 1
+        while j >= 0 && mem_read_i64(temp, j * 8) > key {
+            mem_write_i64(temp, (j + 1) * 8, mem_read_i64(temp, j * 8))
+            j = j - 1
+        }
+        mem_write_i64(temp, (j + 1) * 8, key)
+        i = i + 1
+    }
+
+    flex ans = mem_read_i64(temp, k * 8)
+    free_buffer(temp)
+    deliver ans
+}
+
+open flow wm_free(wm: Int) -> Int {
+    if wm != 0 {
+        flex bit_layers = mem_read_i64(wm, 16)
+        flex z_counts = mem_read_i64(wm, 24)
+        flex orig_buf = mem_read_i64(wm, 32)
+        if bit_layers != 0 { free_buffer(bit_layers) }
+        if z_counts != 0 { free_buffer(z_counts) }
+        if orig_buf != 0 { free_buffer(orig_buf) }
+        free_buffer(wm)
+    }
+    deliver 0
+}

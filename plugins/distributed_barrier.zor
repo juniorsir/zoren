@@ -1,0 +1,196 @@
+// Zoren Multi-Stage Distributed Coordination Barrier (plugins/distributed_barrier.zor)
+// Production multi-stage cyclic barrier supporting dynamic generation rolling,
+// participant quorum synchronization, arrival tracking, and timeout thresholds.
+
+bring sys
+
+// ============================================================================
+// MEMORY LAYOUT (Barrier Descriptor: 64 bytes)
+// [0..8]:   capacity (target participant quorum)
+// [8..16]:  registered_count
+// [16..24]: arrived_count
+// [24..32]: generation (starts at 0)
+// [32..40]: is_tripped (1 = true, 0 = false)
+// [40..48]: timeout_ms
+// [48..56]: participants_buf (array of Int participant IDs)
+// [56..64]: arrived_buf (array of Int flags: 1 = arrived in cur generation)
+// ============================================================================
+
+open flow barrier_new(capacity: Int, timeout_ms: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 1 }
+
+    flex t_ms = timeout_ms
+    if t_ms < 0 { t_ms = 0 }
+
+    flex b = alloc_buffer(64)
+    mem_fill(b, 0, 64)
+
+    flex p_buf = alloc_buffer(cap * 8)
+    mem_fill(p_buf, 0, cap * 8)
+
+    flex a_buf = alloc_buffer(cap * 8)
+    mem_fill(a_buf, 0, cap * 8)
+
+    mem_write_i64(b, 0, cap)
+    mem_write_i64(b, 8, 0)       // registered_count = 0
+    mem_write_i64(b, 16, 0)      // arrived_count = 0
+    mem_write_i64(b, 24, 0)      // generation = 0
+    mem_write_i64(b, 32, 0)      // is_tripped = 0
+    mem_write_i64(b, 40, t_ms)   // timeout_ms
+    mem_write_i64(b, 48, p_buf)
+    mem_write_i64(b, 56, a_buf)
+
+    deliver b
+}
+
+open flow barrier_capacity(barrier: Int) -> Int {
+    deliver mem_read_i64(barrier, 0)
+}
+
+open flow barrier_registered_count(barrier: Int) -> Int {
+    deliver mem_read_i64(barrier, 8)
+}
+
+open flow barrier_arrived_count(barrier: Int) -> Int {
+    deliver mem_read_i64(barrier, 16)
+}
+
+open flow barrier_generation(barrier: Int) -> Int {
+    deliver mem_read_i64(barrier, 24)
+}
+
+open flow barrier_is_tripped(barrier: Int) -> Bool {
+    deliver mem_read_i64(barrier, 32) == 1
+}
+
+open flow barrier_timeout_ms(barrier: Int) -> Int {
+    deliver mem_read_i64(barrier, 40)
+}
+
+// Check if participant_id is registered
+open flow barrier_is_registered(barrier: Int, participant_id: Int) -> Bool {
+    flex reg_count = mem_read_i64(barrier, 8)
+    flex p_buf = mem_read_i64(barrier, 48)
+
+    flex i = 0
+    while i < reg_count {
+        flex pid = mem_read_i64(p_buf, i * 8)
+        if pid == participant_id {
+            deliver true
+        }
+        i = i + 1
+    }
+    deliver false
+}
+
+// Find participant index in participants_buf
+flow barrier_find_participant_idx(barrier: Int, participant_id: Int) -> Int {
+    flex reg_count = mem_read_i64(barrier, 8)
+    flex p_buf = mem_read_i64(barrier, 48)
+
+    flex i = 0
+    while i < reg_count {
+        flex pid = mem_read_i64(p_buf, i * 8)
+        if pid == participant_id {
+            deliver i
+        }
+        i = i + 1
+    }
+    deliver -1
+}
+
+// Register a participant ID into the barrier
+open flow barrier_register(barrier: Int, participant_id: Int) -> Bool {
+    flex cap = mem_read_i64(barrier, 0)
+    flex reg_count = mem_read_i64(barrier, 8)
+
+    if reg_count >= cap {
+        deliver false
+    }
+
+    if barrier_is_registered(barrier, participant_id) {
+        deliver true
+    }
+
+    flex p_buf = mem_read_i64(barrier, 48)
+    mem_write_i64(p_buf, reg_count * 8, participant_id)
+    mem_write_i64(barrier, 8, reg_count + 1)
+    deliver true
+}
+
+// Signals arrival of participant_id for current generation
+// Returns:
+//   1 = barrier tripped (this arrival satisfied the quorum)
+//   0 = arrival recorded, still waiting for remaining participants
+//  -1 = invalid participant ID or invalid generation
+open flow barrier_arrive(barrier: Int, participant_id: Int, target_generation: Int) -> Int {
+    flex cur_gen = mem_read_i64(barrier, 24)
+    if target_generation != cur_gen {
+        deliver -1
+    }
+
+    flex p_idx = barrier_find_participant_idx(barrier, participant_id)
+    if p_idx < 0 {
+        deliver -1
+    }
+
+    // Check if already arrived in this generation
+    flex a_buf = mem_read_i64(barrier, 56)
+    flex already_arrived = mem_read_i64(a_buf, p_idx * 8)
+    if already_arrived == 1 {
+        // Idempotent arrival
+        if barrier_is_tripped(barrier) { deliver 1 }
+        deliver 0
+    }
+
+    // Mark as arrived
+    mem_write_i64(a_buf, p_idx * 8, 1)
+    flex arr_count = mem_read_i64(barrier, 16) + 1
+    mem_write_i64(barrier, 16, arr_count)
+
+    flex cap = mem_read_i64(barrier, 0)
+    if arr_count >= cap {
+        mem_write_i64(barrier, 32, 1) // is_tripped = 1
+        deliver 1
+    }
+
+    deliver 0
+}
+
+// Advance barrier to next generation, resetting arrival states
+open flow barrier_advance(barrier: Int) -> Int {
+    flex cap = mem_read_i64(barrier, 0)
+    flex a_buf = mem_read_i64(barrier, 56)
+    mem_fill(a_buf, 0, cap * 8)
+
+    flex next_gen = mem_read_i64(barrier, 24) + 1
+    mem_write_i64(barrier, 24, next_gen)
+    mem_write_i64(barrier, 16, 0) // arrived_count = 0
+    mem_write_i64(barrier, 32, 0) // is_tripped = 0
+
+    deliver next_gen
+}
+
+// Resets barrier to generation 0, clearing all arrival marks
+open flow barrier_reset(barrier: Int) -> Bool {
+    flex cap = mem_read_i64(barrier, 0)
+    flex a_buf = mem_read_i64(barrier, 56)
+    mem_fill(a_buf, 0, cap * 8)
+
+    mem_write_i64(barrier, 24, 0) // generation = 0
+    mem_write_i64(barrier, 16, 0) // arrived_count = 0
+    mem_write_i64(barrier, 32, 0) // is_tripped = 0
+    deliver true
+}
+
+// Frees all memory associated with the barrier
+open flow barrier_free(barrier: Int) -> Bool {
+    flex p_buf = mem_read_i64(barrier, 48)
+    flex a_buf = mem_read_i64(barrier, 56)
+
+    if p_buf != 0 { free_buffer(p_buf) }
+    if a_buf != 0 { free_buffer(a_buf) }
+    free_buffer(barrier)
+    deliver true
+}

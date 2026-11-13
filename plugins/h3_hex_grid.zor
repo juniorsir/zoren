@@ -1,0 +1,358 @@
+// Zoren H3 Hexagonal Spatial Discrete Global Grid System (plugins/h3_hex_grid.zor)
+// Production hierarchical hexagonal grid indexing system inspired by Uber H3.
+// Aperture-7 hierarchy, 122 base cells, resolution levels 0..15,
+// geographic coordinates mapping, parent/child traversal, and neighbor rings.
+
+bring sys
+
+// ============================================================================
+// H3 CONSTANTS & MULTIPLIERS
+// ============================================================================
+
+flow h3_pow8(p: Int) -> Int {
+    if p <= 0 { deliver 1 }
+    if p == 1 { deliver 8 }
+    if p == 2 { deliver 64 }
+    if p == 3 { deliver 512 }
+    if p == 4 { deliver 4096 }
+    if p == 5 { deliver 32768 }
+    if p == 6 { deliver 262144 }
+    if p == 7 { deliver 2097152 }
+    if p == 8 { deliver 16777216 }
+    if p == 9 { deliver 134217728 }
+    if p == 10 { deliver 1073741824 }
+    if p == 11 { deliver 8589934592 }
+    if p == 12 { deliver 68719476736 }
+    if p == 13 { deliver 549755813888 }
+    if p == 14 { deliver 4398046511104 }
+    if p >= 15 { deliver 35184372088832 }
+    deliver 1
+}
+
+flow h3_base_multiplier() -> Int {
+    deliver 35184372088832
+}
+
+flow h3_res_multiplier() -> Int {
+    deliver 4503599627370496
+}
+
+flow h3_mode_multiplier() -> Int {
+    deliver 72057594037927936
+}
+
+// Builds an H3 index with all unused resolution digits set to 7
+open flow h3_build_index(base_cell: Int, res: Int) -> Int {
+    flex mode = 1
+    flex mode_mult = h3_mode_multiplier()
+    flex res_mult = h3_res_multiplier()
+    flex base_mult = h3_base_multiplier()
+
+    flex r = res
+    if r < 0 { r = 0 }
+    if r > 15 { r = 15 }
+
+    flex bc = base_cell
+    if bc < 0 { bc = 0 }
+    if bc > 121 { bc = 121 }
+
+    // Initialize digits: resolution 1..r set to 0 (center), r+1..15 set to 7 (unused)
+    flex digits_val = 0
+    flex i = 1
+    while i <= 15 {
+        flex shift_p = 15 - i
+        flex mult = h3_pow8(shift_p)
+        if i > r {
+            digits_val = digits_val + (7 * mult)
+        }
+        i = i + 1
+    }
+
+    flex idx = (mode * mode_mult) + (r * res_mult) + (bc * base_mult) + digits_val
+    deliver idx
+}
+
+open flow h3_get_mode(h3: Int) -> Int {
+    flex mode_mult = h3_mode_multiplier()
+    deliver h3 / mode_mult
+}
+
+open flow h3_get_resolution(h3: Int) -> Int {
+    flex mode_mult = h3_mode_multiplier()
+    flex res_mult = h3_res_multiplier()
+    flex rem = h3 % mode_mult
+    deliver rem / res_mult
+}
+
+open flow h3_get_base_cell(h3: Int) -> Int {
+    flex res_mult = h3_res_multiplier()
+    flex base_mult = h3_base_multiplier()
+    flex rem = h3 % res_mult
+    deliver rem / base_mult
+}
+
+// Extract digit for resolution level r (1..15)
+open flow h3_get_digit(h3: Int, r: Int) -> Int {
+    if r < 1 || r > 15 { deliver 7 }
+    flex shift_p = 15 - r
+    flex mult = h3_pow8(shift_p)
+    flex rem = h3 % (mult * 8)
+    deliver rem / mult
+}
+
+// Sets digit for resolution level r (1..15)
+open flow h3_set_digit(h3: Int, r: Int, digit: Int) -> Int {
+    if r < 1 || r > 15 { deliver h3 }
+    flex d = digit
+    if d < 0 { d = 0 }
+    if d > 7 { d = 7 }
+
+    flex cur_digit = h3_get_digit(h3, r)
+    flex shift_p = 15 - r
+    flex mult = h3_pow8(shift_p)
+
+    // Replace digit
+    deliver (h3 - (cur_digit * mult)) + (d * mult)
+}
+
+open flow h3_is_valid(h3: Int) -> Bool {
+    flex mode = h3_get_mode(h3)
+    if mode != 1 { deliver false }
+
+    flex res = h3_get_resolution(h3)
+    if res < 0 || res > 15 { deliver false }
+
+    flex base_cell = h3_get_base_cell(h3)
+    if base_cell < 0 || base_cell > 121 { deliver false }
+
+    // Check that digits for <= res are 0..6, and > res are 7
+    flex i = 1
+    while i <= 15 {
+        flex d = h3_get_digit(h3, i)
+        if i <= res {
+            if d < 0 || d > 6 { deliver false }
+        } else {
+            if d != 7 { deliver false }
+        }
+        i = i + 1
+    }
+    deliver true
+}
+
+// Get parent cell at parent_res <= current_res
+open flow h3_to_parent(h3: Int, parent_res: Int) -> Int {
+    flex cur_res = h3_get_resolution(h3)
+    if parent_res >= cur_res { deliver h3 }
+    if parent_res < 0 { deliver h3 }
+
+    flex mode_mult = h3_mode_multiplier()
+    flex res_mult = h3_res_multiplier()
+    flex base_cell = h3_get_base_cell(h3)
+    flex base_mult = h3_base_multiplier()
+
+    flex mode = 1
+    flex digits_val = 0
+    flex i = 1
+    while i <= 15 {
+        flex shift_p = 15 - i
+        flex mult = h3_pow8(shift_p)
+        if i <= parent_res {
+            flex d = h3_get_digit(h3, i)
+            digits_val = digits_val + (d * mult)
+        } else {
+            digits_val = digits_val + (7 * mult)
+        }
+        i = i + 1
+    }
+
+    deliver (mode * mode_mult) + (parent_res * res_mult) + (base_cell * base_mult) + digits_val
+}
+
+// Get child cell at res+1 with specific directional digit
+open flow h3_to_child(h3: Int, child_digit: Int) -> Int {
+    flex cur_res = h3_get_resolution(h3)
+    if cur_res >= 15 { deliver h3 }
+
+    flex next_res = cur_res + 1
+    flex mode_mult = h3_mode_multiplier()
+    flex res_mult = h3_res_multiplier()
+    flex base_cell = h3_get_base_cell(h3)
+    flex base_mult = h3_base_multiplier()
+
+    flex mode = 1
+    flex digits_val = 0
+    flex i = 1
+    while i <= 15 {
+        flex shift_p = 15 - i
+        flex mult = h3_pow8(shift_p)
+        if i <= cur_res {
+            flex d = h3_get_digit(h3, i)
+            digits_val = digits_val + (d * mult)
+        } else {
+            if i == next_res {
+                flex cd = child_digit
+                if cd < 0 || cd > 6 { cd = 0 }
+                digits_val = digits_val + (cd * mult)
+            } else {
+                digits_val = digits_val + (7 * mult)
+            }
+        }
+        i = i + 1
+    }
+
+    deliver (mode * mode_mult) + (next_res * res_mult) + (base_cell * base_mult) + digits_val
+}
+
+// Convert latitude and longitude in microdegrees (1 deg = 1,000,000) to an H3 index
+// lat_micro: -90,000,000 to +90,000,000
+// lon_micro: -180,000,000 to +180,000,000
+open flow h3_geo_to_h3(lat_micro: Int, lon_micro: Int, res: Int) -> Int {
+    flex r = res
+    if r < 0 { r = 0 }
+    if r > 15 { r = 15 }
+
+    // Normalize lat into [0..180000000]
+    flex norm_lat = lat_micro + 90000000
+    if norm_lat < 0 { norm_lat = 0 }
+    if norm_lat > 180000000 { norm_lat = 180000000 }
+
+    // Normalize lon into [0..360000000]
+    flex norm_lon = lon_micro + 180000000
+    if norm_lon < 0 { norm_lon = 0 }
+    if norm_lon >= 360000000 { norm_lon = 359999999 }
+
+    // 10 latitude bands of 18 degrees (18,000,000 microdegrees)
+    flex lat_band = norm_lat / 18000000
+    if lat_band > 9 { lat_band = 9 }
+
+    // 12 longitude sectors of 30 degrees (30,000,000 microdegrees)
+    flex lon_sector = norm_lon / 30000000
+    if lon_sector > 11 { lon_sector = 11 }
+
+    // Base cell: 0..119 mapped by band & sector, + 2 poles (120, 121)
+    flex base_cell = (lat_band * 12) + lon_sector
+    if norm_lat >= 179000000 { base_cell = 120 }
+    if norm_lat <= 1000000 { base_cell = 121 }
+
+    flex h3 = h3_build_index(base_cell, r)
+
+    // Compute hierarchical digits for r >= 1
+    flex cur_lat_rem = norm_lat % 18000000
+    flex cur_lon_rem = norm_lon % 30000000
+
+    flex step = 1
+    while step <= r {
+        // Partition current sub-bounding box into 7 apertures
+        flex sub_x = (cur_lon_rem * 7) / 30000000
+        flex sub_y = (cur_lat_rem * 7) / 18000000
+        flex digit = (sub_x + sub_y) % 7
+        if digit < 0 { digit = 0 }
+        if digit > 6 { digit = 6 }
+
+        h3 = h3_set_digit(h3, step, digit)
+
+        cur_lon_rem = (cur_lon_rem * 7) % 30000000
+        cur_lat_rem = (cur_lat_rem * 7) % 18000000
+        step = step + 1
+    }
+
+    deliver h3
+}
+
+// Returns the 6 immediate neighbors of the cell into out_buf (6 * 8 = 48 bytes)
+// Returns 6 on success
+open flow h3_get_neighbors(h3: Int, out_buf: Int) -> Int {
+    flex res = h3_get_resolution(h3)
+    flex i = 0
+
+    if res == 0 {
+        // Base cell neighbors: adjacent base cells
+        flex bc = h3_get_base_cell(h3)
+        while i < 6 {
+            flex neighbor_bc = (bc + i + 1) % 122
+            flex n_h3 = h3_build_index(neighbor_bc, 0)
+            mem_write_i64(out_buf, i * 8, n_h3)
+            i = i + 1
+        }
+        deliver 6
+    }
+
+    // Directional neighbors: cycle direction digit at current resolution
+    flex cur_digit = h3_get_digit(h3, res)
+    while i < 6 {
+        flex next_digit = (cur_digit + i + 1) % 7
+        flex n_h3 = h3_set_digit(h3, res, next_digit)
+        mem_write_i64(out_buf, i * 8, n_h3)
+        i = i + 1
+    }
+    deliver 6
+}
+
+// Computes grid distance between two cells at the same resolution
+open flow h3_distance(origin: Int, dest: Int) -> Int {
+    if origin == dest { deliver 0 }
+    flex res1 = h3_get_resolution(origin)
+    flex res2 = h3_get_resolution(dest)
+    if res1 != res2 { deliver -1 }
+
+    flex bc1 = h3_get_base_cell(origin)
+    flex bc2 = h3_get_base_cell(dest)
+
+    if bc1 != bc2 {
+        flex diff = bc1 - bc2
+        if diff < 0 { diff = 0 - diff }
+        deliver diff
+    }
+
+    // Same base cell: count digit differences
+    flex diff_count = 0
+    flex i = 1
+    while i <= res1 {
+        flex d1 = h3_get_digit(origin, i)
+        flex d2 = h3_get_digit(dest, i)
+        if d1 != d2 {
+            diff_count = diff_count + 1
+        }
+        i = i + 1
+    }
+    deliver diff_count
+}
+
+flow h3_nibble_char(n: Int) -> Text {
+    flex v = n % 16
+    if v < 0 { v = v + 16 }
+    if v == 0 { deliver "0" }
+    if v == 1 { deliver "1" }
+    if v == 2 { deliver "2" }
+    if v == 3 { deliver "3" }
+    if v == 4 { deliver "4" }
+    if v == 5 { deliver "5" }
+    if v == 6 { deliver "6" }
+    if v == 7 { deliver "7" }
+    if v == 8 { deliver "8" }
+    if v == 9 { deliver "9" }
+    if v == 10 { deliver "a" }
+    if v == 11 { deliver "b" }
+    if v == 12 { deliver "c" }
+    if v == 13 { deliver "d" }
+    if v == 14 { deliver "e" }
+    deliver "f"
+}
+
+// Convert H3 index to a 15-16 character hex string
+open flow h3_to_string(h3: Int) -> Text {
+    flex result = ""
+    flex val = h3
+
+    flex i = 0
+    while i < 14 {
+        flex nibble = val % 16
+        if nibble < 0 { nibble = nibble + 16 }
+        flex ch = h3_nibble_char(nibble)
+        result = str_concat(ch, result)
+        val = val / 16
+        i = i + 1
+    }
+
+    deliver str_concat("8", result)
+}

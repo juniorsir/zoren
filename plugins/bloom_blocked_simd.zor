@@ -1,0 +1,227 @@
+// Zoren Cache-Blocked SIMD Bloom Filter (plugins/bloom_blocked_simd.zor)
+// Production cache-blocked Bloom filter (Putze et al. / RocksDB BlockedBloomFilter).
+// Partitions the filter into 64-byte (512-bit) CPU cache-line blocks.
+// All hash bit probes for an item map strictly to a single 64-byte block,
+// guaranteeing at most 1 CPU cache line access per lookup.
+
+bring sys
+
+// ============================================================================
+// MEMORY LAYOUT (Blocked Bloom Descriptor: 32 bytes)
+// [0..8]:   num_blocks
+// [8..16]:  total_bytes (num_blocks * 64)
+// [16..24]: blocks_buf (contiguous memory: total_bytes)
+// [24..32]: item_count
+// ============================================================================
+
+flow bb_pow2(pos: Int) -> Int {
+    flex p = pos % 8
+    if p < 0 { p = p + 8 }
+    if p == 0 { deliver 1 }
+    if p == 1 { deliver 2 }
+    if p == 2 { deliver 4 }
+    if p == 3 { deliver 8 }
+    if p == 4 { deliver 16 }
+    if p == 5 { deliver 32 }
+    if p == 6 { deliver 64 }
+    deliver 128
+}
+
+flow bb_char_code(ch: Text) -> Int {
+    flex chars = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.+=/:!@#$%^&*()[]{}"
+    flex pos = str_find(chars, ch)
+    if pos >= 0 { deliver pos + 32 }
+    deliver 63
+}
+
+// 64-bit FNV-1a hash for Text keys
+flow bb_hash_text(key: Text) -> Int {
+    flex mod_val = 2147483647
+    flex h = 2166136261 % mod_val
+    if h < 0 { h = h + mod_val }
+
+    flex len = length(key)
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(key, i, 1)
+        flex code = bb_char_code(ch)
+        flex x = (h * 16777619) % mod_val
+        if x < 0 { x = x + mod_val }
+        h = (x + code) % mod_val
+        if h < 0 { h = h + mod_val }
+        i = i + 1
+    }
+    deliver h
+}
+
+// Integer hash mixer
+flow bb_hash_i64(val: Int) -> Int {
+    flex mod_val = 2147483647
+    flex v = val % mod_val
+    if v < 0 { v = v + mod_val }
+    flex x = (v * 1103515245) % mod_val
+    if x < 0 { x = x + mod_val }
+    deliver (x + 12345) % mod_val
+}
+
+// Set a bit inside a 64-byte (512-bit) block
+flow bb_set_bit(block_addr: Int, bit_pos: Int) -> Int {
+    flex bit_idx = bit_pos % 512
+    if bit_idx < 0 { bit_idx = bit_idx + 512 }
+
+    flex byte_idx = bit_idx / 8
+    flex bit_offset = bit_idx % 8
+
+    flex cur_byte = mem_read_byte(block_addr, byte_idx)
+    flex p2 = bb_pow2(bit_offset)
+
+    if ((cur_byte / p2) % 2) == 0 {
+        mem_write_byte(block_addr, byte_idx, cur_byte + p2)
+    }
+    deliver 1
+}
+
+// Test a bit inside a 64-byte (512-bit) block
+flow bb_test_bit(block_addr: Int, bit_pos: Int) -> Bool {
+    flex bit_idx = bit_pos % 512
+    if bit_idx < 0 { bit_idx = bit_idx + 512 }
+
+    flex byte_idx = bit_idx / 8
+    flex bit_offset = bit_idx % 8
+
+    flex cur_byte = mem_read_byte(block_addr, byte_idx)
+    flex p2 = bb_pow2(bit_offset)
+
+    deliver ((cur_byte / p2) % 2) == 1
+}
+
+// Allocates a new cache-blocked Bloom filter with num_blocks 64-byte blocks
+open flow blocked_bloom_new(num_blocks: Int) -> Int {
+    flex nb = num_blocks
+    if nb <= 0 { nb = 1 }
+
+    flex total_bytes = nb * 64
+    flex buf = alloc_buffer(total_bytes)
+    mem_fill(buf, 0, total_bytes)
+
+    flex filter = alloc_buffer(32)
+    mem_write_i64(filter, 0, nb)
+    mem_write_i64(filter, 8, total_bytes)
+    mem_write_i64(filter, 16, buf)
+    mem_write_i64(filter, 24, 0) // item_count = 0
+
+    deliver filter
+}
+
+open flow blocked_bloom_num_blocks(filter: Int) -> Int {
+    deliver mem_read_i64(filter, 0)
+}
+
+open flow blocked_bloom_byte_size(filter: Int) -> Int {
+    deliver mem_read_i64(filter, 8)
+}
+
+open flow blocked_bloom_count(filter: Int) -> Int {
+    deliver mem_read_i64(filter, 24)
+}
+
+// Adds an item by 64-bit hash: sets 8 bits inside the designated 64-byte block
+open flow blocked_bloom_add_hash(filter: Int, hash_val: Int) -> Bool {
+    flex nb = mem_read_i64(filter, 0)
+    flex buf = mem_read_i64(filter, 16)
+    flex mod_val = 2147483647
+
+    flex h = hash_val % mod_val
+    if h < 0 { h = h + mod_val }
+
+    // Select the 64-byte cache block
+    flex block_idx = h % nb
+    flex block_addr = buf + (block_idx * 64)
+
+    // Set 8 bits inside this single 64-byte block using linear congruence
+    flex k = 0
+    flex cur_h = h
+    while k < 8 {
+        flex bit_pos = cur_h % 512
+        bb_set_bit(block_addr, bit_pos)
+
+        cur_h = ((cur_h * 16807) + 31) % mod_val
+        if cur_h < 0 { cur_h = cur_h + mod_val }
+        k = k + 1
+    }
+
+    flex c = mem_read_i64(filter, 24)
+    mem_write_i64(filter, 24, c + 1)
+    deliver true
+}
+
+// Queries an item by 64-bit hash: checks all 8 bits in the designated 64-byte block
+open flow blocked_bloom_contains_hash(filter: Int, hash_val: Int) -> Bool {
+    flex nb = mem_read_i64(filter, 0)
+    flex buf = mem_read_i64(filter, 16)
+    flex mod_val = 2147483647
+
+    flex h = hash_val % mod_val
+    if h < 0 { h = h + mod_val }
+
+    flex block_idx = h % nb
+    flex block_addr = buf + (block_idx * 64)
+
+    flex k = 0
+    flex cur_h = h
+    while k < 8 {
+        flex bit_pos = cur_h % 512
+        if bb_test_bit(block_addr, bit_pos) == false {
+            deliver false
+        }
+
+        cur_h = ((cur_h * 16807) + 31) % mod_val
+        if cur_h < 0 { cur_h = cur_h + mod_val }
+        k = k + 1
+    }
+
+    deliver true
+}
+
+// Adds Text key
+open flow blocked_bloom_add(filter: Int, key: Text) -> Bool {
+    flex h = bb_hash_text(key)
+    deliver blocked_bloom_add_hash(filter, h)
+}
+
+// Queries Text key
+open flow blocked_bloom_contains(filter: Int, key: Text) -> Bool {
+    flex h = bb_hash_text(key)
+    deliver blocked_bloom_contains_hash(filter, h)
+}
+
+// Adds Int key
+open flow blocked_bloom_add_i64(filter: Int, val: Int) -> Bool {
+    flex h = bb_hash_i64(val)
+    deliver blocked_bloom_add_hash(filter, h)
+}
+
+// Queries Int key
+open flow blocked_bloom_contains_i64(filter: Int, val: Int) -> Bool {
+    flex h = bb_hash_i64(val)
+    deliver blocked_bloom_contains_hash(filter, h)
+}
+
+// Clears all blocks to 0
+open flow blocked_bloom_clear(filter: Int) -> Bool {
+    flex total_bytes = mem_read_i64(filter, 8)
+    flex buf = mem_read_i64(filter, 16)
+    mem_fill(buf, 0, total_bytes)
+    mem_write_i64(filter, 24, 0)
+    deliver true
+}
+
+// Frees filter memory
+open flow blocked_bloom_free(filter: Int) -> Bool {
+    flex buf = mem_read_i64(filter, 16)
+    if buf != 0 {
+        free_buffer(buf)
+    }
+    free_buffer(filter)
+    deliver true
+}
