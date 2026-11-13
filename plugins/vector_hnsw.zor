@@ -1,0 +1,250 @@
+// Zoren Hierarchical Navigable Small World (HNSW) Vector Index (plugins/vector_hnsw.zor)
+// Production proximity graph index for Approximate Nearest Neighbor (ANN) search (Malkov-Yashunin).
+// Implements multi-dimensional vector storage, squared L2 Euclidean distance calculation,
+// greedy graph walk pathfinding, and dynamic neighbor linking.
+
+bring sys
+
+// ============================================================================
+// MEMORY LAYOUT (HNSW Header: 56 bytes)
+// [0..8]:   dim (vector dimensions)
+// [8..16]:  max_elements
+// [16..24]: m (maximum edges per node)
+// [24..32]: cur_elements (total vectors indexed)
+// [32..40]: vectors_buf (max_elements * dim * 8 bytes)
+// [40..48]: graph_buf (max_elements * m * 8 bytes)
+// [48..56]: entry_point (index of root entry point, -1 if empty)
+// ============================================================================
+
+open flow hnsw_new(dim: Int, max_elements: Int, m: Int) -> Int {
+    flex d = dim
+    if d <= 0 { d = 4 }
+    flex max_n = max_elements
+    if max_n <= 0 { max_n = 64 }
+    flex edges = m
+    if edges <= 0 { edges = 4 }
+
+    flex v_bytes = max_n * d * 8
+    flex v_buf = alloc_buffer(v_bytes)
+    mem_fill(v_buf, 0, v_bytes)
+
+    flex g_bytes = max_n * edges * 8
+    flex g_buf = alloc_buffer(g_bytes)
+    // Initialize all graph slots to -1 (no edge)
+    flex total_slots = max_n * edges
+    flex i = 0
+    while i < total_slots {
+        mem_write_i64(g_buf, i * 8, 0 - 1)
+        i = i + 1
+    }
+
+    flex index = alloc_buffer(56)
+    mem_write_i64(index, 0, d)
+    mem_write_i64(index, 8, max_n)
+    mem_write_i64(index, 16, edges)
+    mem_write_i64(index, 24, 0)      // cur_elements = 0
+    mem_write_i64(index, 32, v_buf)
+    mem_write_i64(index, 40, g_buf)
+    mem_write_i64(index, 48, 0 - 1)  // entry_point = -1
+
+    deliver index
+}
+
+open flow hnsw_dim(hnsw: Int) -> Int {
+    deliver mem_read_i64(hnsw, 0)
+}
+
+open flow hnsw_size(hnsw: Int) -> Int {
+    deliver mem_read_i64(hnsw, 24)
+}
+
+open flow hnsw_entry_point(hnsw: Int) -> Int {
+    deliver mem_read_i64(hnsw, 48)
+}
+
+// Compute squared L2 distance between vector at index id and external query_buf
+open flow hnsw_query_distance(hnsw: Int, id: Int, query_buf: Int) -> Int {
+    flex d = mem_read_i64(hnsw, 0)
+    flex v_buf = mem_read_i64(hnsw, 32)
+    flex v_offset = id * d * 8
+
+    flex dist = 0
+    flex i = 0
+    while i < d {
+        flex v_val = mem_read_i64(v_buf, v_offset + (i * 8))
+        flex q_val = mem_read_i64(query_buf, i * 8)
+        flex diff = v_val - q_val
+        dist = dist + (diff * diff)
+        i = i + 1
+    }
+    deliver dist
+}
+
+// Compute squared L2 distance between two stored vectors
+open flow hnsw_distance_l2(hnsw: Int, id1: Int, id2: Int) -> Int {
+    flex d = mem_read_i64(hnsw, 0)
+    flex v_buf = mem_read_i64(hnsw, 32)
+    flex off1 = id1 * d * 8
+    flex off2 = id2 * d * 8
+
+    flex dist = 0
+    flex i = 0
+    while i < d {
+        flex v1 = mem_read_i64(v_buf, off1 + (i * 8))
+        flex v2 = mem_read_i64(v_buf, off2 + (i * 8))
+        flex diff = v1 - v2
+        dist = dist + (diff * diff)
+        i = i + 1
+    }
+    deliver dist
+}
+
+open flow hnsw_get_neighbor(hnsw: Int, node_id: Int, edge_idx: Int) -> Int {
+    flex m = mem_read_i64(hnsw, 16)
+    if edge_idx < 0 || edge_idx >= m { deliver 0 - 1 }
+    flex g_buf = mem_read_i64(hnsw, 40)
+    flex off = ((node_id * m) + edge_idx) * 8
+    deliver mem_read_i64(g_buf, off)
+}
+
+flow hnsw_add_edge(hnsw: Int, u: Int, v: Int) -> Bool {
+    flex m = mem_read_i64(hnsw, 16)
+    flex g_buf = mem_read_i64(hnsw, 40)
+
+    // Check if edge already exists or find empty slot
+    flex u_base = u * m
+    flex i = 0
+    flex empty_slot = 0 - 1
+    while i < m {
+        flex neighbor = mem_read_i64(g_buf, (u_base + i) * 8)
+        if neighbor == v { deliver true }
+        if neighbor < 0 && empty_slot < 0 {
+            empty_slot = i
+        }
+        i = i + 1
+    }
+
+    if empty_slot >= 0 {
+        mem_write_i64(g_buf, (u_base + empty_slot) * 8, v)
+        deliver true
+    }
+
+    // Slots full: replace farthest neighbor if v is closer
+    flex d_v = hnsw_distance_l2(hnsw, u, v)
+    flex worst_idx = 0 - 1
+    flex max_d = d_v
+
+    i = 0
+    while i < m {
+        flex n_id = mem_read_i64(g_buf, (u_base + i) * 8)
+        if n_id >= 0 {
+            flex d_n = hnsw_distance_l2(hnsw, u, n_id)
+            if d_n > max_d {
+                max_d = d_n
+                worst_idx = i
+            }
+        }
+        i = i + 1
+    }
+
+    if worst_idx >= 0 {
+        mem_write_i64(g_buf, (u_base + worst_idx) * 8, v)
+        deliver true
+    }
+
+    deliver false
+}
+
+// Greedy search: walk from entry point to the nearest local minimum
+open flow hnsw_search_nearest(hnsw: Int, query_buf: Int) -> Int {
+    flex count = mem_read_i64(hnsw, 24)
+    if count == 0 { deliver 0 - 1 }
+
+    flex cur = mem_read_i64(hnsw, 48)
+    if cur < 0 { deliver 0 - 1 }
+
+    flex cur_dist = hnsw_query_distance(hnsw, cur, query_buf)
+    flex m = mem_read_i64(hnsw, 16)
+    flex g_buf = mem_read_i64(hnsw, 40)
+
+    flex changed = true
+    while changed {
+        changed = false
+        flex cur_base = cur * m
+        flex i = 0
+        while i < m {
+            flex neighbor = mem_read_i64(g_buf, (cur_base + i) * 8)
+            if neighbor >= 0 {
+                flex d = hnsw_query_distance(hnsw, neighbor, query_buf)
+                if d < cur_dist {
+                    cur_dist = d
+                    cur = neighbor
+                    changed = true
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    deliver cur
+}
+
+// Adds a new vector into the HNSW index and connects it to its nearest neighbors
+open flow hnsw_add_point(hnsw: Int, vec_buf: Int) -> Int {
+    flex count = mem_read_i64(hnsw, 24)
+    flex max_n = mem_read_i64(hnsw, 8)
+    if count >= max_n { deliver 0 - 1 }
+
+    flex d = mem_read_i64(hnsw, 0)
+    flex v_buf = mem_read_i64(hnsw, 32)
+    flex new_id = count
+
+    // Copy vector data
+    flex v_offset = new_id * d * 8
+    flex i = 0
+    while i < d {
+        flex val = mem_read_i64(vec_buf, i * 8)
+        mem_write_i64(v_buf, v_offset + (i * 8), val)
+        i = i + 1
+    }
+
+    mem_write_i64(hnsw, 24, count + 1)
+
+    // First element becomes entry point
+    if count == 0 {
+        mem_write_i64(hnsw, 48, new_id)
+        deliver new_id
+    }
+
+    // Find nearest neighbor to connect bidirectionally
+    flex nearest = hnsw_search_nearest(hnsw, vec_buf)
+    if nearest >= 0 {
+        hnsw_add_edge(hnsw, new_id, nearest)
+        hnsw_add_edge(hnsw, nearest, new_id)
+
+        // Also connect to neighbors of nearest
+        flex m = mem_read_i64(hnsw, 16)
+        flex j = 0
+        while j < m {
+            flex n_id = hnsw_get_neighbor(hnsw, nearest, j)
+            if n_id >= 0 && n_id != new_id {
+                hnsw_add_edge(hnsw, new_id, n_id)
+                hnsw_add_edge(hnsw, n_id, new_id)
+            }
+            j = j + 1
+        }
+    }
+
+    deliver new_id
+}
+
+open flow hnsw_free(hnsw: Int) -> Bool {
+    if hnsw != 0 {
+        flex v_buf = mem_read_i64(hnsw, 32)
+        flex g_buf = mem_read_i64(hnsw, 40)
+        if v_buf != 0 { free_buffer(v_buf) }
+        if g_buf != 0 { free_buffer(g_buf) }
+        free_buffer(hnsw)
+    }
+    deliver true
+}

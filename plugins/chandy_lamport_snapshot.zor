@@ -1,0 +1,237 @@
+// Zoren Chandy-Lamport Distributed Global Snapshot Suite (plugins/chandy_lamport_snapshot.zor)
+// Production implementation of the Chandy-Lamport global snapshot algorithm (1985).
+// Captures causally consistent distributed global states (process states + in-flight channel states)
+// without halting execution, supporting distributed checkpointing and invariant verification.
+
+bring sys
+
+// ============================================================================
+// MEMORY LAYOUT (Chandy-Lamport Snapshot Header: 48 bytes)
+// [0..8]:   process_count (N)
+// [8..16]:  snapshot_id
+// [16..24]: is_active (1 = snapshot in progress, 0 = idle/complete)
+// [24..32]: recorded_states_buf (N * 8 bytes: local state of each process, -1 if unrecorded)
+// [32..40]: channel_markers_buf (N * N * 8 bytes: 1 if marker received from channel i -> j)
+// [40..48]: channel_in_flight_buf (N * N * 8 bytes: accumulated in-flight messages on channel i -> j)
+// ============================================================================
+
+flow cls_ch_idx(cls: Int, from_pid: Int, to_pid: Int) -> Int {
+    flex n = mem_read_i64(cls, 0)
+    deliver (from_pid * n) + to_pid
+}
+
+open flow cls_new(process_count: Int) -> Int {
+    flex n = process_count
+    if n <= 0 { n = 2 }
+
+    flex s_buf = alloc_buffer(n * 8)
+    flex i = 0
+    while i < n {
+        mem_write_i64(s_buf, i * 8, 0 - 1) // -1 = unrecorded
+        i = i + 1
+    }
+
+    flex total_ch = n * n
+    flex m_buf = alloc_buffer(total_ch * 8)
+    mem_fill(m_buf, 0, total_ch * 8)
+
+    flex if_buf = alloc_buffer(total_ch * 8)
+    mem_fill(if_buf, 0, total_ch * 8)
+
+    flex cls = alloc_buffer(48)
+    mem_write_i64(cls, 0, n)
+    mem_write_i64(cls, 8, 0)       // snapshot_id = 0
+    mem_write_i64(cls, 16, 0)      // is_active = 0
+    mem_write_i64(cls, 24, s_buf)
+    mem_write_i64(cls, 32, m_buf)
+    mem_write_i64(cls, 40, if_buf)
+
+    deliver cls
+}
+
+open flow cls_process_count(cls: Int) -> Int {
+    deliver mem_read_i64(cls, 0)
+}
+
+open flow cls_snapshot_id(cls: Int) -> Int {
+    deliver mem_read_i64(cls, 8)
+}
+
+open flow cls_is_active(cls: Int) -> Bool {
+    deliver mem_read_i64(cls, 16) == 1
+}
+
+// Initiates snapshot S from initiator_pid
+open flow cls_initiate_snapshot(cls: Int, initiator_pid: Int, snap_id: Int, local_state: Int) -> Bool {
+    flex n = mem_read_i64(cls, 0)
+    if initiator_pid < 0 || initiator_pid >= n { deliver false }
+
+    flex s_buf = mem_read_i64(cls, 24)
+    flex m_buf = mem_read_i64(cls, 32)
+    flex if_buf = mem_read_i64(cls, 40)
+
+    // Reset markers and in-flight channels
+    flex total_ch = n * n
+    mem_fill(m_buf, 0, total_ch * 8)
+    mem_fill(if_buf, 0, total_ch * 8)
+
+    flex i = 0
+    while i < n {
+        mem_write_i64(s_buf, i * 8, 0 - 1)
+        i = i + 1
+    }
+
+    mem_write_i64(cls, 8, snap_id)
+    mem_write_i64(cls, 16, 1) // is_active = 1
+
+    // Record initiator local state
+    mem_write_i64(s_buf, initiator_pid * 8, local_state)
+
+    // Initiator implicitly receives marker from self
+    flex self_ch = cls_ch_idx(cls, initiator_pid, initiator_pid)
+    mem_write_i64(m_buf, self_ch * 8, 1)
+
+    deliver true
+}
+
+// Process to_pid receives marker from from_pid
+open flow cls_receive_marker(cls: Int, from_pid: Int, to_pid: Int, local_state_if_first: Int) -> Bool {
+    flex n = mem_read_i64(cls, 0)
+    if from_pid < 0 || from_pid >= n || to_pid < 0 || to_pid >= n { deliver false }
+    if mem_read_i64(cls, 16) == 0 { deliver false }
+
+    flex s_buf = mem_read_i64(cls, 24)
+    flex m_buf = mem_read_i64(cls, 32)
+
+    flex cur_state = mem_read_i64(s_buf, to_pid * 8)
+    if cur_state < 0 {
+        // First marker received: record local state
+        mem_write_i64(s_buf, to_pid * 8, local_state_if_first)
+    }
+
+    // Mark channel from_pid -> to_pid as marker received (stops channel recording)
+    flex ch = cls_ch_idx(cls, from_pid, to_pid)
+    mem_write_i64(m_buf, ch * 8, 1)
+
+    deliver true
+}
+
+// In-flight message received on channel from_pid -> to_pid
+// If to_pid has recorded its state but has not yet received a marker from from_pid,
+// the message was sent before from_pid sent its marker -> record in channel state!
+open flow cls_record_message(cls: Int, from_pid: Int, to_pid: Int, msg_val: Int) -> Bool {
+    flex n = mem_read_i64(cls, 0)
+    if from_pid < 0 || from_pid >= n || to_pid < 0 || to_pid >= n { deliver false }
+    if mem_read_i64(cls, 16) == 0 { deliver false }
+
+    flex s_buf = mem_read_i64(cls, 24)
+    flex m_buf = mem_read_i64(cls, 32)
+    flex if_buf = mem_read_i64(cls, 40)
+
+    flex to_recorded = mem_read_i64(s_buf, to_pid * 8) >= 0
+    flex ch = cls_ch_idx(cls, from_pid, to_pid)
+    flex marker_received = mem_read_i64(m_buf, ch * 8) == 1
+
+    if to_recorded && !marker_received {
+        flex cur_if = mem_read_i64(if_buf, ch * 8)
+        mem_write_i64(if_buf, ch * 8, cur_if + msg_val)
+        deliver true
+    }
+
+    deliver false
+}
+
+// Checks if all processes have recorded state and all channels have received markers
+open flow cls_is_snapshot_complete(cls: Int) -> Bool {
+    if mem_read_i64(cls, 16) == 0 { deliver false }
+    flex n = mem_read_i64(cls, 0)
+    flex s_buf = mem_read_i64(cls, 24)
+    flex m_buf = mem_read_i64(cls, 32)
+
+    // Check all processes recorded state
+    flex i = 0
+    while i < n {
+        if mem_read_i64(s_buf, i * 8) < 0 {
+            deliver false
+        }
+        i = i + 1
+    }
+
+    // Check all inter-process channels received markers
+    flex u = 0
+    while u < n {
+        flex v = 0
+        while v < n {
+            if u != v {
+                flex ch = cls_ch_idx(cls, u, v)
+                if mem_read_i64(m_buf, ch * 8) == 0 {
+                    deliver false
+                }
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+
+    deliver true
+}
+
+open flow cls_get_recorded_state(cls: Int, pid: Int) -> Int {
+    flex n = mem_read_i64(cls, 0)
+    if pid < 0 || pid >= n { deliver 0 - 1 }
+    flex s_buf = mem_read_i64(cls, 24)
+    deliver mem_read_i64(s_buf, pid * 8)
+}
+
+open flow cls_get_channel_state(cls: Int, from_pid: Int, to_pid: Int) -> Int {
+    flex n = mem_read_i64(cls, 0)
+    if from_pid < 0 || from_pid >= n || to_pid < 0 || to_pid >= n { deliver 0 }
+    flex if_buf = mem_read_i64(cls, 40)
+    flex ch = cls_ch_idx(cls, from_pid, to_pid)
+    deliver mem_read_i64(if_buf, ch * 8)
+}
+
+// Computes the total system invariant sum across all process states and in-flight channel messages
+open flow cls_global_sum(cls: Int) -> Int {
+    flex n = mem_read_i64(cls, 0)
+    flex s_buf = mem_read_i64(cls, 24)
+    flex if_buf = mem_read_i64(cls, 40)
+
+    flex total = 0
+    flex i = 0
+    while i < n {
+        flex s = mem_read_i64(s_buf, i * 8)
+        if s > 0 {
+            total = total + s
+        }
+        i = i + 1
+    }
+
+    flex u = 0
+    while u < n {
+        flex v = 0
+        while v < n {
+            if u != v {
+                flex ch = cls_ch_idx(cls, u, v)
+                total = total + mem_read_i64(if_buf, ch * 8)
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+
+    deliver total
+}
+
+open flow cls_free(cls: Int) -> Bool {
+    if cls != 0 {
+        flex s_buf = mem_read_i64(cls, 24)
+        flex m_buf = mem_read_i64(cls, 32)
+        flex if_buf = mem_read_i64(cls, 40)
+        if s_buf != 0 { free_buffer(s_buf) }
+        if m_buf != 0 { free_buffer(m_buf) }
+        if if_buf != 0 { free_buffer(if_buf) }
+        free_buffer(cls)
+    }
+    deliver true
+}

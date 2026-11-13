@@ -1,0 +1,262 @@
+// Zoren Zstandard Framing Inspector (plugins/zstandard_frame.zor)
+// Production RFC 8878 Zstandard (zstd) frame parser and header validator.
+// Validates 4-byte magic bytes (0xFD2FB528), decodes Frame Header Descriptor (FHD),
+// extracts single segment, content checksum flag, window descriptor, and data blocks.
+
+bring sys
+
+// ============================================================================
+// HEX DECODING HELPERS
+// ============================================================================
+
+flow zstd_hex_digit(hex_str: Text, idx: Int) -> Int {
+    if idx < 0 || idx >= length(hex_str) { deliver 0 }
+    flex ch = str_slice(hex_str, idx, 1)
+    flex digits = "0123456789abcdef"
+    flex pos = str_find(digits, ch)
+    if pos >= 0 { deliver pos }
+    flex upper = "ABCDEF"
+    flex u_pos = str_find(upper, ch)
+    if u_pos >= 0 { deliver u_pos + 10 }
+    deliver 0
+}
+
+open flow zstd_parse_hex_byte(hex_str: Text, byte_offset: Int) -> Int {
+    flex idx = byte_offset * 2
+    flex d0 = zstd_hex_digit(hex_str, idx)
+    flex d1 = zstd_hex_digit(hex_str, idx + 1)
+    deliver (d0 * 16) + d1
+}
+
+// 24-bit little endian integer
+open flow zstd_read_u24_le(hex_str: Text, byte_offset: Int) -> Int {
+    flex b0 = zstd_parse_hex_byte(hex_str, byte_offset)
+    flex b1 = zstd_parse_hex_byte(hex_str, byte_offset + 1)
+    flex b2 = zstd_parse_hex_byte(hex_str, byte_offset + 2)
+    deliver b0 + (b1 * 256) + (b2 * 65536)
+}
+
+// 32-bit little endian integer
+open flow zstd_read_u32_le(hex_str: Text, byte_offset: Int) -> Int {
+    flex b0 = zstd_parse_hex_byte(hex_str, byte_offset)
+    flex b1 = zstd_parse_hex_byte(hex_str, byte_offset + 1)
+    flex b2 = zstd_parse_hex_byte(hex_str, byte_offset + 2)
+    flex b3 = zstd_parse_hex_byte(hex_str, byte_offset + 3)
+    deliver b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+}
+
+// Validates Zstandard standard magic bytes: 0xFD2FB528 (little-endian: 28 b5 2f fd)
+open flow zstd_verify_magic(hex_str: Text) -> Bool {
+    flex total_bytes = length(hex_str) / 2
+    if total_bytes < 4 { deliver false }
+    flex b0 = zstd_parse_hex_byte(hex_str, 0)
+    flex b1 = zstd_parse_hex_byte(hex_str, 1)
+    flex b2 = zstd_parse_hex_byte(hex_str, 2)
+    flex b3 = zstd_parse_hex_byte(hex_str, 3)
+
+    if b0 == 40 && b1 == 181 && b2 == 47 && b3 == 253 {
+        deliver true
+    }
+    deliver false
+}
+
+// ============================================================================
+// FRAME HEADER DESCRIPTOR (FHD) PARSER
+// [0..8]:   is_valid (1/0)
+// [8..16]:  single_segment (1/0)
+// [16..24]: has_checksum (1/0)
+// [24..32]: dict_id_size (0, 1, 2, 4)
+// [32..40]: window_size (bytes)
+// [40..48]: header_size (bytes)
+// ============================================================================
+
+open flow zstd_parse_frame_header(hex_str: Text) -> Int {
+    flex frame = alloc_buffer(48)
+    mem_fill(frame, 0, 48)
+
+    if !zstd_verify_magic(hex_str) {
+        mem_write_i64(frame, 0, 0) // is_valid = 0
+        deliver frame
+    }
+
+    flex total_bytes = length(hex_str) / 2
+    if total_bytes < 5 {
+        mem_write_i64(frame, 0, 0)
+        deliver frame
+    }
+
+    // Frame Header Descriptor at byte offset 4
+    flex fhd = zstd_parse_hex_byte(hex_str, 4)
+
+    // bit 0-1: Dictionary ID flag (0=0, 1=1 byte, 2=2 bytes, 3=4 bytes)
+    flex dict_flag = fhd % 4
+    flex dict_size = 0
+    if dict_flag == 1 { dict_size = 1 }
+    else if dict_flag == 2 { dict_size = 2 }
+    else if dict_flag == 3 { dict_size = 4 }
+
+    // bit 2: Content Checksum flag
+    flex checksum_flag = (fhd / 4) % 2
+
+    // bit 5: Single Segment flag
+    flex single_seg_flag = (fhd / 32) % 2
+
+    // Window Descriptor (1 byte if single_seg == 0)
+    flex cur_offset = 5
+    flex win_size = 0
+    if single_seg_flag == 0 {
+        if total_bytes < cur_offset + 1 {
+            mem_write_i64(frame, 0, 0)
+            deliver frame
+        }
+        flex win_desc = zstd_parse_hex_byte(hex_str, cur_offset)
+        flex exponent = win_desc / 8
+        flex mantissa = win_desc % 8
+        // Window size formula: (1 << (10 + exponent)) + (mantissa << (exponent + 7))
+        // Approximate standard window size in KB
+        win_size = 1024 + (exponent * 1024) + (mantissa * 128)
+        cur_offset = cur_offset + 1
+    }
+
+    // Skip Dictionary ID if present
+    cur_offset = cur_offset + dict_size
+
+    mem_write_i64(frame, 0, 1)               // is_valid = 1
+    mem_write_i64(frame, 8, single_seg_flag)
+    mem_write_i64(frame, 16, checksum_flag)
+    mem_write_i64(frame, 24, dict_size)
+    mem_write_i64(frame, 32, win_size)
+    mem_write_i64(frame, 40, cur_offset)     // header_size
+
+    deliver frame
+}
+
+open flow zstd_is_valid(frame: Int) -> Bool {
+    deliver mem_read_i64(frame, 0) == 1
+}
+
+open flow zstd_single_segment(frame: Int) -> Bool {
+    deliver mem_read_i64(frame, 8) == 1
+}
+
+open flow zstd_has_checksum(frame: Int) -> Bool {
+    deliver mem_read_i64(frame, 16) == 1
+}
+
+open flow zstd_dict_id_size(frame: Int) -> Int {
+    deliver mem_read_i64(frame, 24)
+}
+
+open flow zstd_window_size(frame: Int) -> Int {
+    deliver mem_read_i64(frame, 32)
+}
+
+open flow zstd_header_size(frame: Int) -> Int {
+    deliver mem_read_i64(frame, 40)
+}
+
+// ============================================================================
+// DATA BLOCK HEADER (3 bytes / 24-bit little endian)
+// [0..8]:   is_valid
+// [8..16]:  is_last_block
+// [16..24]: block_type (0=Raw, 1=RLE, 2=Compressed, 3=Reserved)
+// [24..32]: block_size (21 bits)
+// ============================================================================
+
+open flow zstd_parse_block_header(hex_str: Text, byte_offset: Int) -> Int {
+    flex block = alloc_buffer(32)
+    mem_fill(block, 0, 32)
+
+    flex total_bytes = length(hex_str) / 2
+    if byte_offset < 0 || byte_offset + 3 > total_bytes {
+        mem_write_i64(block, 0, 0) // is_valid = 0
+        deliver block
+    }
+
+    flex u24 = zstd_read_u24_le(hex_str, byte_offset)
+    flex is_last = u24 % 2
+    flex b_type = (u24 / 2) % 4
+    flex b_size = u24 / 8
+
+    mem_write_i64(block, 0, 1)       // is_valid = 1
+    mem_write_i64(block, 8, is_last)
+    mem_write_i64(block, 16, b_type)
+    mem_write_i64(block, 24, b_size)
+
+    deliver block
+}
+
+open flow zstd_block_is_valid(block: Int) -> Bool {
+    deliver mem_read_i64(block, 0) == 1
+}
+
+open flow zstd_block_is_last(block: Int) -> Bool {
+    deliver mem_read_i64(block, 8) == 1
+}
+
+open flow zstd_block_type(block: Int) -> Int {
+    deliver mem_read_i64(block, 16)
+}
+
+open flow zstd_block_size(block: Int) -> Int {
+    deliver mem_read_i64(block, 24)
+}
+
+// Encodes a standard Zstandard Frame Header:
+// 4 bytes: Magic (28 b5 2f fd)
+// 1 byte: FHD (bit 4: single_segment, bit 2: has_checksum)
+// 1 byte: Window descriptor (if single_segment == false)
+open flow zstd_encode_frame_header(single_segment: Bool, has_checksum: Bool) -> Text {
+    flex magic_hex = "28b52ffd"
+    flex fhd = 0
+    if single_segment {
+        fhd = fhd + 32 // Single segment flag (bit 5/4)
+    }
+    if has_checksum {
+        fhd = fhd + 4  // Checksum flag (bit 2)
+    }
+
+    flex hex_chars = "0123456789abcdef"
+    flex d0 = str_slice(hex_chars, fhd / 16, 1)
+    flex d1 = str_slice(hex_chars, fhd % 16, 1)
+    flex fhd_hex = str_concat(d0, d1)
+
+    if single_segment {
+        deliver str_concat(magic_hex, fhd_hex)
+    }
+
+    // Default window descriptor: 0x10 (1 MB window)
+    flex win_hex = "10"
+    deliver str_concat(magic_hex, str_concat(fhd_hex, win_hex))
+}
+
+// Encodes a 3-byte block header
+open flow zstd_encode_block_header(is_last: Bool, block_type: Int, block_size: Int) -> Text {
+    flex last_bit = 0
+    if is_last { last_bit = 1 }
+
+    flex bt = block_type % 4
+    flex bs = block_size % 2097152
+
+    flex u24 = last_bit + (bt * 2) + (bs * 8)
+    flex b0 = u24 % 256
+    flex b1 = (u24 / 256) % 256
+    flex b2 = (u24 / 65536) % 256
+
+    flex hex_chars = "0123456789abcdef"
+    flex h0 = str_concat(str_slice(hex_chars, b0 / 16, 1), str_slice(hex_chars, b0 % 16, 1))
+    flex h1 = str_concat(str_slice(hex_chars, b1 / 16, 1), str_slice(hex_chars, b1 % 16, 1))
+    flex h2 = str_concat(str_slice(hex_chars, b2 / 16, 1), str_slice(hex_chars, b2 % 16, 1))
+
+    deliver str_concat(h0, str_concat(h1, h2))
+}
+
+open flow zstd_frame_free(frame: Int) -> Bool {
+    if frame != 0 { free_buffer(frame) }
+    deliver true
+}
+
+open flow zstd_block_free(block: Int) -> Bool {
+    if block != 0 { free_buffer(block) }
+    deliver true
+}

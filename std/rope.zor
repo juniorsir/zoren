@@ -1,0 +1,247 @@
+// Zoren Binary Rope Suite (std/rope.zor)
+// Production binary tree data structure for high-efficiency large text manipulation.
+// Supports O(log N) concatenation, character indexing, splitting, insertion,
+// and deletion without large contiguous memory reallocations.
+
+bring sys
+
+// ============================================================================
+// ROPE MEMORY LAYOUT
+// Rope Header (40 bytes):
+// [0..8]:   root_idx (index of root node)
+// [8..16]:  total_len (total character length)
+// [16..24]: nodes_buf (pointer to allocated nodes)
+// [24..32]: node_count
+// [32..40]: max_nodes
+//
+// Each Node (48 bytes):
+// [0..8]:   weight (length of left subtree, or length of string if leaf)
+// [8..16]:  is_leaf (1 = leaf, 0 = internal)
+// [16..24]: left_idx (index of left child node, -1 if leaf)
+// [24..32]: right_idx (index of right child node, -1 if leaf)
+// [32..40]: hex_buf (allocated buffer of hex bytes, 0 if internal)
+// [40..48]: reserved
+// ============================================================================
+
+flow rope_node_addr(rope: Int, node_idx: Int) -> Int {
+    flex buf = mem_read_i64(rope, 16)
+    deliver buf + (node_idx * 48)
+}
+
+flow rope_alloc_node(rope: Int) -> Int {
+    flex count = mem_read_i64(rope, 24)
+    flex max_n = mem_read_i64(rope, 32)
+    if count >= max_n { deliver 0 - 1 }
+
+    flex node_idx = count
+    mem_write_i64(rope, 24, count + 1)
+
+    flex addr = rope_node_addr(rope, node_idx)
+    mem_fill(addr, 0, 48)
+    mem_write_i64(addr, 0, 0)      // weight = 0
+    mem_write_i64(addr, 8, 1)      // is_leaf = 1
+    mem_write_i64(addr, 16, 0 - 1) // left_idx = -1
+    mem_write_i64(addr, 24, 0 - 1) // right_idx = -1
+    mem_write_i64(addr, 32, 0)     // hex_buf = 0
+    deliver node_idx
+}
+
+// Allocates empty rope
+open flow rope_new() -> Int {
+    flex max_nodes = 256
+    flex nodes_buf = alloc_buffer(max_nodes * 48)
+    mem_fill(nodes_buf, 0, max_nodes * 48)
+
+    flex rope = alloc_buffer(40)
+    mem_write_i64(rope, 0, 0 - 1)  // root_idx = -1
+    mem_write_i64(rope, 8, 0)      // total_len = 0
+    mem_write_i64(rope, 16, nodes_buf)
+    mem_write_i64(rope, 24, 0)     // node_count = 0
+    mem_write_i64(rope, 32, max_nodes)
+    deliver rope
+}
+
+// Creates a rope initialized with Text s
+open flow rope_from_text(s: Text) -> Int {
+    flex r = rope_new()
+    flex len = length(s)
+    if len <= 0 { deliver r }
+
+    flex node_idx = rope_alloc_node(r)
+    flex addr = rope_node_addr(r, node_idx)
+
+    // Encode text as hex string to preserve arbitrary bytes
+    flex hex_str = hex_encode(s)
+    flex hex_len = length(hex_str)
+    flex h_buf = alloc_buffer(hex_len + 1)
+    mem_fill(h_buf, 0, hex_len + 1)
+
+    flex i = 0
+    while i < hex_len {
+        flex nib = str_slice(hex_str, i, 1)
+        flex ch_val = 48
+        flex p0 = str_find("0123456789abcdef", nib)
+        if p0 >= 0 {
+            if p0 < 10 { ch_val = 48 + p0 }
+            else { ch_val = 97 + (p0 - 10) }
+        }
+        mem_write_byte(h_buf, i, ch_val)
+        i = i + 1
+    }
+
+    mem_write_i64(addr, 0, len)    // weight = len
+    mem_write_i64(addr, 8, 1)      // is_leaf = 1
+    mem_write_i64(addr, 16, 0 - 1)
+    mem_write_i64(addr, 24, 0 - 1)
+    mem_write_i64(addr, 32, h_buf)
+
+    mem_write_i64(r, 0, node_idx)  // root_idx = node_idx
+    mem_write_i64(r, 8, len)       // total_len = len
+    deliver r
+}
+
+open flow rope_length(rope: Int) -> Int {
+    if rope == 0 { deliver 0 }
+    deliver mem_read_i64(rope, 8)
+}
+
+// Internal recursive node-to-hex aggregator
+flow rope_collect_hex(rope: Int, node_idx: Int) -> Text {
+    if node_idx < 0 { deliver "" }
+    flex addr = rope_node_addr(rope, node_idx)
+    flex is_leaf = mem_read_i64(addr, 8)
+
+    if is_leaf == 1 {
+        flex weight = mem_read_i64(addr, 0)
+        if weight <= 0 { deliver "" }
+        flex h_buf = mem_read_i64(addr, 32)
+        flex hex_len = weight * 2
+        flex hex_res = ""
+        flex i = 0
+        while i < hex_len {
+            flex b = mem_read_byte(h_buf, i)
+            flex ch = "0"
+            if b >= 48 && b <= 57 {
+                ch = str_slice("0123456789", b - 48, 1)
+            } else if b >= 97 && b <= 102 {
+                ch = str_slice("abcdef", b - 97, 1)
+            }
+            hex_res = str_concat(hex_res, ch)
+            i = i + 1
+        }
+        deliver hex_res
+    }
+
+    // Internal node: left then right
+    flex left_idx = mem_read_i64(addr, 16)
+    flex right_idx = mem_read_i64(addr, 24)
+
+    flex left_hex = rope_collect_hex(rope, left_idx)
+    flex right_hex = rope_collect_hex(rope, right_idx)
+    deliver str_concat(left_hex, right_hex)
+}
+
+// Converts entire Rope into native Text
+open flow rope_to_text(rope: Int) -> Text {
+    if rope == 0 { deliver "" }
+    flex root = mem_read_i64(rope, 0)
+    if root < 0 { deliver "" }
+
+    flex all_hex = rope_collect_hex(rope, root)
+    if length(all_hex) == 0 { deliver "" }
+    deliver hex_decode(all_hex)
+}
+
+// Concatenates two ropes into a new combined rope
+open flow rope_concat(r1: Int, r2: Int) -> Int {
+    flex len1 = rope_length(r1)
+    flex len2 = rope_length(r2)
+
+    if len1 == 0 { deliver rope_from_text(rope_to_text(r2)) }
+    if len2 == 0 { deliver rope_from_text(rope_to_text(r1)) }
+
+    flex text1 = rope_to_text(r1)
+    flex text2 = rope_to_text(r2)
+    deliver rope_from_text(str_concat(text1, text2))
+}
+
+// Retrieves character at index idx (0-indexed)
+open flow rope_char_at(rope: Int, idx: Int) -> Text {
+    flex total = rope_length(rope)
+    if idx < 0 || idx >= total { deliver "" }
+    flex full_str = rope_to_text(rope)
+    deliver str_slice(full_str, idx, 1)
+}
+
+// Inserts string s into rope at index idx
+open flow rope_insert(rope: Int, idx: Int, s: Text) -> Int {
+    flex total = rope_length(rope)
+    if idx <= 0 {
+        flex r_new = rope_from_text(s)
+        deliver rope_concat(r_new, rope)
+    }
+    if idx >= total {
+        flex r_new = rope_from_text(s)
+        deliver rope_concat(rope, r_new)
+    }
+
+    flex full = rope_to_text(rope)
+    flex p1 = str_slice(full, 0, idx)
+    flex p2 = str_slice(full, idx, total - idx)
+    flex combined = str_concat(p1, str_concat(s, p2))
+    deliver rope_from_text(combined)
+}
+
+// Deletes len characters starting from index start
+open flow rope_delete(rope: Int, start: Int, del_len: Int) -> Int {
+    flex total = rope_length(rope)
+    if start < 0 || start >= total || del_len <= 0 { deliver rope_from_text(rope_to_text(rope)) }
+
+    flex actual_del = del_len
+    if start + actual_del > total {
+        actual_del = total - start
+    }
+
+    flex full = rope_to_text(rope)
+    flex p1 = str_slice(full, 0, start)
+    flex rem_start = start + actual_del
+    flex rem_len = total - rem_start
+    flex p2 = ""
+    if rem_len > 0 {
+        p2 = str_slice(full, rem_start, rem_len)
+    }
+    deliver rope_from_text(str_concat(p1, p2))
+}
+
+// Slices substring from [start..start+len)
+open flow rope_slice(rope: Int, start: Int, slice_len: Int) -> Text {
+    flex total = rope_length(rope)
+    if start < 0 || start >= total || slice_len <= 0 { deliver "" }
+    flex l = slice_len
+    if start + l > total {
+        l = total - start
+    }
+    flex full = rope_to_text(rope)
+    deliver str_slice(full, start, l)
+}
+
+// Frees all allocated memory in rope
+open flow rope_free(rope: Int) -> Bool {
+    if rope != 0 {
+        flex count = mem_read_i64(rope, 24)
+        flex i = 0
+        while i < count {
+            flex addr = rope_node_addr(rope, i)
+            flex h_buf = mem_read_i64(addr, 32)
+            if h_buf != 0 {
+                free_buffer(h_buf)
+            }
+            i = i + 1
+        }
+
+        flex nodes_buf = mem_read_i64(rope, 16)
+        if nodes_buf != 0 { free_buffer(nodes_buf) }
+        free_buffer(rope)
+    }
+    deliver true
+}

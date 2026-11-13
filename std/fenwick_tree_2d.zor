@@ -1,0 +1,145 @@
+// Zoren 2D Binary Indexed Tree / Fenwick Tree Suite (std/fenwick_tree_2d.zor)
+// Production 2D Fenwick tree supporting O(log N * log M) dynamic point updates
+// and arbitrary 2D rectangular prefix/range sum queries.
+
+bring sys
+
+// ============================================================================
+// MEMORY LAYOUT (2D Fenwick Tree Header: 32 bytes)
+// [0..8]:   rows (N)
+// [8..16]:  cols (M)
+// [16..24]: tree_buf (contiguous memory: (rows + 1) * (cols + 1) * 8 bytes)
+// [24..32]: total_elements
+// ============================================================================
+
+// Returns largest power of 2 dividing x (equivalent to x & -x)
+flow ft2d_lowbit(x: Int) -> Int {
+    if x <= 0 { deliver 0 }
+    flex p = 1
+    while (x % (p * 2)) == 0 {
+        p = p * 2
+    }
+    deliver p
+}
+
+flow ft2d_cell_offset(ft: Int, r: Int, c: Int) -> Int {
+    flex cols = mem_read_i64(ft, 8)
+    deliver ((r * (cols + 1)) + c) * 8
+}
+
+// Allocates a new 2D Fenwick Tree of size rows x cols (1-indexed coordinates: 1..rows, 1..cols)
+open flow fenwick2d_new(rows: Int, cols: Int) -> Int {
+    flex r = rows
+    flex c = cols
+    if r <= 0 { r = 1 }
+    if c <= 0 { c = 1 }
+
+    flex total_cells = (r + 1) * (c + 1)
+    flex bytes_needed = total_cells * 8
+    flex t_buf = alloc_buffer(bytes_needed)
+    mem_fill(t_buf, 0, bytes_needed)
+
+    flex ft = alloc_buffer(32)
+    mem_write_i64(ft, 0, r)
+    mem_write_i64(ft, 8, c)
+    mem_write_i64(ft, 16, t_buf)
+    mem_write_i64(ft, 24, total_cells)
+    deliver ft
+}
+
+open flow fenwick2d_rows(ft: Int) -> Int {
+    deliver mem_read_i64(ft, 0)
+}
+
+open flow fenwick2d_cols(ft: Int) -> Int {
+    deliver mem_read_i64(ft, 8)
+}
+
+// Adds delta to element at (row, col) (1-indexed) in O(log N * log M)
+open flow fenwick2d_add(ft: Int, row: Int, col: Int, delta: Int) -> Bool {
+    flex max_r = mem_read_i64(ft, 0)
+    flex max_c = mem_read_i64(ft, 8)
+    if row < 1 || row > max_r || col < 1 || col > max_c { deliver false }
+
+    flex t_buf = mem_read_i64(ft, 16)
+    flex i = row
+    while i <= max_r {
+        flex j = col
+        while j <= max_c {
+            flex off = ft2d_cell_offset(ft, i, j)
+            flex cur = mem_read_i64(t_buf, off)
+            mem_write_i64(t_buf, off, cur + delta)
+            j = j + ft2d_lowbit(j)
+        }
+        i = i + ft2d_lowbit(i)
+    }
+    deliver true
+}
+
+// Computes 2D prefix sum of rectangle (1, 1) to (row, col) in O(log N * log M)
+open flow fenwick2d_query_prefix(ft: Int, row: Int, col: Int) -> Int {
+    if row <= 0 || col <= 0 { deliver 0 }
+    flex max_r = mem_read_i64(ft, 0)
+    flex max_c = mem_read_i64(ft, 8)
+
+    flex r_lim = row
+    if r_lim > max_r { r_lim = max_r }
+    flex c_lim = col
+    if c_lim > max_c { c_lim = max_c }
+
+    flex t_buf = mem_read_i64(ft, 16)
+    flex sum = 0
+
+    flex i = r_lim
+    while i > 0 {
+        flex j = c_lim
+        while j > 0 {
+            flex off = ft2d_cell_offset(ft, i, j)
+            sum = sum + mem_read_i64(t_buf, off)
+            j = j - ft2d_lowbit(j)
+        }
+        i = i - ft2d_lowbit(i)
+    }
+    deliver sum
+}
+
+// Computes sum in 2D rectangle (r1, c1) to (r2, c2) inclusive
+// Formula: sum = prefix(r2, c2) - prefix(r1-1, c2) - prefix(r2, c1-1) + prefix(r1-1, c1-1)
+open flow fenwick2d_query_range(ft: Int, r1: Int, c1: Int, r2: Int, c2: Int) -> Int {
+    if r1 > r2 || c1 > c2 { deliver 0 }
+    flex p_all = fenwick2d_query_prefix(ft, r2, c2)
+    flex p_top = fenwick2d_query_prefix(ft, r1 - 1, c2)
+    flex p_left = fenwick2d_query_prefix(ft, r2, c1 - 1)
+    flex p_corner = fenwick2d_query_prefix(ft, r1 - 1, c1 - 1)
+    deliver (p_all - p_top - p_left) + p_corner
+}
+
+// Retrieves point value at (row, col)
+open flow fenwick2d_get_point(ft: Int, row: Int, col: Int) -> Int {
+    deliver fenwick2d_query_range(ft, row, col, row, col)
+}
+
+// Sets point value at (row, col) to val
+open flow fenwick2d_set_point(ft: Int, row: Int, col: Int, val: Int) -> Bool {
+    flex cur = fenwick2d_get_point(ft, row, col)
+    flex delta = val - cur
+    deliver fenwick2d_add(ft, row, col, delta)
+}
+
+// Resets all elements to 0
+open flow fenwick2d_clear(ft: Int) -> Bool {
+    flex total_cells = mem_read_i64(ft, 24)
+    flex t_buf = mem_read_i64(ft, 16)
+    mem_fill(t_buf, 0, total_cells * 8)
+    deliver true
+}
+
+// Frees memory
+open flow fenwick2d_free(ft: Int) -> Bool {
+    if ft != 0 {
+        flex t_buf = mem_read_i64(ft, 16)
+        if t_buf != 0 { free_buffer(t_buf) }
+        free_buffer(ft)
+    }
+    deliver true
+}

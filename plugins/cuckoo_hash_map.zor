@@ -1,0 +1,291 @@
+// Zoren Cuckoo Hash Map Suite (plugins/cuckoo_hash_map.zor)
+// Production dual-hash table providing guaranteed O(1) worst-case lookup time,
+// kick-out displacement resolution, and stash buffer fallback (Pagh-Rodler / Kirsch-Mitzenmacher).
+
+bring sys
+
+// ============================================================================
+// MEMORY LAYOUT (Cuckoo Map Header: 48 bytes)
+// [0..8]:   capacity (C per sub-table)
+// [8..16]:  size (total stored key-value pairs)
+// [16..24]: table1_buf (C * 24 bytes)
+// [24..32]: table2_buf (C * 24 bytes)
+// [32..40]: stash_buf (16 * 24 bytes)
+// [40..48]: stash_count (max 16)
+//
+// Each Slot (24 bytes):
+// [0..8]:   key
+// [8..16]:  val
+// [16..24]: occupied (1 = occupied, 0 = empty)
+// ============================================================================
+
+flow cuckoo_h1(key: Int, cap: Int) -> Int {
+    flex mod_val = 2147483647
+    flex k = key % mod_val
+    if k < 0 { k = k + mod_val }
+    flex x = (k * 2654435761) % mod_val
+    if x < 0 { x = x + mod_val }
+    flex h = (x + 1013904223) % mod_val
+    if h < 0 { h = h + mod_val }
+    deliver h % cap
+}
+
+flow cuckoo_h2(key: Int, cap: Int) -> Int {
+    flex mod_val = 2147483647
+    flex k = key % mod_val
+    if k < 0 { k = k + mod_val }
+    flex x = (k * 1103515245) % mod_val
+    if x < 0 { x = x + mod_val }
+    flex h = (x + 12345) % mod_val
+    if h < 0 { h = h + mod_val }
+    deliver h % cap
+}
+
+open flow cuckoo_new(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 16 }
+
+    flex t1_buf = alloc_buffer(cap * 24)
+    mem_fill(t1_buf, 0, cap * 24)
+
+    flex t2_buf = alloc_buffer(cap * 24)
+    mem_fill(t2_buf, 0, cap * 24)
+
+    flex stash_buf = alloc_buffer(16 * 24)
+    mem_fill(stash_buf, 0, 16 * 24)
+
+    flex map = alloc_buffer(48)
+    mem_write_i64(map, 0, cap)
+    mem_write_i64(map, 8, 0)         // size = 0
+    mem_write_i64(map, 16, t1_buf)
+    mem_write_i64(map, 24, t2_buf)
+    mem_write_i64(map, 32, stash_buf)
+    mem_write_i64(map, 40, 0)        // stash_count = 0
+    deliver map
+}
+
+open flow cuckoo_capacity(map: Int) -> Int {
+    deliver mem_read_i64(map, 0)
+}
+
+open flow cuckoo_size(map: Int) -> Int {
+    deliver mem_read_i64(map, 8)
+}
+
+open flow cuckoo_stash_size(map: Int) -> Int {
+    deliver mem_read_i64(map, 40)
+}
+
+// Guaranteed O(1) worst-case lookup: checks table1[h1], table2[h2], then small stash
+open flow cuckoo_get(map: Int, key: Int) -> Int {
+    flex cap = mem_read_i64(map, 0)
+    flex t1 = mem_read_i64(map, 16)
+    flex t2 = mem_read_i64(map, 24)
+    flex stash = mem_read_i64(map, 32)
+    flex s_cnt = mem_read_i64(map, 40)
+
+    // Check table 1
+    flex idx1 = cuckoo_h1(key, cap)
+    flex off1 = idx1 * 24
+    if mem_read_i64(t1, off1 + 16) == 1 {
+        if mem_read_i64(t1, off1) == key {
+            deliver mem_read_i64(t1, off1 + 8)
+        }
+    }
+
+    // Check table 2
+    flex idx2 = cuckoo_h2(key, cap)
+    flex off2 = idx2 * 24
+    if mem_read_i64(t2, off2 + 16) == 1 {
+        if mem_read_i64(t2, off2) == key {
+            deliver mem_read_i64(t2, off2 + 8)
+        }
+    }
+
+    // Check stash
+    flex i = 0
+    while i < s_cnt {
+        flex s_off = i * 24
+        if mem_read_i64(stash, s_off + 16) == 1 {
+            if mem_read_i64(stash, s_off) == key {
+                deliver mem_read_i64(stash, s_off + 8)
+            }
+        }
+        i = i + 1
+    }
+
+    deliver 0 - 1
+}
+
+open flow cuckoo_contains(map: Int, key: Int) -> Bool {
+    flex val = cuckoo_get(map, key)
+    deliver val != (0 - 1)
+}
+
+// Inserts or updates (key, val) using Cuckoo kick-out displacement
+open flow cuckoo_put(map: Int, key: Int, val: Int) -> Bool {
+    flex cap = mem_read_i64(map, 0)
+    flex t1 = mem_read_i64(map, 16)
+    flex t2 = mem_read_i64(map, 24)
+    flex stash = mem_read_i64(map, 32)
+
+    // If key already present, update value in place
+    flex idx1 = cuckoo_h1(key, cap)
+    flex off1 = idx1 * 24
+    if mem_read_i64(t1, off1 + 16) == 1 && mem_read_i64(t1, off1) == key {
+        mem_write_i64(t1, off1 + 8, val)
+        deliver true
+    }
+
+    flex idx2 = cuckoo_h2(key, cap)
+    flex off2 = idx2 * 24
+    if mem_read_i64(t2, off2 + 16) == 1 && mem_read_i64(t2, off2) == key {
+        mem_write_i64(t2, off2 + 8, val)
+        deliver true
+    }
+
+    flex s_cnt = mem_read_i64(map, 40)
+    flex i = 0
+    while i < s_cnt {
+        flex s_off = i * 24
+        if mem_read_i64(stash, s_off + 16) == 1 && mem_read_i64(stash, s_off) == key {
+            mem_write_i64(stash, s_off + 8, val)
+            deliver true
+        }
+        i = i + 1
+    }
+
+    // New insertion with Cuckoo displacement loop
+    flex cur_key = key
+    flex cur_val = val
+    flex kicks = 0
+    flex max_kicks = 32
+
+    while kicks < max_kicks {
+        // Try Table 1
+        flex p1 = cuckoo_h1(cur_key, cap)
+        flex p1_off = p1 * 24
+        if mem_read_i64(t1, p1_off + 16) == 0 {
+            mem_write_i64(t1, p1_off, cur_key)
+            mem_write_i64(t1, p1_off + 8, cur_val)
+            mem_write_i64(t1, p1_off + 16, 1)
+            flex sz = mem_read_i64(map, 8)
+            mem_write_i64(map, 8, sz + 1)
+            deliver true
+        }
+
+        // Kick out from Table 1
+        flex evicted_k1 = mem_read_i64(t1, p1_off)
+        flex evicted_v1 = mem_read_i64(t1, p1_off + 8)
+        mem_write_i64(t1, p1_off, cur_key)
+        mem_write_i64(t1, p1_off + 8, cur_val)
+
+        cur_key = evicted_k1
+        cur_val = evicted_v1
+
+        // Try Table 2 with evicted item
+        flex p2 = cuckoo_h2(cur_key, cap)
+        flex p2_off = p2 * 24
+        if mem_read_i64(t2, p2_off + 16) == 0 {
+            mem_write_i64(t2, p2_off, cur_key)
+            mem_write_i64(t2, p2_off + 8, cur_val)
+            mem_write_i64(t2, p2_off + 16, 1)
+            flex sz = mem_read_i64(map, 8)
+            mem_write_i64(map, 8, sz + 1)
+            deliver true
+        }
+
+        // Kick out from Table 2
+        flex evicted_k2 = mem_read_i64(t2, p2_off)
+        flex evicted_v2 = mem_read_i64(t2, p2_off + 8)
+        mem_write_i64(t2, p2_off, cur_key)
+        mem_write_i64(t2, p2_off + 8, cur_val)
+
+        cur_key = evicted_k2
+        cur_val = evicted_v2
+        kicks = kicks + 1
+    }
+
+    // Displacement cycle reached max_kicks: put into stash
+    if s_cnt < 16 {
+        flex st_off = s_cnt * 24
+        mem_write_i64(stash, st_off, cur_key)
+        mem_write_i64(stash, st_off + 8, cur_val)
+        mem_write_i64(stash, st_off + 16, 1)
+        mem_write_i64(map, 40, s_cnt + 1)
+        flex sz = mem_read_i64(map, 8)
+        mem_write_i64(map, 8, sz + 1)
+        deliver true
+    }
+
+    deliver false
+}
+
+// Removes key from map
+open flow cuckoo_remove(map: Int, key: Int) -> Bool {
+    flex cap = mem_read_i64(map, 0)
+    flex t1 = mem_read_i64(map, 16)
+    flex t2 = mem_read_i64(map, 24)
+    flex stash = mem_read_i64(map, 32)
+    flex s_cnt = mem_read_i64(map, 40)
+
+    flex idx1 = cuckoo_h1(key, cap)
+    flex off1 = idx1 * 24
+    if mem_read_i64(t1, off1 + 16) == 1 && mem_read_i64(t1, off1) == key {
+        mem_write_i64(t1, off1 + 16, 0) // mark empty
+        flex sz = mem_read_i64(map, 8)
+        mem_write_i64(map, 8, sz - 1)
+        deliver true
+    }
+
+    flex idx2 = cuckoo_h2(key, cap)
+    flex off2 = idx2 * 24
+    if mem_read_i64(t2, off2 + 16) == 1 && mem_read_i64(t2, off2) == key {
+        mem_write_i64(t2, off2 + 16, 0)
+        flex sz = mem_read_i64(map, 8)
+        mem_write_i64(map, 8, sz - 1)
+        deliver true
+    }
+
+    flex i = 0
+    while i < s_cnt {
+        flex s_off = i * 24
+        if mem_read_i64(stash, s_off + 16) == 1 && mem_read_i64(stash, s_off) == key {
+            mem_write_i64(stash, s_off + 16, 0)
+            flex sz = mem_read_i64(map, 8)
+            mem_write_i64(map, 8, sz - 1)
+            deliver true
+        }
+        i = i + 1
+    }
+
+    deliver false
+}
+
+// Clears all entries
+open flow cuckoo_clear(map: Int) -> Bool {
+    flex cap = mem_read_i64(map, 0)
+    flex t1 = mem_read_i64(map, 16)
+    flex t2 = mem_read_i64(map, 24)
+    flex stash = mem_read_i64(map, 32)
+
+    mem_fill(t1, 0, cap * 24)
+    mem_fill(t2, 0, cap * 24)
+    mem_fill(stash, 0, 16 * 24)
+    mem_write_i64(map, 8, 0)  // size = 0
+    mem_write_i64(map, 40, 0) // stash_count = 0
+    deliver true
+}
+
+open flow cuckoo_free(map: Int) -> Bool {
+    if map != 0 {
+        flex t1 = mem_read_i64(map, 16)
+        flex t2 = mem_read_i64(map, 24)
+        flex stash = mem_read_i64(map, 32)
+        if t1 != 0 { free_buffer(t1) }
+        if t2 != 0 { free_buffer(t2) }
+        if stash != 0 { free_buffer(stash) }
+        free_buffer(map)
+    }
+    deliver true
+}
