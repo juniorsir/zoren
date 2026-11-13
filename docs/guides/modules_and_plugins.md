@@ -1,44 +1,48 @@
-# Creating Modules and Plugins in Zoren
+# 🧩 Zoren Unified Module Architecture
 
-This guide explains the Zoren module architecture, how modules and plugins compare, how to combine them, and how you can create and publish your own custom modules and plugins.
+In Zoren, **everything is a Module**. All standard library components and enterprise subsystems are built using the exact same native `.zor` format and can be imported directly and interchangeably.
 
 ---
 
-## 1. Modules vs. Plugins: The Quick Summary
+## 1. Unified Design Philosophy
 
-In Zoren, **modules and plugins are powered by the exact same engine under the hood**. Every module or plugin is a native `.zor` file that exports flows and data structures using the `open` keyword.
+Rather than treating "plugins" as a separate, complex foreign system, Zoren unifies all standard library utilities, distributed algorithms, security mechanisms, and user packages under a **single cohesive module system**:
 
-| Feature | Standard Modules (`std/*`) | Enterprise Plugins (`plugins/*`) | User / Community (`community/*`) |
+- **Direct Imports:** You can import any module directly by name:
+  ```zoren
+  bring math
+  bring rope
+  bring jwt_auth
+  bring raft_consensus
+  bring vector_hnsw
+  ```
+- **Namespaced Aliases (Optional):** If you prefer to explicitly categorize imports in your codebase, namespaced paths like `bring plugins.jwt_auth` and `bring std.rope` are fully supported aliases.
+- **Zero Configuration:** Every module compiles directly to native AArch64 machine code with full RELRO, PAC/BTI, and stack protection.
+
+| Category | Typical Scope | Direct Import | Namespaced Alias |
 | :--- | :--- | :--- | :--- |
-| **Primary Scope** | Foundational computer science building blocks | Specialized, high-performance distributed systems | Custom user domain logic, proprietary extensions |
-| **Examples** | `math`, `fs`, `json`, `rope`, `van_emde_boas` | `jwt_auth`, `raft_consensus`, `vector_hnsw` | `billing_engine`, `custom_metrics` |
-| **Typical Size** | Lightweight, zero external dependencies | Enterprise-grade, domain-optimized algorithms | Any size |
-| **Import Syntax** | `bring math`<br>`bring rope` | `bring plugins.jwt_auth`<br>`bring plugins.vector_hnsw` | `bring community.my_pkg`<br>`bring my_module` |
-| **Storage Location** | `~/.zoren/std/`<br>`/usr/local/share/zoren/std/` | `~/.zoren/plugins/`<br>`/usr/local/share/zoren/plugins/` | `~/.zoren/community/`<br>Local project directory `./` |
+| **Core Utilities** | Math, Strings, File System, Networking, Ropes | `bring math`<br>`bring rope` | `bring std.math`<br>`bring std.rope` |
+| **Enterprise Subsystems** | Raft Consensus, JWT Auth, Vector HNSW, B+ Tree | `bring jwt_auth`<br>`bring raft_consensus` | `bring plugins.jwt_auth`<br>`bring plugins.raft_consensus` |
+| **Custom User Modules** | Project services, domain business logic | `bring my_service` | `bring components.my_service` |
 
 ---
 
-## 2. Can You Combine Modules and Plugins?
+## 2. Using Modules in the Interactive REPL
 
-**Yes, completely!** 
+The Zoren REPL (`zoren repl`) fully reflects this unified architecture:
 
-Because both modules and plugins compile to the same abstract syntax tree (AST) and machine code:
-1. **Plugins can import Modules:** A plugin like `plugins.vector_hnsw` can internally import `bring math` or `bring rope`.
-2. **Modules can import other Modules:** `std/wavelet_matrix` can import `bring bitwise`.
-3. **User applications can combine both freely:** Your application can import standard library modules, plugins, and your own custom modules all in the same file:
+1. **View the Catalog:** Type `:modules` (or `:plugins`) to inspect the catalog of available data structures, security modules, distributed consensus engines, and AI indices.
+2. **Auto-Importing by Name:** Simply type any module's name directly in the REPL session:
+   ```zoren
+   [1] zoren ❯ jwt_auth
+   ✓ Module `jwt_auth` imported successfully.
+     Tip: in Zoren source files, load modules using `bring jwt_auth`.
 
-```zoren
-// Combining std, plugins, and custom local modules in one application
-bring math
-bring plugins.jwt_auth
-bring plugins.rate_limiter
-bring my_custom_service
-
-flow main() -> Int {
-    echo("All modules combined and ready!")
-    deliver 0
-}
-```
+   [2] zoren ❯ rope
+   ✓ Module `rope` imported successfully.
+     Tip: in Zoren source files, load modules using `bring rope`.
+   ```
+3. **No More False Bind Errors:** If you enter a module name, Zoren recognizes it immediately as a module rather than giving an undeclared identifier error.
 
 ---
 
