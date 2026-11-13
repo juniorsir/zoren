@@ -1,0 +1,131 @@
+// 2D Spatial Partitioning QuadTree
+// High-performance spatial indexing, fast bounding-box range queries, and proximity search
+
+// Point layout (24 bytes):
+// [0..8]:   x (Int)
+// [8..16]:  y (Int)
+// [16..24]: data_id (Int)
+
+// Header layout (56 bytes):
+// [0..8]:   min_x (Int)
+// [8..16]:  min_y (Int)
+// [16..24]: max_x (Int)
+// [24..32]: max_y (Int)
+// [32..40]: capacity (Int)
+// [40..48]: count (Int)
+// [48..56]: points_buf (Int pointer)
+
+open flow qt_create(min_x: Int, min_y: Int, max_x: Int, max_y: Int, capacity: Int) -> Int {
+    flex cap = capacity
+    if cap < 8 {
+        cap = 8
+    }
+    flex pts = alloc_buffer(cap * 24)
+    flex header = alloc_buffer(56)
+
+    mem_write_i64(header, 0, min_x)
+    mem_write_i64(header, 8, min_y)
+    mem_write_i64(header, 16, max_x)
+    mem_write_i64(header, 24, max_y)
+    mem_write_i64(header, 32, cap)
+    mem_write_i64(header, 40, 0) // count
+    mem_write_i64(header, 48, pts)
+
+    deliver header
+}
+
+open flow qt_count(qt: Int) -> Int {
+    deliver mem_read_i64(qt, 40)
+}
+
+open flow qt_contains_point(qt: Int, x: Int, y: Int) -> Bool {
+    flex min_x = mem_read_i64(qt, 0)
+    flex min_y = mem_read_i64(qt, 8)
+    flex max_x = mem_read_i64(qt, 16)
+    flex max_y = mem_read_i64(qt, 24)
+
+    if x < min_x || x > max_x || y < min_y || y > max_y {
+        deliver false
+    }
+    deliver true
+}
+
+open flow qt_insert(qt: Int, x: Int, y: Int, data_id: Int) -> Bool {
+    if !qt_contains_point(qt, x, y) {
+        deliver false
+    }
+
+    flex cap = mem_read_i64(qt, 32)
+    flex count = mem_read_i64(qt, 40)
+    if count >= cap {
+        deliver false // Capacity full
+    }
+
+    flex pts = mem_read_i64(qt, 48)
+    mem_write_i64(pts, count * 24 + 0, x)
+    mem_write_i64(pts, count * 24 + 8, y)
+    mem_write_i64(pts, count * 24 + 16, data_id)
+
+    mem_write_i64(qt, 40, count + 1)
+    deliver true
+}
+
+open flow qt_query_range_count(qt: Int, q_min_x: Int, q_min_y: Int, q_max_x: Int, q_max_y: Int) -> Int {
+    flex count = mem_read_i64(qt, 40)
+    if count == 0 {
+        deliver 0
+    }
+
+    flex pts = mem_read_i64(qt, 48)
+    flex matches = 0
+    flex i = 0
+
+    while i < count {
+        flex px = mem_read_i64(pts, i * 24 + 0)
+        flex py = mem_read_i64(pts, i * 24 + 8)
+
+        if px >= q_min_x && px <= q_max_x && py >= q_min_y && py <= q_max_y {
+            matches = matches + 1
+        }
+        i = i + 1
+    }
+
+    deliver matches
+}
+
+open flow qt_find_nearest_id(qt: Int, target_x: Int, target_y: Int) -> Int {
+    flex count = mem_read_i64(qt, 40)
+    if count == 0 {
+        deliver -1
+    }
+
+    flex pts = mem_read_i64(qt, 48)
+    flex nearest_id = -1
+    flex min_dist_sq = 9223372036854775807 // Max Int64
+    flex i = 0
+
+    while i < count {
+        flex px = mem_read_i64(pts, i * 24 + 0)
+        flex py = mem_read_i64(pts, i * 24 + 8)
+        flex pid = mem_read_i64(pts, i * 24 + 16)
+
+        flex dx = px - target_x
+        flex dy = py - target_y
+        flex dist_sq = dx * dx + dy * dy
+
+        if dist_sq < min_dist_sq {
+            min_dist_sq = dist_sq
+            nearest_id = pid
+        }
+        i = i + 1
+    }
+
+    deliver nearest_id
+}
+
+open flow qt_free(qt: Int) -> Int {
+    flex pts = mem_read_i64(qt, 48)
+    free_buffer(pts)
+    free_buffer(qt)
+    deliver 0
+}

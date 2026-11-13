@@ -1,0 +1,70 @@
+// JSON Web Token (JWT) HMAC-SHA256 Encoder & Claims Verifier
+// Formats compact RFC 7519 JWT tokens, validates digital signatures, and checks token expiry
+bring crypto
+
+open flow jwt_create_token(header_b64: Text, payload_b64: Text, secret: Text) -> Text {
+    flex signing_input = str_concat(header_b64, str_concat(".", payload_b64))
+    flex sig = sys_hmac_sha256_hex(secret, signing_input)
+    deliver str_concat(signing_input, str_concat(".", sig))
+}
+
+open flow jwt_extract_part(token: Text, part_index: Int) -> Text {
+    flex dot1 = str_find(token, ".")
+    if dot1 < 0 {
+        deliver ""
+    }
+    if part_index == 0 {
+        deliver str_slice(token, 0, dot1) // Header
+    }
+
+    flex len = length(token)
+    flex rest = str_slice(token, dot1 + 1, len - (dot1 + 1))
+    flex dot2 = str_find(rest, ".")
+    if dot2 < 0 {
+        if part_index == 1 {
+            deliver rest
+        }
+        deliver ""
+    }
+
+    if part_index == 1 {
+        deliver str_slice(rest, 0, dot2) // Payload
+    }
+
+    flex rest_len = length(rest)
+    deliver str_slice(rest, dot2 + 1, rest_len - (dot2 + 1)) // Signature
+}
+
+open flow jwt_extract_header(token: Text) -> Text {
+    deliver jwt_extract_part(token, 0)
+}
+
+open flow jwt_extract_payload(token: Text) -> Text {
+    deliver jwt_extract_part(token, 1)
+}
+
+open flow jwt_extract_signature(token: Text) -> Text {
+    deliver jwt_extract_part(token, 2)
+}
+
+open flow jwt_verify_signature(token: Text, secret: Text) -> Bool {
+    flex h = jwt_extract_header(token)
+    flex p = jwt_extract_payload(token)
+    flex sig = jwt_extract_signature(token)
+
+    if length(h) == 0 || length(p) == 0 || length(sig) == 0 {
+        deliver false
+    }
+
+    flex signing_input = str_concat(h, str_concat(".", p))
+    flex expected_sig = sys_hmac_sha256_hex(secret, signing_input)
+
+    deliver constant_time_compare(sig, expected_sig)
+}
+
+open flow jwt_is_expired(exp_timestamp: Int, now_sec: Int) -> Bool {
+    if exp_timestamp <= 0 {
+        deliver false // No expiration claim
+    }
+    deliver now_sec >= exp_timestamp
+}

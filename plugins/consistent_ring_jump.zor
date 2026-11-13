@@ -1,0 +1,65 @@
+// Google Jump Consistent Hash Algorithm (Lamping & Veach, 2014)
+// Zero-Memory, ultra-fast O(ln N) consistent hashing with minimal key rebalancing
+
+open flow jump_hash_str_seed(key: Text) -> Int {
+    flex len = length(key)
+    flex h = 2166136261
+    flex alpha = "abcdefghijklmnopqrstuvwxyz0123456789_"
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(key, i, 1)
+        flex pos = str_find(alpha, ch)
+        flex b = 0
+        if pos >= 0 {
+            b = pos + 48
+        } else {
+            b = (i * 31 + 43) % 127
+        }
+        h = (h + b) * 16777619
+        if h < 0 {
+            h = 0 - h
+        }
+        h = h % 2147483647
+        i = i + 1
+    }
+    deliver h
+}
+
+open flow jump_consistent_hash(key_val: Int, num_buckets: Int) -> Int {
+    if num_buckets <= 1 {
+        deliver 0
+    }
+
+    flex k = key_val
+    if k < 0 {
+        k = 0 - k
+    }
+    if k == 0 {
+        k = 1
+    }
+
+    flex b = -1
+    flex j = 0
+
+    while j < num_buckets {
+        b = j
+        k = k * 2862933555777941757 + 1
+        if k < 0 {
+            k = 0 - k
+        }
+
+        flex denom = (k / 8589934592) + 1
+        if denom < 1 {
+            denom = 1
+        }
+
+        j = ((b + 1) * 2147483648) / denom
+    }
+
+    deliver b
+}
+
+open flow jump_consistent_hash_str(key: Text, num_buckets: Int) -> Int {
+    flex seed = jump_hash_str_seed(key)
+    deliver jump_consistent_hash(seed, num_buckets)
+}

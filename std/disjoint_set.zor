@@ -1,0 +1,103 @@
+// Disjoint-Set Union (DSU / Union-Find) with Path Compression & Rank Optimization
+// High-performance connected component tracking, graph cycle detection, and Kruskal's MST
+
+// Header layout (32 bytes):
+// [0..8]:   size (Int)
+// [8..16]:  component_count (Int)
+// [16..24]: parent_buf (Int pointer)
+// [24..32]: rank_buf (Int pointer)
+
+open flow dsu_create(size: Int) -> Int {
+    flex n = size
+    if n < 2 {
+        n = 2
+    }
+    flex parent = alloc_buffer(n * 8)
+    flex rank = alloc_buffer(n * 8)
+    flex header = alloc_buffer(32)
+
+    flex i = 0
+    while i < n {
+        mem_write_i64(parent, i * 8, i) // Each element is initially its own parent
+        mem_write_i64(rank, i * 8, 1)   // Initial component size is 1
+        i = i + 1
+    }
+
+    mem_write_i64(header, 0, n)
+    mem_write_i64(header, 8, n) // Initially n components
+    mem_write_i64(header, 16, parent)
+    mem_write_i64(header, 24, rank)
+
+    deliver header
+}
+
+open flow dsu_find(dsu: Int, x: Int) -> Int {
+    flex parent = mem_read_i64(dsu, 16)
+    flex root = x
+    while root != mem_read_i64(parent, root * 8) {
+        root = mem_read_i64(parent, root * 8)
+    }
+
+    // Path compression
+    flex curr = x
+    while curr != root {
+        flex next_node = mem_read_i64(parent, curr * 8)
+        mem_write_i64(parent, curr * 8, root)
+        curr = next_node
+    }
+
+    deliver root
+}
+
+open flow dsu_connected(dsu: Int, x: Int, y: Int) -> Bool {
+    flex rx = dsu_find(dsu, x)
+    flex ry = dsu_find(dsu, y)
+    deliver rx == ry
+}
+
+open flow dsu_union(dsu: Int, x: Int, y: Int) -> Bool {
+    flex rx = dsu_find(dsu, x)
+    flex ry = dsu_find(dsu, y)
+
+    if rx == ry {
+        deliver false // Already connected (cycle detected)
+    }
+
+    flex parent = mem_read_i64(dsu, 16)
+    flex rank = mem_read_i64(dsu, 24)
+
+    flex rank_x = mem_read_i64(rank, rx * 8)
+    flex rank_y = mem_read_i64(rank, ry * 8)
+
+    // Union by rank
+    if rank_x >= rank_y {
+        mem_write_i64(parent, ry * 8, rx)
+        mem_write_i64(rank, rx * 8, rank_x + rank_y)
+    } else {
+        mem_write_i64(parent, rx * 8, ry)
+        mem_write_i64(rank, ry * 8, rank_x + rank_y)
+    }
+
+    flex comp_cnt = mem_read_i64(dsu, 8)
+    mem_write_i64(dsu, 8, comp_cnt - 1)
+    deliver true
+}
+
+open flow dsu_component_count(dsu: Int) -> Int {
+    deliver mem_read_i64(dsu, 8)
+}
+
+open flow dsu_component_size(dsu: Int, x: Int) -> Int {
+    flex rx = dsu_find(dsu, x)
+    flex rank = mem_read_i64(dsu, 24)
+    deliver mem_read_i64(rank, rx * 8)
+}
+
+open flow dsu_free(dsu: Int) -> Int {
+    flex parent = mem_read_i64(dsu, 16)
+    flex rank = mem_read_i64(dsu, 24)
+    free_buffer(parent)
+    free_buffer(rank)
+    free_buffer(dsu)
+    deliver 0
+}

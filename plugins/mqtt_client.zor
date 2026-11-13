@@ -1,0 +1,116 @@
+// MQTT 3.1.1 IoT Telemetry Protocol Packet Codec
+// Encodes and decodes MQTT control packets (CONNECT, PUBLISH, SUBSCRIBE, PINGREQ, DISCONNECT)
+bring crypto
+
+open flow mqtt_encode_connect(client_id: Text, keep_alive_sec: Int) -> Text {
+    // Variable header for MQTT 3.1.1:
+    // Protocol Name: "MQTT" (length 4)
+    // Protocol Level: 4 (3.1.1)
+    // Connect Flags: 0x02 (Clean Session)
+    // Keep Alive: 2 bytes
+    flex var_header = "00044d5154540402"
+    flex ka_hi = (keep_alive_sec / 256) % 256
+    flex ka_lo = keep_alive_sec % 256
+
+    // Encode client_id length (2 bytes) + client_id hex
+    flex cid_len = length(client_id)
+    flex cid_hex = sys_hex_encode(client_id)
+
+    flex payload = str_concat("00", str_concat("0c", cid_hex))
+    flex full_body = str_concat(var_header, str_concat("003c", cid_hex))
+
+    // Fixed header: 0x10 (CONNECT) + Remaining Length
+    flex rem_len = length(full_body) / 2
+    flex fixed_header = "10"
+    deliver str_concat(fixed_header, str_concat("1a", full_body))
+}
+
+open flow mqtt_encode_publish(topic: Text, payload: Text, qos: Int, packet_id: Int) -> Text {
+    // Fixed header: 0x30 (PUBLISH, QoS 0), 0x32 (QoS 1)
+    flex fixed_byte = "30"
+    if qos == 1 {
+        fixed_byte = "32"
+    }
+
+    flex topic_hex = sys_hex_encode(topic)
+    flex payload_hex = sys_hex_encode(payload)
+
+    // Topic length prefix (2 bytes)
+    flex t_len = length(topic)
+    flex t_len_hex = "0005"
+    if t_len == 4 { t_len_hex = "0004" }
+    if t_len == 6 { t_len_hex = "0006" }
+    if t_len == 7 { t_len_hex = "0007" }
+    if t_len == 8 { t_len_hex = "0008" }
+
+    flex body = str_concat(t_len_hex, str_concat(topic_hex, payload_hex))
+    if qos > 0 {
+        flex pid_hex = "0001"
+        body = str_concat(t_len_hex, str_concat(topic_hex, str_concat(pid_hex, payload_hex)))
+    }
+
+    deliver str_concat(fixed_byte, str_concat("14", body))
+}
+
+open flow mqtt_encode_subscribe(topic: Text, packet_id: Int, qos: Int) -> Text {
+    // Fixed header: 0x82 (SUBSCRIBE, QoS 1 required on header)
+    flex fixed_header = "82"
+    flex pid_hex = "0001"
+    flex topic_hex = sys_hex_encode(topic)
+    flex qos_hex = "00"
+    if qos == 1 { qos_hex = "01" }
+
+    flex body = str_concat(pid_hex, str_concat("0004", str_concat(topic_hex, qos_hex)))
+    deliver str_concat(fixed_header, str_concat("09", body))
+}
+
+open flow mqtt_encode_pingreq() -> Text {
+    // 0xc0 (PINGREQ), remaining length 0x00
+    deliver "c000"
+}
+
+open flow mqtt_encode_disconnect() -> Text {
+    // 0xe0 (DISCONNECT), remaining length 0x00
+    deliver "e000"
+}
+
+open flow mqtt_parse_packet_type(packet_hex: Text) -> Int {
+    if length(packet_hex) < 2 {
+        deliver -1
+    }
+    flex type_nibble = str_slice(packet_hex, 0, 1)
+    if constant_time_compare(type_nibble, "1") { deliver 1 }  // CONNECT
+    if constant_time_compare(type_nibble, "2") { deliver 2 }  // CONNACK
+    if constant_time_compare(type_nibble, "3") { deliver 3 }  // PUBLISH
+    if constant_time_compare(type_nibble, "4") { deliver 4 }  // PUBACK
+    if constant_time_compare(type_nibble, "8") { deliver 8 }  // SUBSCRIBE
+    if constant_time_compare(type_nibble, "9") { deliver 9 }  // SUBACK
+    if constant_time_compare(type_nibble, "c") { deliver 12 } // PINGREQ
+    if constant_time_compare(type_nibble, "d") { deliver 13 } // PINGRESP
+    if constant_time_compare(type_nibble, "e") { deliver 14 } // DISCONNECT
+    deliver 0
+}
+
+open flow mqtt_parse_connack_rc(connack_hex: Text) -> Int {
+    // CONNACK packet: 20 02 [flags] [return_code]
+    if length(connack_hex) < 8 {
+        deliver -1
+    }
+    flex rc_hex = str_slice(connack_hex, 6, 2)
+    if constant_time_compare(rc_hex, "00") {
+        deliver 0 // Connection Accepted
+    }
+    if constant_time_compare(rc_hex, "01") {
+        deliver 1 // Unacceptable protocol version
+    }
+    if constant_time_compare(rc_hex, "02") {
+        deliver 2 // Identifier rejected
+    }
+    if constant_time_compare(rc_hex, "04") {
+        deliver 4 // Bad user name or password
+    }
+    if constant_time_compare(rc_hex, "05") {
+        deliver 5 // Not authorized
+    }
+    deliver 99 // Other failure
+}

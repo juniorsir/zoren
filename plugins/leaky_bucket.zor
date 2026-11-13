@@ -1,0 +1,78 @@
+// Leaky Bucket Traffic Shaper & Smooth Egress Queue
+// Enforces strictly uniform output flow rate and prevents traffic spikes from overwhelming backends
+
+// Header layout (40 bytes):
+// [0..8]:   capacity (Int, max water capacity)
+// [8..16]:  water (Int, current water level)
+// [16..24]: leak_rate_per_sec (Int, drain rate)
+// [24..32]: last_drain_sec (Int timestamp)
+// [32..40]: total_dropped (Int counter)
+
+open flow leaky_bucket_create(capacity: Int, leak_rate_per_sec: Int, now_sec: Int) -> Int {
+    flex cap = capacity
+    if cap < 1 {
+        cap = 1
+    }
+    flex rate = leak_rate_per_sec
+    if rate < 1 {
+        rate = 1
+    }
+    flex header = alloc_buffer(40)
+
+    mem_write_i64(header, 0, cap)
+    mem_write_i64(header, 8, 0) // initial water = 0
+    mem_write_i64(header, 16, rate)
+    mem_write_i64(header, 24, now_sec)
+    mem_write_i64(header, 32, 0) // total_dropped
+
+    deliver header
+}
+
+open flow leaky_bucket_drain(lb: Int, now_sec: Int) -> Int {
+    flex last_drain = mem_read_i64(lb, 24)
+    if now_sec <= last_drain {
+        deliver mem_read_i64(lb, 8)
+    }
+
+    flex elapsed = now_sec - last_drain
+    flex rate = mem_read_i64(lb, 16)
+    flex leaked = elapsed * rate
+
+    flex water = mem_read_i64(lb, 8)
+    if leaked >= water {
+        water = 0
+    } else {
+        water = water - leaked
+    }
+
+    mem_write_i64(lb, 8, water)
+    mem_write_i64(lb, 24, now_sec)
+    deliver water
+}
+
+open flow leaky_bucket_current_level(lb: Int, now_sec: Int) -> Int {
+    deliver leaky_bucket_drain(lb, now_sec)
+}
+
+open flow leaky_bucket_add(lb: Int, amount: Int, now_sec: Int) -> Bool {
+    flex water = leaky_bucket_drain(lb, now_sec)
+    flex cap = mem_read_i64(lb, 0)
+
+    if water + amount > cap {
+        flex dropped = mem_read_i64(lb, 32)
+        mem_write_i64(lb, 32, dropped + amount)
+        deliver false // Overflow: dropped
+    }
+
+    mem_write_i64(lb, 8, water + amount)
+    deliver true
+}
+
+open flow leaky_bucket_total_dropped(lb: Int) -> Int {
+    deliver mem_read_i64(lb, 32)
+}
+
+open flow leaky_bucket_free(lb: Int) -> Int {
+    free_buffer(lb)
+    deliver 0
+}
