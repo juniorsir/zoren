@@ -2,7 +2,7 @@
 // Production Raft state-machine log compaction, snapshot creation, and InstallSnapshot RPC synchronization.
 
 bring sys
-bring plugins.raft_consensus
+bring raft_consensus
 
 // ============================================================================
 // RAFT SNAPSHOT MANAGER MEMORY LAYOUT
