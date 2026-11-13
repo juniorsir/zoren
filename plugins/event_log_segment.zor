@@ -1,0 +1,147 @@
+// Zoren Segmented Event CommitLog Suite (plugins/event_log_segment.zor)
+// Production Kafka/CommitLog-style append-only segmented event storage with monotonic offset translation,
+// zero-copy entry lookup, and retention pruning.
+
+bring sys
+
+// ============================================================================
+// COMMITLOG SEGMENT MEMORY LAYOUT
+// Header (56 bytes):
+// [0..8]:   capacity (max entries in segment)
+// [8..16]:  oldest_offset (first active offset)
+// [16..24]: next_offset (monotonic next offset to assign)
+// [24..32]: entries_buf (capacity * 24 bytes)
+// [32..40]: index_buf (capacity * 8 bytes, offset-to-physical position)
+// [40..48]: count (active entries)
+// [48..56]: total_appended
+//
+// Each Entry (24 bytes):
+// [0..8]:   offset
+// [8..16]:  event_type
+// [16..24]: payload
+// ============================================================================
+
+flow log_entry_addr(log: Int, slot: Int) -> Int {
+    flex buf = mem_read_i64(log, 24)
+    deliver buf + (slot * 24)
+}
+
+open flow log_segment_new(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 128 }
+    flex entries_bytes = cap * 24
+    flex entries_buf = alloc_buffer(entries_bytes)
+    mem_fill(entries_buf, 0, entries_bytes)
+
+    flex index_bytes = cap * 8
+    flex index_buf = alloc_buffer(index_bytes)
+    mem_fill(index_buf, 0, index_bytes)
+
+    flex log = alloc_buffer(56)
+    mem_write_i64(log, 0, cap)
+    mem_write_i64(log, 8, 0)  // oldest_offset = 0
+    mem_write_i64(log, 16, 0) // next_offset = 0
+    mem_write_i64(log, 24, entries_buf)
+    mem_write_i64(log, 32, index_buf)
+    mem_write_i64(log, 40, 0) // count = 0
+    mem_write_i64(log, 48, 0) // total_appended = 0
+
+    deliver log
+}
+
+open flow log_capacity(log: Int) -> Int { deliver mem_read_i64(log, 0) }
+open flow log_oldest_offset(log: Int) -> Int { deliver mem_read_i64(log, 8) }
+open flow log_next_offset(log: Int) -> Int { deliver mem_read_i64(log, 16) }
+open flow log_count(log: Int) -> Int { deliver mem_read_i64(log, 40) }
+
+// Appends an event to the commit log
+// Returns assigned monotonic offset, or -1 if segment capacity is reached
+open flow log_append(log: Int, event_type: Int, payload: Int) -> Int {
+    flex cap = mem_read_i64(log, 0)
+    flex cnt = mem_read_i64(log, 40)
+    if cnt >= cap { deliver 0 - 1 }
+
+    flex next_off = mem_read_i64(log, 16)
+    flex slot = next_off % cap
+
+    flex entry_addr = log_entry_addr(log, slot)
+    mem_write_i64(entry_addr, 0, next_off)
+    mem_write_i64(entry_addr, 8, event_type)
+    mem_write_i64(entry_addr, 16, payload)
+
+    flex index_buf = mem_read_i64(log, 32)
+    mem_write_i64(index_buf, slot * 8, next_off)
+
+    mem_write_i64(log, 16, next_off + 1)
+    mem_write_i64(log, 40, cnt + 1)
+    flex tot = mem_read_i64(log, 48)
+    mem_write_i64(log, 48, tot + 1)
+
+    deliver next_off
+}
+
+// Reads payload for a given logical offset
+// Returns payload value or -1 if offset is not in active retention range
+open flow log_read_payload(log: Int, offset: Int) -> Int {
+    flex oldest = mem_read_i64(log, 8)
+    flex next_off = mem_read_i64(log, 16)
+    if offset < oldest || offset >= next_off { deliver 0 - 1 }
+
+    flex cap = mem_read_i64(log, 0)
+    flex slot = offset % cap
+    flex entry_addr = log_entry_addr(log, slot)
+
+    // Verify offset in slot
+    flex stored_off = mem_read_i64(entry_addr, 0)
+    if stored_off != offset { deliver 0 - 1 }
+
+    deliver mem_read_i64(entry_addr, 16)
+}
+
+// Reads event_type for a given logical offset
+open flow log_read_event_type(log: Int, offset: Int) -> Int {
+    flex oldest = mem_read_i64(log, 8)
+    flex next_off = mem_read_i64(log, 16)
+    if offset < oldest || offset >= next_off { deliver 0 - 1 }
+
+    flex cap = mem_read_i64(log, 0)
+    flex slot = offset % cap
+    flex entry_addr = log_entry_addr(log, slot)
+
+    flex stored_off = mem_read_i64(entry_addr, 0)
+    if stored_off != offset { deliver 0 - 1 }
+
+    deliver mem_read_i64(entry_addr, 8)
+}
+
+// Retention pruning: advances oldest_offset to min_offset (prunes older entries)
+// Returns number of entries pruned
+open flow log_truncate_before(log: Int, min_offset: Int) -> Int {
+    flex oldest = mem_read_i64(log, 8)
+    flex next_off = mem_read_i64(log, 16)
+    if min_offset <= oldest { deliver 0 }
+
+    flex target = min_offset
+    if target > next_off { target = next_off }
+
+    flex pruned = target - oldest
+    flex cur_cnt = mem_read_i64(log, 40)
+    flex new_cnt = cur_cnt - pruned
+    if new_cnt < 0 { new_cnt = 0 }
+
+    mem_write_i64(log, 8, target)
+    mem_write_i64(log, 40, new_cnt)
+
+    deliver pruned
+}
+
+open flow log_segment_free(log: Int) -> Int {
+    if log != 0 {
+        flex entries_buf = mem_read_i64(log, 24)
+        flex index_buf = mem_read_i64(log, 32)
+        if entries_buf != 0 { free_buffer(entries_buf) }
+        if index_buf != 0 { free_buffer(index_buf) }
+        free_buffer(log)
+    }
+    deliver 0
+}

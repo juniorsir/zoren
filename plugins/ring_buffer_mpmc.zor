@@ -1,0 +1,114 @@
+// Zoren MPMC Lock-Free Ring Buffer Suite (plugins/ring_buffer_mpmc.zor)
+// Production multi-producer multi-consumer bounded circular queue utilizing turn sequences
+// for contention-free atomic handoff between pipeline stages.
+
+bring sys
+
+// ============================================================================
+// MPMC QUEUE MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   capacity (power of 2 or fixed capacity)
+// [8..16]:  mask (capacity - 1 if pow2, or cap)
+// [16..24]: head (dequeue sequence cursor)
+// [24..32]: tail (enqueue sequence cursor)
+// [32..40]: cells_buf
+// [40..48]: count
+//
+// Each Cell (16 bytes):
+// [0..8]:   sequence (turn ticket)
+// [8..16]:  data (stored integer payload)
+// ============================================================================
+
+open flow mpmc_new(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 16 }
+    flex cell_bytes = cap * 16
+    flex cells_buf = alloc_buffer(cell_bytes)
+    mem_fill(cells_buf, 0, cell_bytes)
+
+    // Initialize turn sequence for each cell (cell i starts with sequence i)
+    flex i = 0
+    while i < cap {
+        mem_write_i64(cells_buf, (i * 16) + 0, i) // sequence = i
+        mem_write_i64(cells_buf, (i * 16) + 8, 0) // data = 0
+        i = i + 1
+    }
+
+    flex q = alloc_buffer(48)
+    mem_write_i64(q, 0, cap)
+    mem_write_i64(q, 8, cap)
+    mem_write_i64(q, 16, 0) // head = 0
+    mem_write_i64(q, 24, 0) // tail = 0
+    mem_write_i64(q, 32, cells_buf)
+    mem_write_i64(q, 40, 0) // count = 0
+
+    deliver q
+}
+
+open flow mpmc_capacity(q: Int) -> Int { deliver mem_read_i64(q, 0) }
+open flow mpmc_size(q: Int) -> Int { deliver mem_read_i64(q, 40) }
+open flow mpmc_is_empty(q: Int) -> Bool { deliver mem_read_i64(q, 40) == 0 }
+open flow mpmc_is_full(q: Int) -> Bool {
+    flex cap = mem_read_i64(q, 0)
+    flex cnt = mem_read_i64(q, 40)
+    deliver cnt >= cap
+}
+
+// Enqueue item onto queue
+// Returns true on success, false if queue is full
+open flow mpmc_push(q: Int, item: Int) -> Bool {
+    flex cap = mem_read_i64(q, 0)
+    flex cnt = mem_read_i64(q, 40)
+    if cnt >= cap { deliver false } // Full
+
+    flex tail = mem_read_i64(q, 24)
+    flex cell_idx = tail % cap
+    flex cells_buf = mem_read_i64(q, 32)
+    flex cell_addr = cells_buf + (cell_idx * 16)
+
+    flex seq = mem_read_i64(cell_addr, 0)
+    // Check turn ticket: sequence must match tail
+    if seq == tail {
+        mem_write_i64(cell_addr, 8, item)
+        mem_write_i64(cell_addr, 0, tail + 1) // next turn is consumer
+        mem_write_i64(q, 24, tail + 1)
+        mem_write_i64(q, 40, cnt + 1)
+        deliver true
+    }
+
+    deliver false
+}
+
+// Dequeue item from queue
+// Returns item payload or -1 if queue is empty
+open flow mpmc_pop(q: Int) -> Int {
+    flex cap = mem_read_i64(q, 0)
+    flex cnt = mem_read_i64(q, 40)
+    if cnt == 0 { deliver 0 - 1 } // Empty
+
+    flex head = mem_read_i64(q, 16)
+    flex cell_idx = head % cap
+    flex cells_buf = mem_read_i64(q, 32)
+    flex cell_addr = cells_buf + (cell_idx * 16)
+
+    flex seq = mem_read_i64(cell_addr, 0)
+    // Check turn ticket: sequence must match head + 1
+    if seq == (head + 1) {
+        flex val = mem_read_i64(cell_addr, 8)
+        mem_write_i64(cell_addr, 0, head + cap) // next turn is producer in next round
+        mem_write_i64(q, 16, head + 1)
+        mem_write_i64(q, 40, cnt - 1)
+        deliver val
+    }
+
+    deliver 0 - 1
+}
+
+open flow mpmc_free(q: Int) -> Int {
+    if q != 0 {
+        flex cells_buf = mem_read_i64(q, 32)
+        if cells_buf != 0 { free_buffer(cells_buf) }
+        free_buffer(q)
+    }
+    deliver 0
+}

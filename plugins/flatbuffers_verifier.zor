@@ -1,0 +1,118 @@
+// Zoren FlatBuffers Wire Verifier Suite (plugins/flatbuffers_verifier.zor)
+// Production zero-copy binary serialization inspector: vtable offset calculation,
+// field boundary checking, table size validation, and scalar field extraction.
+
+bring sys
+
+// Hex decoding helpers
+flow fb_hex_digit(hex_str: Text, idx: Int) -> Int {
+    if idx < 0 || idx >= length(hex_str) { deliver 0 }
+    flex ch = str_slice(hex_str, idx, 1)
+    flex digits = "0123456789abcdef"
+    flex pos = str_find(digits, ch)
+    if pos >= 0 { deliver pos }
+    flex upper = "ABCDEF"
+    flex u_pos = str_find(upper, ch)
+    if u_pos >= 0 { deliver u_pos + 10 }
+    deliver 0
+}
+
+flow fb_hex_byte(hex_str: Text, byte_offset: Int) -> Int {
+    flex idx = byte_offset * 2
+    flex d0 = fb_hex_digit(hex_str, idx)
+    flex d1 = fb_hex_digit(hex_str, idx + 1)
+    deliver (d0 * 16) + d1
+}
+
+open flow fb_read_u16(hex_str: Text, byte_offset: Int) -> Int {
+    flex b0 = fb_hex_byte(hex_str, byte_offset)
+    flex b1 = fb_hex_byte(hex_str, byte_offset + 1)
+    deliver b0 + (b1 * 256)
+}
+
+open flow fb_read_u32(hex_str: Text, byte_offset: Int) -> Int {
+    flex b0 = fb_hex_byte(hex_str, byte_offset)
+    flex b1 = fb_hex_byte(hex_str, byte_offset + 1)
+    flex b2 = fb_hex_byte(hex_str, byte_offset + 2)
+    flex b3 = fb_hex_byte(hex_str, byte_offset + 3)
+    deliver b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+}
+
+// FlatBuffers root offset: first 4 bytes of buffer
+open flow fb_get_root_offset(buf_hex: Text) -> Int {
+    flex str_len = length(buf_hex)
+    if str_len < 8 { deliver 0 - 1 }
+    deliver fb_read_u32(buf_hex, 0)
+}
+
+// Vtable offset: table begins with signed 32-bit soffset_t to vtable
+// soffset_t is negative offset from table start: vtable_pos = table_offset - soffset
+open flow fb_get_vtable_offset(buf_hex: Text, table_offset: Int) -> Int {
+    flex total_bytes = length(buf_hex) / 2
+    if table_offset < 0 || table_offset + 4 > total_bytes { deliver 0 - 1 }
+
+    flex u = fb_read_u32(buf_hex, table_offset)
+    if u > 2147483647 {
+        flex soff = 4294967296 - u
+        deliver table_offset - soff
+    }
+    deliver table_offset - u
+}
+
+// Reads field offset from vtable:
+// vtable header: 2 bytes vtable_size, 2 bytes table_size, followed by 2-byte field offsets
+open flow fb_get_field_offset(buf_hex: Text, table_offset: Int, field_id: Int) -> Int {
+    flex total_bytes = length(buf_hex) / 2
+    flex vtable_offset = fb_get_vtable_offset(buf_hex, table_offset)
+    if vtable_offset < 0 || vtable_offset + 4 > total_bytes { deliver 0 }
+
+    flex vtable_size = fb_read_u16(buf_hex, vtable_offset)
+    flex field_voffset = 4 + (field_id * 2)
+    if field_voffset + 2 > vtable_size { deliver 0 }
+
+    deliver fb_read_u16(buf_hex, vtable_offset + field_voffset)
+}
+
+// Reads 32-bit scalar field from table
+open flow fb_read_field_u32(buf_hex: Text, table_offset: Int, field_id: Int, default_val: Int) -> Int {
+    flex field_off = fb_get_field_offset(buf_hex, table_offset, field_id)
+    if field_off == 0 { deliver default_val }
+
+    flex total_bytes = length(buf_hex) / 2
+    flex data_pos = table_offset + field_off
+    if data_pos + 4 > total_bytes { deliver default_val }
+
+    deliver fb_read_u32(buf_hex, data_pos)
+}
+
+// Verifies that a FlatBuffers buffer is structurally valid
+open flow fb_verify_buffer(buf_hex: Text, max_fields: Int) -> Bool {
+    flex total_bytes = length(buf_hex) / 2
+    if total_bytes < 8 { deliver false }
+
+    flex root_offset = fb_get_root_offset(buf_hex)
+    if root_offset < 4 || root_offset >= total_bytes { deliver false }
+
+    flex vtable_offset = fb_get_vtable_offset(buf_hex, root_offset)
+    if vtable_offset < 0 || vtable_offset >= total_bytes { deliver false }
+
+    flex vtable_size = fb_read_u16(buf_hex, vtable_offset)
+    if vtable_size < 4 || vtable_offset + vtable_size > total_bytes { deliver false }
+
+    flex table_size = fb_read_u16(buf_hex, vtable_offset + 2)
+    if table_size < 4 || root_offset + table_size > total_bytes { deliver false }
+
+    // Verify all present field offsets fall within table_size
+    flex num_fields = (vtable_size - 4) / 2
+    if num_fields > max_fields { num_fields = max_fields }
+    flex f = 0
+    while f < num_fields {
+        flex f_off = fb_read_u16(buf_hex, vtable_offset + 4 + (f * 2))
+        if f_off > 0 && f_off >= table_size {
+            deliver false
+        }
+        f = f + 1
+    }
+
+    deliver true
+}

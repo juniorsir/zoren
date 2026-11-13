@@ -1,0 +1,225 @@
+// Zoren Succinct Bit Vector Suite (std/succinct_bit_vector.zor)
+// Production succinct data structure implementing Jacobson's rank directory for O(1) rank queries
+// and binary search select queries over compressed binary bit vectors.
+
+bring sys
+
+// ============================================================================
+// SUCCINCT BIT VECTOR MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   bit_count (total bits indexed)
+// [8..16]:  num_bytes ((bit_count + 7) / 8)
+// [16..24]: bytes_buf (raw bit array, 1 byte per 8 bits)
+// [24..32]: super_blocks_buf (cumulative popcounts every 512 bits = 64 bytes)
+// [32..40]: total_ones (total 1-bits)
+// [40..48]: is_built (1 if directory built, 0 otherwise)
+// ============================================================================
+
+flow sbv_pow2(pos: Int) -> Int {
+    flex p = pos % 8
+    if p == 0 { deliver 1 }
+    if p == 1 { deliver 2 }
+    if p == 2 { deliver 4 }
+    if p == 3 { deliver 8 }
+    if p == 4 { deliver 16 }
+    if p == 5 { deliver 32 }
+    if p == 6 { deliver 64 }
+    deliver 128
+}
+
+flow sbv_byte_popcount(b: Int) -> Int {
+    flex val = b % 256
+    if val < 0 { val = val + 256 }
+    flex count = 0
+    flex i = 0
+    while i < 8 {
+        if (val % 2) != 0 {
+            count = count + 1
+        }
+        val = val / 2
+        i = i + 1
+    }
+    deliver count
+}
+
+open flow sbv_new(bit_capacity: Int) -> Int {
+    flex cap = bit_capacity
+    if cap <= 0 { cap = 64 }
+    flex num_bytes = (cap + 7) / 8
+    flex bytes_buf = alloc_buffer(num_bytes)
+    mem_fill(bytes_buf, 0, num_bytes)
+
+    // Superblocks: 1 super-block per 64 bytes (512 bits)
+    flex num_supers = (num_bytes + 63) / 64 + 2
+    flex super_bytes = num_supers * 8
+    flex super_buf = alloc_buffer(super_bytes)
+    mem_fill(super_buf, 0, super_bytes)
+
+    flex sbv = alloc_buffer(48)
+    mem_write_i64(sbv, 0, cap)
+    mem_write_i64(sbv, 8, num_bytes)
+    mem_write_i64(sbv, 16, bytes_buf)
+    mem_write_i64(sbv, 24, super_buf)
+    mem_write_i64(sbv, 32, 0) // total_ones
+    mem_write_i64(sbv, 40, 0) // is_built = 0
+
+    deliver sbv
+}
+
+open flow sbv_size(sbv: Int) -> Int { deliver mem_read_i64(sbv, 0) }
+open flow sbv_total_ones(sbv: Int) -> Int { deliver mem_read_i64(sbv, 32) }
+
+open flow sbv_set(sbv: Int, bit_idx: Int) -> Int {
+    flex total_bits = mem_read_i64(sbv, 0)
+    if bit_idx < 0 || bit_idx >= total_bits { deliver 0 }
+
+    flex byte_idx = bit_idx / 8
+    flex bit_offset = bit_idx % 8
+    flex bytes_buf = mem_read_i64(sbv, 16)
+
+    flex cur_b = mem_read_byte(bytes_buf, byte_idx)
+    flex p2 = sbv_pow2(bit_offset)
+    if ((cur_b / p2) % 2) == 0 {
+        mem_write_byte(bytes_buf, byte_idx, cur_b + p2)
+        flex ones = mem_read_i64(sbv, 32)
+        mem_write_i64(sbv, 32, ones + 1)
+        mem_write_i64(sbv, 40, 0) // needs directory rebuild
+        deliver 1
+    }
+    deliver 0
+}
+
+open flow sbv_get(sbv: Int, bit_idx: Int) -> Int {
+    flex total_bits = mem_read_i64(sbv, 0)
+    if bit_idx < 0 || bit_idx >= total_bits { deliver 0 }
+
+    flex byte_idx = bit_idx / 8
+    flex bit_offset = bit_idx % 8
+    flex bytes_buf = mem_read_i64(sbv, 16)
+
+    flex cur_b = mem_read_byte(bytes_buf, byte_idx)
+    flex p2 = sbv_pow2(bit_offset)
+    if ((cur_b / p2) % 2) != 0 {
+        deliver 1
+    }
+    deliver 0
+}
+
+// Builds the Jacobson super-block directory for O(1) rank queries
+open flow sbv_build_index(sbv: Int) -> Int {
+    flex num_bytes = mem_read_i64(sbv, 8)
+    flex bytes_buf = mem_read_i64(sbv, 16)
+    flex super_buf = mem_read_i64(sbv, 24)
+
+    flex running_sum = 0
+    flex b = 0
+    while b < num_bytes {
+        if (b % 64) == 0 {
+            flex super_idx = b / 64
+            mem_write_i64(super_buf, super_idx * 8, running_sum)
+        }
+        flex byte_val = mem_read_byte(bytes_buf, b)
+        running_sum = running_sum + sbv_byte_popcount(byte_val)
+        b = b + 1
+    }
+
+    // Terminating sentinel super-block
+    flex last_super = (num_bytes + 63) / 64
+    mem_write_i64(super_buf, last_super * 8, running_sum)
+    mem_write_i64(sbv, 32, running_sum)
+    mem_write_i64(sbv, 40, 1) // is_built = 1
+
+    deliver running_sum
+}
+
+// Returns the number of 1-bits in range [0..i)
+open flow sbv_rank1(sbv: Int, i: Int) -> Int {
+    flex total_bits = mem_read_i64(sbv, 0)
+    if i <= 0 { deliver 0 }
+    flex limit = i
+    if limit > total_bits { limit = total_bits }
+
+    if mem_read_i64(sbv, 40) == 0 {
+        sbv_build_index(sbv)
+    }
+
+    flex target_byte = limit / 8
+    flex rem_bits = limit % 8
+    flex super_idx = target_byte / 64
+
+    flex super_buf = mem_read_i64(sbv, 24)
+    flex bytes_buf = mem_read_i64(sbv, 16)
+
+    flex r = mem_read_i64(super_buf, super_idx * 8)
+
+    // Sum intermediate bytes between super-block boundary and target byte
+    flex b = super_idx * 64
+    while b < target_byte {
+        flex byte_val = mem_read_byte(bytes_buf, b)
+        r = r + sbv_byte_popcount(byte_val)
+        b = b + 1
+    }
+
+    // Sum remaining bits in target byte
+    if rem_bits > 0 {
+        flex final_b = mem_read_byte(bytes_buf, target_byte)
+        flex bit_idx = 0
+        while bit_idx < rem_bits {
+            flex p2 = sbv_pow2(bit_idx)
+            if ((final_b / p2) % 2) != 0 {
+                r = r + 1
+            }
+            bit_idx = bit_idx + 1
+        }
+    }
+
+    deliver r
+}
+
+// Returns the number of 0-bits in range [0..i)
+open flow sbv_rank0(sbv: Int, i: Int) -> Int {
+    if i <= 0 { deliver 0 }
+    flex total_bits = mem_read_i64(sbv, 0)
+    flex limit = i
+    if limit > total_bits { limit = total_bits }
+    deliver limit - sbv_rank1(sbv, limit)
+}
+
+// Binary search for the position of the k-th 1-bit (1-indexed, k >= 1)
+// Returns 0-based index or -1 if k > total_ones
+open flow sbv_select1(sbv: Int, k: Int) -> Int {
+    if k <= 0 { deliver 0 - 1 }
+    if mem_read_i64(sbv, 40) == 0 {
+        sbv_build_index(sbv)
+    }
+    flex total_ones = mem_read_i64(sbv, 32)
+    if k > total_ones { deliver 0 - 1 }
+
+    flex total_bits = mem_read_i64(sbv, 0)
+    flex low = 0
+    flex high = total_bits - 1
+    flex ans = 0 - 1
+
+    while low <= high {
+        flex mid = (low + high) / 2
+        flex r = sbv_rank1(sbv, mid + 1)
+        if r >= k {
+            ans = mid
+            high = mid - 1
+        } else {
+            low = mid + 1
+        }
+    }
+    deliver ans
+}
+
+open flow sbv_free(sbv: Int) -> Int {
+    if sbv != 0 {
+        flex bytes_buf = mem_read_i64(sbv, 16)
+        flex super_buf = mem_read_i64(sbv, 24)
+        if bytes_buf != 0 { free_buffer(bytes_buf) }
+        if super_buf != 0 { free_buffer(super_buf) }
+        free_buffer(sbv)
+    }
+    deliver 0
+}
