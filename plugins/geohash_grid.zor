@@ -1,0 +1,184 @@
+// Zoren Geohash Spatial Grid Suite (plugins/geohash_grid.zor)
+// Hierarchical spatial grid indexing conforming to the standard Geohash base32 encoding.
+// Uses microdegree fixed-point coordinates (1 microdegree = 1e-6 degrees) to ensure deterministic,
+// zero-drift spatial partitioning and prefix-based bounding box queries.
+
+bring sys
+
+// Base32 character alphabet: 32 chars (omits 'a', 'i', 'l', 'o' to avoid visual ambiguity)
+// "0123456789bcdefghjkmnpqrstuvwxyz"
+
+flow geohash_char_for_index(idx: Int) -> Text {
+    flex i = idx % 32
+    if i < 0 { i = i + 32 }
+    flex alphabet = "0123456789bcdefghjkmnpqrstuvwxyz"
+    deliver str_slice(alphabet, i, 1)
+}
+
+open flow geohash_index_for_char(ch: Text) -> Int {
+    flex alphabet = "0123456789bcdefghjkmnpqrstuvwxyz"
+    flex pos = str_find(alphabet, str_lower(ch))
+    if pos >= 0 { deliver pos }
+    deliver 0 - 1
+}
+
+// Encodes microdegrees (lat: -90_000_000 .. 90_000_000, lon: -180_000_000 .. 180_000_000)
+// into a geohash string of the specified precision (characters, 1..12).
+open flow geohash_encode(lat_micro: Int, lon_micro: Int, precision: Int) -> Text {
+    flex prec = precision
+    if prec <= 0 { prec = 1 }
+    if prec > 12 { prec = 12 }
+
+    flex min_lat = 0 - 90000000
+    flex max_lat = 90000000
+    flex min_lon = 0 - 180000000
+    flex max_lon = 180000000
+
+    flex is_even = true // true = lon, false = lat
+    flex char_idx = 0
+    flex bit_idx = 0
+    flex res = ""
+
+    flex total_bits = prec * 5
+    flex i = 0
+    while i < total_bits {
+        flex bit_val = 0
+        if is_even {
+            flex mid_lon = (min_lon + max_lon) / 2
+            if lon_micro >= mid_lon {
+                bit_val = 1
+                min_lon = mid_lon
+            } else {
+                bit_val = 0
+                max_lon = mid_lon
+            }
+        } else {
+            flex mid_lat = (min_lat + max_lat) / 2
+            if lat_micro >= mid_lat {
+                bit_val = 1
+                min_lat = mid_lat
+            } else {
+                bit_val = 0
+                max_lat = mid_lat
+            }
+        }
+
+        char_idx = (char_idx * 2) + bit_val
+        bit_idx = bit_idx + 1
+
+        if bit_idx == 5 {
+            flex ch = geohash_char_for_index(char_idx)
+            res = str_concat(res, ch)
+            char_idx = 0
+            bit_idx = 0
+        }
+
+        is_even = !is_even
+        i = i + 1
+    }
+
+    deliver res
+}
+
+// Decodes a geohash string into its bounding box in microdegrees
+// Returns allocated GeohashBox buffer (56 bytes):
+// [0..8]:   min_lat
+// [8..16]:  max_lat
+// [16..24]: min_lon
+// [24..32]: max_lon
+// [32..40]: center_lat
+// [40..48]: center_lon
+// [48..56]: precision
+open flow geohash_decode(hash: Text) -> Int {
+    flex len = length(hash)
+    flex min_lat = 0 - 90000000
+    flex max_lat = 90000000
+    flex min_lon = 0 - 180000000
+    flex max_lon = 180000000
+
+    flex is_even = true
+
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(hash, i, 1)
+        flex val = geohash_index_for_char(ch)
+        if val >= 0 {
+            flex mask = 16
+            while mask > 0 {
+                flex bit = 0
+                if ((val / mask) % 2) == 1 { bit = 1 }
+
+                if is_even {
+                    flex mid_lon = (min_lon + max_lon) / 2
+                    if bit == 1 {
+                        min_lon = mid_lon
+                    } else {
+                        max_lon = mid_lon
+                    }
+                } else {
+                    flex mid_lat = (min_lat + max_lat) / 2
+                    if bit == 1 {
+                        min_lat = mid_lat
+                    } else {
+                        max_lat = mid_lat
+                    }
+                }
+
+                is_even = !is_even
+                mask = mask / 2
+            }
+        }
+        i = i + 1
+    }
+
+    flex c_lat = (min_lat + max_lat) / 2
+    flex c_lon = (min_lon + max_lon) / 2
+
+    flex box = alloc_buffer(56)
+    mem_write_i64(box, 0, min_lat)
+    mem_write_i64(box, 8, max_lat)
+    mem_write_i64(box, 16, min_lon)
+    mem_write_i64(box, 24, max_lon)
+    mem_write_i64(box, 32, c_lat)
+    mem_write_i64(box, 40, c_lon)
+    mem_write_i64(box, 48, len)
+
+    deliver box
+}
+
+open flow geohash_box_min_lat(box: Int) -> Int { deliver mem_read_i64(box, 0) }
+open flow geohash_box_max_lat(box: Int) -> Int { deliver mem_read_i64(box, 8) }
+open flow geohash_box_min_lon(box: Int) -> Int { deliver mem_read_i64(box, 16) }
+open flow geohash_box_max_lon(box: Int) -> Int { deliver mem_read_i64(box, 24) }
+open flow geohash_box_center_lat(box: Int) -> Int { deliver mem_read_i64(box, 32) }
+open flow geohash_box_center_lon(box: Int) -> Int { deliver mem_read_i64(box, 40) }
+open flow geohash_box_precision(box: Int) -> Int { deliver mem_read_i64(box, 48) }
+
+open flow geohash_box_free(box: Int) -> Int {
+    if box != 0 {
+        free_buffer(box)
+    }
+    deliver 0
+}
+
+open flow geohash_prefix_matches(hash1: Text, hash2: Text, prefix_len: Int) -> Bool {
+    if length(hash1) < prefix_len || length(hash2) < prefix_len {
+        deliver false
+    }
+    flex sub1 = str_slice(hash1, 0, prefix_len)
+    flex sub2 = str_slice(hash2, 0, prefix_len)
+    deliver constant_time_compare(sub1, sub2)
+}
+
+open flow geohash_estimate_error_meters(precision: Int) -> Int {
+    if precision <= 1 { deliver 5000000 }
+    if precision == 2 { deliver 1250000 }
+    if precision == 3 { deliver 156000 }
+    if precision == 4 { deliver 39000 }
+    if precision == 5 { deliver 4900 }
+    if precision == 6 { deliver 1200 }
+    if precision == 7 { deliver 152 }
+    if precision == 8 { deliver 38 }
+    if precision == 9 { deliver 5 }
+    deliver 1
+}

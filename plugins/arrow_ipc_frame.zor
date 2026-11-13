@@ -1,0 +1,172 @@
+// Zoren Apache Arrow IPC Streaming Frame Suite (plugins/arrow_ipc_frame.zor)
+// Production columnar stream framing codec conforming to the Apache Arrow IPC encapsulated message specification.
+// Handles 0xFFFFFFFF continuation markers, metadata alignment (8-byte multiples), SIMD buffer padding (64-byte alignment),
+// and frame validation.
+
+bring sys
+
+// ============================================================================
+// ARROW IPC SPECIFICATION CONSTANTS
+// Continuation Indicator: 4 bytes of 0xFF (0xFFFFFFFF = -1 signed 32-bit int)
+// Message Types:
+// 1 = Schema
+// 2 = RecordBatch
+// 3 = DictionaryBatch
+// 4 = Tensor
+// Alignment rules:
+// - Metadata length must be divisible by 8 bytes.
+// - Body buffers should be padded to 8 or 64 bytes for memory alignment.
+// ============================================================================
+
+flow arrow_hex_nibble(n: Int) -> Text {
+    flex v = n % 16
+    if v < 0 { v = v + 16 }
+    if v == 0 { deliver "0" }
+    if v == 1 { deliver "1" }
+    if v == 2 { deliver "2" }
+    if v == 3 { deliver "3" }
+    if v == 4 { deliver "4" }
+    if v == 5 { deliver "5" }
+    if v == 6 { deliver "6" }
+    if v == 7 { deliver "7" }
+    if v == 8 { deliver "8" }
+    if v == 9 { deliver "9" }
+    if v == 10 { deliver "a" }
+    if v == 11 { deliver "b" }
+    if v == 12 { deliver "c" }
+    if v == 13 { deliver "d" }
+    if v == 14 { deliver "e" }
+    deliver "f"
+}
+
+open flow arrow_byte_to_hex(b: Int) -> Text {
+    flex val = b % 256
+    if val < 0 { val = val + 256 }
+    flex hi = arrow_hex_nibble(val / 16)
+    flex lo = arrow_hex_nibble(val % 16)
+    deliver str_concat(hi, lo)
+}
+
+flow arrow_hex_digit(hex_str: Text, idx: Int) -> Int {
+    if idx < 0 || idx >= length(hex_str) { deliver 0 }
+    flex ch = str_slice(hex_str, idx, 1)
+    flex digits = "0123456789abcdef"
+    flex pos = str_find(digits, str_lower(ch))
+    if pos >= 0 { deliver pos }
+    deliver 0
+}
+
+flow arrow_hex_byte(hex_str: Text, byte_offset: Int) -> Int {
+    flex idx = byte_offset * 2
+    flex d0 = arrow_hex_digit(hex_str, idx)
+    flex d1 = arrow_hex_digit(hex_str, idx + 1)
+    deliver (d0 * 16) + d1
+}
+
+open flow arrow_write_u32_le_hex(val: Int) -> Text {
+    flex b0 = arrow_byte_to_hex(val % 256)
+    flex b1 = arrow_byte_to_hex((val / 256) % 256)
+    flex b2 = arrow_byte_to_hex((val / 65536) % 256)
+    flex b3 = arrow_byte_to_hex((val / 16777216) % 256)
+    flex s0 = str_concat(b0, b1)
+    flex s1 = str_concat(b2, b3)
+    deliver str_concat(s0, s1)
+}
+
+open flow arrow_read_u32_le_hex(hex_str: Text, byte_offset: Int) -> Int {
+    flex b0 = arrow_hex_byte(hex_str, byte_offset)
+    flex b1 = arrow_hex_byte(hex_str, byte_offset + 1)
+    flex b2 = arrow_hex_byte(hex_str, byte_offset + 2)
+    flex b3 = arrow_hex_byte(hex_str, byte_offset + 3)
+    deliver b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+}
+
+open flow arrow_calc_padding(size: Int, align: Int) -> Int {
+    if align <= 0 { deliver 0 }
+    flex remainder = size % align
+    if remainder == 0 { deliver 0 }
+    deliver align - remainder
+}
+
+open flow arrow_pad_to_8bytes(len: Int) -> Int {
+    deliver len + arrow_calc_padding(len, 8)
+}
+
+open flow arrow_pad_to_64bytes(len: Int) -> Int {
+    deliver len + arrow_calc_padding(len, 64)
+}
+
+open flow arrow_encode_frame_header(msg_type: Int, metadata_len: Int, body_len: Int) -> Text {
+    flex meta_aligned = arrow_pad_to_8bytes(metadata_len)
+    flex cont_hex = "ffffffff"
+    flex meta_hex = arrow_write_u32_le_hex(meta_aligned)
+    flex type_hex = arrow_write_u32_le_hex(msg_type)
+    flex body_hex = arrow_write_u32_le_hex(body_len)
+    flex p1 = str_concat(cont_hex, meta_hex)
+    flex p2 = str_concat(type_hex, body_hex)
+    deliver str_concat(p1, p2)
+}
+
+open flow arrow_parse_frame_header(frame_hex: Text) -> Int {
+    flex hdr = alloc_buffer(48)
+    mem_fill(hdr, 0, 48)
+
+    flex str_len = length(frame_hex)
+    if str_len < 32 {
+        mem_write_i64(hdr, 32, 0)
+        deliver hdr
+    }
+
+    flex c0 = arrow_read_u32_le_hex(frame_hex, 0)
+    flex is_cont = (c0 == 4294967295) || (c0 == (0 - 1))
+    flex prefix = str_slice(frame_hex, 0, 8)
+    if constant_time_compare(prefix, "ffffffff") {
+        is_cont = true
+    }
+
+    flex meta_len = arrow_read_u32_le_hex(frame_hex, 4)
+    flex msg_type = arrow_read_u32_le_hex(frame_hex, 8)
+    flex body_len = arrow_read_u32_le_hex(frame_hex, 12)
+
+    flex valid = 1
+    if !is_cont { valid = 0 }
+    if (meta_len % 8) != 0 { valid = 0 }
+    if msg_type < 1 || msg_type > 4 { valid = 0 }
+    if body_len < 0 { valid = 0 }
+
+    flex total = 16 + meta_len + body_len
+
+    mem_write_i64(hdr, 0, 4294967295)
+    mem_write_i64(hdr, 8, meta_len)
+    mem_write_i64(hdr, 16, msg_type)
+    mem_write_i64(hdr, 24, body_len)
+    mem_write_i64(hdr, 32, valid)
+    mem_write_i64(hdr, 40, total)
+
+    deliver hdr
+}
+
+open flow arrow_header_continuation(hdr: Int) -> Int { deliver mem_read_i64(hdr, 0) }
+open flow arrow_header_metadata_len(hdr: Int) -> Int { deliver mem_read_i64(hdr, 8) }
+open flow arrow_header_msg_type(hdr: Int) -> Int { deliver mem_read_i64(hdr, 16) }
+open flow arrow_header_body_len(hdr: Int) -> Int { deliver mem_read_i64(hdr, 24) }
+open flow arrow_header_is_valid(hdr: Int) -> Bool { deliver mem_read_i64(hdr, 32) == 1 }
+open flow arrow_header_total_size(hdr: Int) -> Int { deliver mem_read_i64(hdr, 40) }
+
+open flow arrow_verify_alignment(hdr: Int) -> Bool {
+    if !arrow_header_is_valid(hdr) { deliver false }
+    flex meta_len = arrow_header_metadata_len(hdr)
+    if (meta_len % 8) != 0 { deliver false }
+    deliver true
+}
+
+open flow arrow_is_simd_aligned(offset_or_len: Int) -> Bool {
+    deliver (offset_or_len % 64) == 0
+}
+
+open flow arrow_header_free(hdr: Int) -> Int {
+    if hdr != 0 {
+        free_buffer(hdr)
+    }
+    deliver 0
+}

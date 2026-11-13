@@ -1,0 +1,249 @@
+// Zoren Asynchronous Actor System Suite (plugins/actor_system.zor)
+// Production actor model runtime featuring isolated state encapsulation, bounded ring-buffer mailboxes,
+// non-blocking message dispatching, and one-for-one supervisor restart recovery.
+
+bring sys
+
+// ============================================================================
+// MEMORY LAYOUTS
+// ActorSystem (72 bytes):
+// [0..8]:   max_actors
+// [8..16]:  active_actors
+// [16..24]: status_buf
+// [24..32]: restarts_buf
+// [32..40]: mb_heads
+// [40..48]: mb_tails
+// [48..56]: mb_counts
+// [56..64]: mb_caps
+// [64..72]: mb_data
+//
+// ActorMessage (40 bytes):
+// [0..8]:   sender
+// [8..16]:  recipient
+// [16..24]: tag
+// [24..32]: payload
+// [32..40]: is_valid (1 or 0)
+// ============================================================================
+
+flow actor_slot_addr(sys: Int, actor_id: Int, slot: Int, max_cap: Int) -> Int {
+    flex mb_data = mem_read_i64(sys, 64)
+    flex actor_offset = actor_id * max_cap * 32
+    flex slot_offset = slot * 32
+    deliver mb_data + actor_offset + slot_offset
+}
+
+open flow actor_system_init(max_actors: Int, max_mailbox_cap: Int) -> Int {
+    flex act_bytes = max_actors * 8
+    flex status_buf = alloc_buffer(act_bytes)
+    flex restarts_buf = alloc_buffer(act_bytes)
+    flex mb_heads = alloc_buffer(act_bytes)
+    flex mb_tails = alloc_buffer(act_bytes)
+    flex mb_counts = alloc_buffer(act_bytes)
+    flex mb_caps = alloc_buffer(act_bytes)
+
+    mem_fill(status_buf, 0, act_bytes)
+    mem_fill(restarts_buf, 0, act_bytes)
+    mem_fill(mb_heads, 0, act_bytes)
+    mem_fill(mb_tails, 0, act_bytes)
+    mem_fill(mb_counts, 0, act_bytes)
+    mem_fill(mb_caps, 0, act_bytes)
+
+    flex total_data_bytes = max_actors * max_mailbox_cap * 32
+    flex mb_data = alloc_buffer(total_data_bytes)
+    mem_fill(mb_data, 0, total_data_bytes)
+
+    flex sys = alloc_buffer(72)
+    mem_write_i64(sys, 0, max_actors)
+    mem_write_i64(sys, 8, 0)
+    mem_write_i64(sys, 16, status_buf)
+    mem_write_i64(sys, 24, restarts_buf)
+    mem_write_i64(sys, 32, mb_heads)
+    mem_write_i64(sys, 40, mb_tails)
+    mem_write_i64(sys, 48, mb_counts)
+    mem_write_i64(sys, 56, mb_caps)
+    mem_write_i64(sys, 64, mb_data)
+
+    deliver sys
+}
+
+// Spawns and registers an actor with a given mailbox capacity
+open flow actor_spawn(sys: Int, actor_id: Int, mailbox_cap: Int) -> Int {
+    flex max_act = mem_read_i64(sys, 0)
+    if actor_id < 0 || actor_id >= max_act { deliver 0 }
+    flex cap = mailbox_cap
+    if cap <= 0 { cap = 16 }
+
+    flex off = actor_id * 8
+    flex status_buf = mem_read_i64(sys, 16)
+    flex restarts_buf = mem_read_i64(sys, 24)
+    flex mb_heads = mem_read_i64(sys, 32)
+    flex mb_tails = mem_read_i64(sys, 40)
+    flex mb_counts = mem_read_i64(sys, 48)
+    flex mb_caps = mem_read_i64(sys, 56)
+
+    mem_write_i64(status_buf, off, 1) // status: 1 = idle/active
+    mem_write_i64(restarts_buf, off, 0)
+    mem_write_i64(mb_heads, off, 0)
+    mem_write_i64(mb_tails, off, 0)
+    mem_write_i64(mb_counts, off, 0)
+    mem_write_i64(mb_caps, off, cap)
+
+    deliver 1
+}
+
+// Dispatches a message to the target actor's mailbox
+open flow actor_send(sys: Int, sender: Int, recipient: Int, tag: Int, payload: Int) -> Int {
+    flex max_act = mem_read_i64(sys, 0)
+    if recipient < 0 || recipient >= max_act { deliver 0 }
+    flex off = recipient * 8
+    flex status_buf = mem_read_i64(sys, 16)
+    flex status = mem_read_i64(status_buf, off)
+    if status != 1 { deliver 0 }
+
+    flex mb_counts = mem_read_i64(sys, 48)
+    flex mb_caps = mem_read_i64(sys, 56)
+    flex count = mem_read_i64(mb_counts, off)
+    flex cap = mem_read_i64(mb_caps, off)
+    if count >= cap { deliver 0 }
+
+    flex mb_tails = mem_read_i64(sys, 40)
+    flex tail = mem_read_i64(mb_tails, off)
+    flex slot_addr = actor_slot_addr(sys, recipient, tail, cap)
+
+    mem_write_i64(slot_addr, 0, sender)
+    mem_write_i64(slot_addr, 8, recipient)
+    mem_write_i64(slot_addr, 16, tag)
+    mem_write_i64(slot_addr, 24, payload)
+
+    flex next_tail = (tail + 1) % cap
+    mem_write_i64(mb_tails, off, next_tail)
+    mem_write_i64(mb_counts, off, count + 1)
+
+    deliver 1
+}
+
+// Dequeues the next message from the actor's mailbox
+// Returns allocated message buffer (40 bytes)
+open flow actor_receive(sys: Int, actor_id: Int) -> Int {
+    flex msg = alloc_buffer(40)
+    mem_fill(msg, 0, 40)
+
+    flex max_act = mem_read_i64(sys, 0)
+    if actor_id < 0 || actor_id >= max_act {
+        mem_write_i64(msg, 32, 0) // is_valid = false
+        deliver msg
+    }
+    flex off = actor_id * 8
+    flex status_buf = mem_read_i64(sys, 16)
+    flex status = mem_read_i64(status_buf, off)
+    if status != 1 {
+        mem_write_i64(msg, 32, 0)
+        deliver msg
+    }
+
+    flex mb_counts = mem_read_i64(sys, 48)
+    flex count = mem_read_i64(mb_counts, off)
+    if count == 0 {
+        mem_write_i64(msg, 32, 0)
+        deliver msg
+    }
+
+    flex mb_heads = mem_read_i64(sys, 32)
+    flex mb_caps = mem_read_i64(sys, 56)
+    flex head = mem_read_i64(mb_heads, off)
+    flex cap = mem_read_i64(mb_caps, off)
+    flex slot_addr = actor_slot_addr(sys, actor_id, head, cap)
+
+    flex s = mem_read_i64(slot_addr, 0)
+    flex r = mem_read_i64(slot_addr, 8)
+    flex t = mem_read_i64(slot_addr, 16)
+    flex p = mem_read_i64(slot_addr, 24)
+
+    flex next_head = (head + 1) % cap
+    mem_write_i64(mb_heads, off, next_head)
+    mem_write_i64(mb_counts, off, count - 1)
+
+    mem_write_i64(msg, 0, s)
+    mem_write_i64(msg, 8, r)
+    mem_write_i64(msg, 16, t)
+    mem_write_i64(msg, 24, p)
+    mem_write_i64(msg, 32, 1) // is_valid = true
+
+    deliver msg
+}
+
+open flow actor_msg_sender(msg: Int) -> Int { deliver mem_read_i64(msg, 0) }
+open flow actor_msg_recipient(msg: Int) -> Int { deliver mem_read_i64(msg, 8) }
+open flow actor_msg_tag(msg: Int) -> Int { deliver mem_read_i64(msg, 16) }
+open flow actor_msg_payload(msg: Int) -> Int { deliver mem_read_i64(msg, 24) }
+open flow actor_msg_is_valid(msg: Int) -> Bool { deliver mem_read_i64(msg, 32) == 1 }
+open flow actor_msg_free(msg: Int) -> Int {
+    if msg != 0 {
+        free_buffer(msg)
+    }
+    deliver 0
+}
+
+open flow actor_mailbox_len(sys: Int, actor_id: Int) -> Int {
+    flex max_act = mem_read_i64(sys, 0)
+    if actor_id < 0 || actor_id >= max_act { deliver 0 }
+    flex mb_counts = mem_read_i64(sys, 48)
+    deliver mem_read_i64(mb_counts, actor_id * 8)
+}
+
+open flow actor_trigger_fault(sys: Int, actor_id: Int) -> Int {
+    flex max_act = mem_read_i64(sys, 0)
+    if actor_id < 0 || actor_id >= max_act { deliver 0 }
+    flex status_buf = mem_read_i64(sys, 16)
+    mem_write_i64(status_buf, actor_id * 8, 2) // status 2 = failed
+    deliver 1
+}
+
+open flow actor_supervise_restart(sys: Int, actor_id: Int) -> Int {
+    flex max_act = mem_read_i64(sys, 0)
+    if actor_id < 0 || actor_id >= max_act { deliver 0 }
+    flex off = actor_id * 8
+    flex restarts_buf = mem_read_i64(sys, 24)
+    flex restarts = mem_read_i64(restarts_buf, off)
+    mem_write_i64(restarts_buf, off, restarts + 1)
+
+    flex mb_heads = mem_read_i64(sys, 32)
+    flex mb_tails = mem_read_i64(sys, 40)
+    flex mb_counts = mem_read_i64(sys, 48)
+    mem_write_i64(mb_heads, off, 0)
+    mem_write_i64(mb_tails, off, 0)
+    mem_write_i64(mb_counts, off, 0)
+
+    flex status_buf = mem_read_i64(sys, 16)
+    mem_write_i64(status_buf, off, 1)
+    deliver 1
+}
+
+open flow actor_get_restarts(sys: Int, actor_id: Int) -> Int {
+    flex max_act = mem_read_i64(sys, 0)
+    if actor_id < 0 || actor_id >= max_act { deliver 0 }
+    flex restarts_buf = mem_read_i64(sys, 24)
+    deliver mem_read_i64(restarts_buf, actor_id * 8)
+}
+
+open flow actor_system_free(sys: Int) -> Int {
+    if sys != 0 {
+        flex status_buf = mem_read_i64(sys, 16)
+        flex restarts_buf = mem_read_i64(sys, 24)
+        flex mb_heads = mem_read_i64(sys, 32)
+        flex mb_tails = mem_read_i64(sys, 40)
+        flex mb_counts = mem_read_i64(sys, 48)
+        flex mb_caps = mem_read_i64(sys, 56)
+        flex mb_data = mem_read_i64(sys, 64)
+
+        if status_buf != 0 { free_buffer(status_buf) }
+        if restarts_buf != 0 { free_buffer(restarts_buf) }
+        if mb_heads != 0 { free_buffer(mb_heads) }
+        if mb_tails != 0 { free_buffer(mb_tails) }
+        if mb_counts != 0 { free_buffer(mb_counts) }
+        if mb_caps != 0 { free_buffer(mb_caps) }
+        if mb_data != 0 { free_buffer(mb_data) }
+        free_buffer(sys)
+    }
+    deliver 0
+}

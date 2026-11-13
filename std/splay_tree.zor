@@ -1,0 +1,351 @@
+// Zoren Self-Adjusting Splay Tree Suite (std/splay_tree.zor)
+// Production self-balancing binary search tree with Sleator-Tarjan splay operations.
+// Automatically elevates accessed keys to root for O(log N) amortized operations and LRU cache locality.
+
+bring sys
+
+// ============================================================================
+// SPLAY TREE MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   count
+// [8..16]:  root_idx (-1 if empty)
+// [16..24]: nodes_buf
+// [24..32]: capacity
+// [32..40]: total_splays
+// [40..48]: reserved
+//
+// Each Node (64 bytes):
+// [0..8]:   key
+// [8..16]:  val
+// [16..24]: left (-1 if none)
+// [24..32]: right (-1 if none)
+// [32..40]: parent (-1 if none)
+// [40..48]: access_count
+// [48..56]: reserved1
+// [56..64]: reserved2
+// ============================================================================
+
+open flow splay_new(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 256 }
+    flex node_size = 64
+    flex table_size = cap * node_size
+    flex nodes_buf = alloc_buffer(table_size)
+    mem_fill(nodes_buf, 0, table_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0)          // count = 0
+    mem_write_i64(header, 8, 0 - 1)      // root_idx = -1
+    mem_write_i64(header, 16, nodes_buf)
+    mem_write_i64(header, 24, cap)
+    mem_write_i64(header, 32, 0)         // total_splays = 0
+    mem_write_i64(header, 40, 0)
+
+    deliver header
+}
+
+open flow splay_size(tree: Int) -> Int {
+    deliver mem_read_i64(tree, 0)
+}
+
+open flow splay_is_empty(tree: Int) -> Bool {
+    deliver mem_read_i64(tree, 0) == 0
+}
+
+open flow splay_total_splays(tree: Int) -> Int {
+    deliver mem_read_i64(tree, 32)
+}
+
+open flow splay_root_key(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 8)
+    if root < 0 { deliver 0 - 1 }
+    flex nodes_buf = mem_read_i64(tree, 16)
+    deliver mem_read_i64(nodes_buf, root * 64 + 0)
+}
+
+open flow splay_root_val(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 8)
+    if root < 0 { deliver 0 - 1 }
+    flex nodes_buf = mem_read_i64(tree, 16)
+    deliver mem_read_i64(nodes_buf, root * 64 + 8)
+}
+
+flow splay_rotate_left(tree: Int, x: Int) -> Int {
+    flex nodes_buf = mem_read_i64(tree, 16)
+    flex x_base = x * 64
+    flex y = mem_read_i64(nodes_buf, x_base + 24) // y = right[x]
+    if y < 0 { deliver 0 }
+    flex y_base = y * 64
+
+    flex y_left = mem_read_i64(nodes_buf, y_base + 16)
+    mem_write_i64(nodes_buf, x_base + 24, y_left)
+    if y_left >= 0 {
+        mem_write_i64(nodes_buf, y_left * 64 + 32, x)
+    }
+
+    flex p = mem_read_i64(nodes_buf, x_base + 32)
+    mem_write_i64(nodes_buf, y_base + 32, p)
+
+    if p < 0 {
+        mem_write_i64(tree, 8, y)
+    } else {
+        flex p_base = p * 64
+        if mem_read_i64(nodes_buf, p_base + 16) == x {
+            mem_write_i64(nodes_buf, p_base + 16, y)
+        } else {
+            mem_write_i64(nodes_buf, p_base + 24, y)
+        }
+    }
+
+    mem_write_i64(nodes_buf, y_base + 16, x)
+    mem_write_i64(nodes_buf, x_base + 32, y)
+    deliver 0
+}
+
+flow splay_rotate_right(tree: Int, y: Int) -> Int {
+    flex nodes_buf = mem_read_i64(tree, 16)
+    flex y_base = y * 64
+    flex x = mem_read_i64(nodes_buf, y_base + 16) // x = left[y]
+    if x < 0 { deliver 0 }
+    flex x_base = x * 64
+
+    flex x_right = mem_read_i64(nodes_buf, x_base + 24)
+    mem_write_i64(nodes_buf, y_base + 16, x_right)
+    if x_right >= 0 {
+        mem_write_i64(nodes_buf, x_right * 64 + 32, y)
+    }
+
+    flex p = mem_read_i64(nodes_buf, y_base + 32)
+    mem_write_i64(nodes_buf, x_base + 32, p)
+
+    if p < 0 {
+        mem_write_i64(tree, 8, x)
+    } else {
+        flex p_base = p * 64
+        if mem_read_i64(nodes_buf, p_base + 16) == y {
+            mem_write_i64(nodes_buf, p_base + 16, x)
+        } else {
+            mem_write_i64(nodes_buf, p_base + 24, x)
+        }
+    }
+
+    mem_write_i64(nodes_buf, x_base + 24, y)
+    mem_write_i64(nodes_buf, y_base + 32, x)
+    deliver 0
+}
+
+flow splay_node(tree: Int, x: Int) -> Int {
+    if x < 0 { deliver 0 }
+    flex nodes_buf = mem_read_i64(tree, 16)
+
+    while mem_read_i64(nodes_buf, x * 64 + 32) >= 0 {
+        flex p = mem_read_i64(nodes_buf, x * 64 + 32)
+        flex g = mem_read_i64(nodes_buf, p * 64 + 32)
+
+        if g < 0 {
+            // Zig step
+            if mem_read_i64(nodes_buf, p * 64 + 16) == x {
+                splay_rotate_right(tree, p)
+            } else {
+                splay_rotate_left(tree, p)
+            }
+        } else {
+            flex p_is_left = mem_read_i64(nodes_buf, g * 64 + 16) == p
+            flex x_is_left = mem_read_i64(nodes_buf, p * 64 + 16) == x
+
+            if p_is_left && x_is_left {
+                // Zig-Zig
+                splay_rotate_right(tree, g)
+                splay_rotate_right(tree, p)
+            } else if !p_is_left && !x_is_left {
+                // Zig-Zig
+                splay_rotate_left(tree, g)
+                splay_rotate_left(tree, p)
+            } else if p_is_left && !x_is_left {
+                // Zig-Zag
+                splay_rotate_left(tree, p)
+                splay_rotate_right(tree, g)
+            } else {
+                // Zig-Zag
+                splay_rotate_right(tree, p)
+                splay_rotate_left(tree, g)
+            }
+        }
+    }
+
+    flex splays = mem_read_i64(tree, 32)
+    mem_write_i64(tree, 32, splays + 1)
+    deliver 0
+}
+
+open flow splay_insert(tree: Int, key: Int, val: Int) -> Int {
+    flex count = mem_read_i64(tree, 0)
+    flex cap = mem_read_i64(tree, 24)
+    if count >= cap { deliver 0 - 1 }
+
+    flex nodes_buf = mem_read_i64(tree, 16)
+    flex root = mem_read_i64(tree, 8)
+
+    if root < 0 {
+        flex new_idx = count
+        flex base = new_idx * 64
+        mem_write_i64(nodes_buf, base + 0, key)
+        mem_write_i64(nodes_buf, base + 8, val)
+        mem_write_i64(nodes_buf, base + 16, 0 - 1)
+        mem_write_i64(nodes_buf, base + 24, 0 - 1)
+        mem_write_i64(nodes_buf, base + 32, 0 - 1)
+        mem_write_i64(nodes_buf, base + 40, 1)
+
+        mem_write_i64(tree, 8, new_idx)
+        mem_write_i64(tree, 0, count + 1)
+        deliver new_idx
+    }
+
+    // BST search for key
+    flex curr = root
+    flex parent = 0 - 1
+    flex is_left = true
+
+    while curr >= 0 {
+        parent = curr
+        flex c_key = mem_read_i64(nodes_buf, curr * 64 + 0)
+        if key == c_key {
+            // Update value and splay to root
+            mem_write_i64(nodes_buf, curr * 64 + 8, val)
+            flex acc = mem_read_i64(nodes_buf, curr * 64 + 40)
+            mem_write_i64(nodes_buf, curr * 64 + 40, acc + 1)
+            splay_node(tree, curr)
+            deliver curr
+        } else if key < c_key {
+            curr = mem_read_i64(nodes_buf, curr * 64 + 16)
+            is_left = true
+        } else {
+            curr = mem_read_i64(nodes_buf, curr * 64 + 24)
+            is_left = false
+        }
+    }
+
+    flex new_idx = count
+    flex base = new_idx * 64
+    mem_write_i64(nodes_buf, base + 0, key)
+    mem_write_i64(nodes_buf, base + 8, val)
+    mem_write_i64(nodes_buf, base + 16, 0 - 1)
+    mem_write_i64(nodes_buf, base + 24, 0 - 1)
+    mem_write_i64(nodes_buf, base + 32, parent)
+    mem_write_i64(nodes_buf, base + 40, 1)
+
+    if is_left {
+        mem_write_i64(nodes_buf, parent * 64 + 16, new_idx)
+    } else {
+        mem_write_i64(nodes_buf, parent * 64 + 24, new_idx)
+    }
+
+    mem_write_i64(tree, 0, count + 1)
+    splay_node(tree, new_idx)
+    deliver new_idx
+}
+
+open flow splay_find(tree: Int, key: Int) -> Int {
+    flex root = mem_read_i64(tree, 8)
+    if root < 0 { deliver 0 - 1 }
+
+    flex nodes_buf = mem_read_i64(tree, 16)
+    flex curr = root
+    flex last = root
+
+    while curr >= 0 {
+        last = curr
+        flex c_key = mem_read_i64(nodes_buf, curr * 64 + 0)
+        if key == c_key {
+            flex acc = mem_read_i64(nodes_buf, curr * 64 + 40)
+            mem_write_i64(nodes_buf, curr * 64 + 40, acc + 1)
+            splay_node(tree, curr)
+            deliver mem_read_i64(nodes_buf, curr * 64 + 8)
+        } else if key < c_key {
+            curr = mem_read_i64(nodes_buf, curr * 64 + 16)
+        } else {
+            curr = mem_read_i64(nodes_buf, curr * 64 + 24)
+        }
+    }
+
+    // Splay last accessed node
+    splay_node(tree, last)
+    deliver 0 - 1
+}
+
+open flow splay_contains(tree: Int, key: Int) -> Bool {
+    deliver splay_find(tree, key) >= 0
+}
+
+open flow splay_min_key(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 8)
+    if root < 0 { deliver 0 - 1 }
+    flex nodes_buf = mem_read_i64(tree, 16)
+    flex curr = root
+    while mem_read_i64(nodes_buf, curr * 64 + 16) >= 0 {
+        curr = mem_read_i64(nodes_buf, curr * 64 + 16)
+    }
+    splay_node(tree, curr)
+    deliver mem_read_i64(nodes_buf, curr * 64 + 0)
+}
+
+open flow splay_max_key(tree: Int) -> Int {
+    flex root = mem_read_i64(tree, 8)
+    if root < 0 { deliver 0 - 1 }
+    flex nodes_buf = mem_read_i64(tree, 16)
+    flex curr = root
+    while mem_read_i64(nodes_buf, curr * 64 + 24) >= 0 {
+        curr = mem_read_i64(nodes_buf, curr * 64 + 24)
+    }
+    splay_node(tree, curr)
+    deliver mem_read_i64(nodes_buf, curr * 64 + 0)
+}
+
+open flow splay_remove(tree: Int, key: Int) -> Int {
+    flex found_val = splay_find(tree, key)
+    if found_val < 0 { deliver 0 }
+
+    flex root = mem_read_i64(tree, 8)
+    flex nodes_buf = mem_read_i64(tree, 16)
+    if root < 0 { deliver 0 }
+
+    flex c_key = mem_read_i64(nodes_buf, root * 64 + 0)
+    if c_key != key { deliver 0 }
+
+    flex left = mem_read_i64(nodes_buf, root * 64 + 16)
+    flex right = mem_read_i64(nodes_buf, root * 64 + 24)
+
+    if left < 0 {
+        mem_write_i64(tree, 8, right)
+        if right >= 0 {
+            mem_write_i64(nodes_buf, right * 64 + 32, 0 - 1)
+        }
+    } else {
+        mem_write_i64(nodes_buf, left * 64 + 32, 0 - 1)
+        mem_write_i64(tree, 8, left)
+        splay_max_key(tree)
+        flex new_root = mem_read_i64(tree, 8)
+        mem_write_i64(nodes_buf, new_root * 64 + 24, right)
+        if right >= 0 {
+            mem_write_i64(nodes_buf, right * 64 + 32, new_root)
+        }
+    }
+
+    flex count = mem_read_i64(tree, 0)
+    if count > 0 {
+        mem_write_i64(tree, 0, count - 1)
+    }
+    deliver 1
+}
+
+open flow splay_free(tree: Int) -> Int {
+    if tree != 0 {
+        flex nodes_buf = mem_read_i64(tree, 16)
+        if nodes_buf != 0 {
+            free_buffer(nodes_buf)
+        }
+        free_buffer(tree)
+    }
+    deliver 0
+}
+

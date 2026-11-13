@@ -1,0 +1,179 @@
+// Zoren Multi-Decree Paxos Consensus Suite (plugins/paxos_multidecree.zor)
+// Production multi-decree consensus engine executing distributed state-machine replication.
+// Features slot-based consensus log, Prepare/Promise (Phase 1), Accept/Accepted (Phase 2),
+// quorum calculation, hole detection, and sequential state-machine commit execution.
+
+bring sys
+
+// Memory layout for PaxosSlot in log_buf:
+// Each slot takes 5 integers (40 bytes):
+// offset 0: slot_id
+// offset 8: min_proposal
+// offset 16: accepted_proposal
+// offset 24: accepted_value
+// offset 32: is_committed (0 or 1)
+flow paxos_slot_offset(slot_id: Int) -> Int {
+    deliver slot_id * 40
+}
+
+// PaxosNode Memory Layout (56 bytes):
+// [0..8]:   node_id
+// [8..16]:  cluster_size
+// [16..24]: quorum_size
+// [24..32]: max_slots
+// [32..40]: highest_slot_promised
+// [40..48]: highest_slot_committed
+// [48..56]: log_buf
+open flow mpaxos_node_create(node_id: Int, cluster_size: Int, max_slots: Int) -> Int {
+    flex quorum = (cluster_size / 2) + 1
+    flex bytes = max_slots * 40
+    flex buf = alloc_buffer(bytes)
+    mem_fill(buf, 0, bytes)
+
+    // Initialize slots
+    flex i = 0
+    while i < max_slots {
+        flex off = paxos_slot_offset(i)
+        mem_write_i64(buf, off + 0, i)  // slot_id
+        mem_write_i64(buf, off + 8, 0)  // min_proposal
+        mem_write_i64(buf, off + 16, 0) // accepted_proposal
+        mem_write_i64(buf, off + 24, 0) // accepted_value
+        mem_write_i64(buf, off + 32, 0) // is_committed
+        i = i + 1
+    }
+
+    flex node = alloc_buffer(56)
+    mem_write_i64(node, 0, node_id)
+    mem_write_i64(node, 8, cluster_size)
+    mem_write_i64(node, 16, quorum)
+    mem_write_i64(node, 24, max_slots)
+    mem_write_i64(node, 32, 0)
+    mem_write_i64(node, 40, 0)
+    mem_write_i64(node, 48, buf)
+
+    deliver node
+}
+
+open flow mpaxos_cluster_size(node: Int) -> Int { deliver mem_read_i64(node, 8) }
+open flow mpaxos_quorum_size(node: Int) -> Int { deliver mem_read_i64(node, 16) }
+open flow mpaxos_max_slots(node: Int) -> Int { deliver mem_read_i64(node, 24) }
+
+// Phase 1b: Acceptor handles Prepare request
+// Returns 1 if promised (OK), 0 if rejected
+open flow mpaxos_handle_prepare(node: Int, slot_id: Int, proposal_num: Int) -> Int {
+    flex max_s = mem_read_i64(node, 24)
+    if slot_id < 0 || slot_id >= max_s { deliver 0 }
+    flex log_buf = mem_read_i64(node, 48)
+    flex off = paxos_slot_offset(slot_id)
+    flex min_p = mem_read_i64(log_buf, off + 8)
+
+    if proposal_num > min_p {
+        mem_write_i64(log_buf, off + 8, proposal_num)
+        deliver 1
+    }
+    deliver 0
+}
+
+// Read accepted value from slot (used in Phase 1b Promise response)
+open flow mpaxos_get_accepted_proposal(node: Int, slot_id: Int) -> Int {
+    flex max_s = mem_read_i64(node, 24)
+    if slot_id < 0 || slot_id >= max_s { deliver 0 }
+    flex log_buf = mem_read_i64(node, 48)
+    flex off = paxos_slot_offset(slot_id)
+    deliver mem_read_i64(log_buf, off + 16)
+}
+
+open flow mpaxos_get_accepted_value(node: Int, slot_id: Int) -> Int {
+    flex max_s = mem_read_i64(node, 24)
+    if slot_id < 0 || slot_id >= max_s { deliver 0 }
+    flex log_buf = mem_read_i64(node, 48)
+    flex off = paxos_slot_offset(slot_id)
+    deliver mem_read_i64(log_buf, off + 24)
+}
+
+// Phase 2b: Acceptor handles Accept request
+// Returns 1 if accepted, 0 if rejected
+open flow mpaxos_handle_accept(node: Int, slot_id: Int, proposal_num: Int, value: Int) -> Int {
+    flex max_s = mem_read_i64(node, 24)
+    if slot_id < 0 || slot_id >= max_s { deliver 0 }
+    flex log_buf = mem_read_i64(node, 48)
+    flex off = paxos_slot_offset(slot_id)
+    flex min_p = mem_read_i64(log_buf, off + 8)
+
+    if proposal_num >= min_p {
+        mem_write_i64(log_buf, off + 8, proposal_num)
+        mem_write_i64(log_buf, off + 16, proposal_num)
+        mem_write_i64(log_buf, off + 24, value)
+        deliver 1
+    }
+    deliver 0
+}
+
+// Mark slot as committed
+open flow mpaxos_commit_slot(node: Int, slot_id: Int, value: Int) -> Int {
+    flex max_s = mem_read_i64(node, 24)
+    if slot_id < 0 || slot_id >= max_s { deliver 0 }
+    flex log_buf = mem_read_i64(node, 48)
+    flex off = paxos_slot_offset(slot_id)
+    mem_write_i64(log_buf, off + 24, value)
+    mem_write_i64(log_buf, off + 32, 1) // is_committed = true
+    deliver 1
+}
+
+open flow mpaxos_is_committed(node: Int, slot_id: Int) -> Bool {
+    flex max_s = mem_read_i64(node, 24)
+    if slot_id < 0 || slot_id >= max_s { deliver false }
+    flex log_buf = mem_read_i64(node, 48)
+    flex off = paxos_slot_offset(slot_id)
+    deliver mem_read_i64(log_buf, off + 32) == 1
+}
+
+// Hole detection: finds the first uncommitted slot in the range [0, limit-1]
+// Returns -1 if no holes exist (continuous log up to limit)
+open flow mpaxos_find_first_hole(node: Int, limit: Int) -> Int {
+    flex max_s = mem_read_i64(node, 24)
+    flex lim = limit
+    if lim > max_s { lim = max_s }
+    flex log_buf = mem_read_i64(node, 48)
+    flex i = 0
+    while i < lim {
+        flex off = paxos_slot_offset(i)
+        flex comm = mem_read_i64(log_buf, off + 32)
+        if comm == 0 {
+            deliver i
+        }
+        i = i + 1
+    }
+    deliver 0 - 1
+}
+
+// Sequential state machine execution: computes state machine aggregate (e.g. sum of committed commands)
+// up to the first uncommitted hole or max_slots
+open flow mpaxos_apply_committed_sum(node: Int, max_count: Int) -> Int {
+    flex max_s = mem_read_i64(node, 24)
+    flex log_buf = mem_read_i64(node, 48)
+    flex sum = 0
+    flex i = 0
+    while i < max_count && i < max_s {
+        flex off = paxos_slot_offset(i)
+        flex comm = mem_read_i64(log_buf, off + 32)
+        if comm == 0 {
+            deliver sum
+        }
+        flex val = mem_read_i64(log_buf, off + 24)
+        sum = sum + val
+        i = i + 1
+    }
+    deliver sum
+}
+
+open flow mpaxos_node_free(node: Int) -> Int {
+    if node != 0 {
+        flex log_buf = mem_read_i64(node, 48)
+        if log_buf != 0 {
+            free_buffer(log_buf)
+        }
+        free_buffer(node)
+    }
+    deliver 0
+}
