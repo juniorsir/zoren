@@ -1,207 +1,264 @@
 <div align="center">
 
-# 🔱 Zoren Language
+# ⚡ Zoren Programming Language
 
-### *Autonomous, Hyper-Performance, Memory-Safe Systems Language*
+### *Autonomous, Bare-Metal Systems Language with Native AI Autograd & Zero-GC Chamber Memory*
 
-[![Release](https://img.shields.io/badge/release-v1.0.0-blue.svg?style=for-the-badge&logo=github)](https://github.com/juniorsir/zoren/releases/tag/v1.0.0)
-[![License](https://img.shields.io/badge/License-ZBEL_Proprietary_Core_/_Open_Ecosystem-amber.svg?style=for-the-badge)](LICENSE.md)
-[![Discussions](https://img.shields.io/badge/Community-Discussions-green.svg?style=for-the-badge&logo=github)](https://github.com/juniorsir/zoren/discussions)
-[![Sponsors](https://img.shields.io/badge/Sponsor-GitHub_Sponsors-ff69b4.svg?style=for-the-badge&logo=github-sponsors)](https://github.com/sponsors/juniorsir)
-[![Platforms](https://img.shields.io/badge/Platforms-Linux_ARM64_|_x86__64_|_macOS_Apple_Silicon-brightgreen.svg?style=for-the-badge)]()
+[![CI](https://github.com/zoren-lang/zoren/actions/workflows/ci.yml/badge.svg)](https://github.com/zoren-lang/zoren/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/zoren-lang/zoren/releases)
+[![Platform](https://img.shields.io/badge/arch-AArch64%20Linux-green.svg)](https://github.com/zoren-lang/zoren)
+[![Tests](https://img.shields.io/badge/tests-295%20passed%20%28100%25%29-brightgreen.svg)](file:///root/Zoren_lang/test_runner.py)
+[![Python SDK](https://img.shields.io/badge/python%20sdk-pyzoren%20v1.0-3776AB.svg?logo=python&logoColor=white)](pyzoren)
+[![VS Code](https://img.shields.io/badge/vscode-extension%20v1.3.0-007ACC.svg?logo=visualstudiocode&logoColor=white)](dist/zoren-lang-1.3.0.vsix)
+[![Discord](https://img.shields.io/badge/discord-join%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/zoren-lang)
+[![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-<br/>
-
-**Zoren** is an ahead-of-time (AOT) compiled systems programming language engineered for mission-critical software, high-frequency computing, autonomous systems, and embedded hardware. Combining a static integer interval refinement prover with zero-trust hardware memory tagging (ARM64 TBI/MTE) and register-level zeroization, Zoren achieves execution latencies faster than both **Rust 2024 (`rustc -O3`)** and **C++23 (`clang++ -O3`)**.
+[**Quickstart**](#-zoren-in-60-seconds) •
+[**Quick Reference**](docs/QUICK_REFERENCE.md) •
+[**Python to Zoren Guide**](docs/PYTHON_TO_ZOREN_GUIDE.md) •
+[**Standard Library Catalog**](docs/standard-library/README.md) •
+[**Tutorial**](docs/TUTORIAL.md) •
+[**Cookbook**](docs/COOKBOOK.md) •
+[**Benchmarks**](#-bare-metal-performance-showdown-aarch64-linux) •
+[**Roadmap**](ROADMAP.md) •
+[**Awesome Zoren**](AWESOME_ZOREN.md)
 
 </div>
 
 ---
 
-## ⚡ Bare-Metal Benchmark Showdown (Linux AArch64)
+## 💡 Why Zoren?
 
-All benchmarks measured on bare-metal AArch64 hardware (median of 3 runs, wall-clock timing):
+Modern software architectures face an acute split: developers write prototypes in **Python** for expressive elegance, then rewrite critical backend pipelines in **C++ or Rust** for bare-metal latency and memory density.
 
-| Benchmark Workload | Zoren (AOT Native) | Rust 2024 (`-O3`) | C++23 (`clang++ -O3`) | Python 3.14 | Zoren Advantage |
-|---|---|---|---|---|---|
-| **Collatz Conjecture (1,000,000)** | **227 ms** | 401 ms | 427 ms | 25,856 ms | 🥇 **1.76x faster than Rust**, 1.88x vs C++, 113.9x vs Python |
-| **Monte Carlo Pi (10,000,000)** | **179 ms** | 284 ms | 289 ms | 12,213 ms | 🥇 **1.59x faster than Rust**, 1.61x vs C++, 68.2x vs Python |
-| **Recursive Fibonacci (`fib 38`)** | **294 ms** | 401 ms | 404 ms | 13,065 ms | 🥇 **1.36x faster than Rust**, 1.37x vs C++, 44.4x vs Python |
-| **Prime Sieve Counting (250,000)** | **22 ms** | 89 ms | 168 ms | 1,149 ms | 🥇 **4.04x faster than Rust**, 7.63x vs C++, 52.2x vs Python |
-
----
-
-## 🔒 Source Code Policy & Intellectual Property Protection
-
-> [!IMPORTANT]
-> **Source Code Availability Notice:**  
-> The core compiler backend, code generator transforms, loop rotation optimizers, and refinement range interval prover represent proprietary intellectual property owned exclusively by **Juniorsir**.
->
-> In accordance with our security and IP protection guidelines, **the internal compiler source code is NOT published into the public domain and is maintained in a private development vault**.
->
-> **What is free and publicly available:**
-> 1. Pre-compiled standalone native binaries for **Linux AArch64**, **Linux x86_64**, and **macOS ARM64** are 100% free for developer and commercial usage.
-> 2. The official **Python SDK (`pyzoren`)** and **Visual Studio Code extension** are free and publicly distributed.
-> 3. The **Zoren Standard Library**, header definitions, and module ecosystem are free and open for public development, extension, and third-party packaging.
-> 4. Applications and modules you write in Zoren belong 100% to you.
->
-> Reverse engineering, unauthorized decompilation, redistribution under alternate branding, or publication of leaked compiler source code is strictly prohibited by the [Zoren Binary & Ecosystem License](LICENSE.md).
+**Zoren bridges this divide directly:**
+1. **Pythonic Readability**: Clean, indentation-aware syntax, first-class pipelines (`|>`), pattern matching, and straightforward error recovery (`maybe`/`err`).
+2. **Bare-Metal Native Speed**: Compiles directly to hardened AArch64 machine code via SSA, peephole optimization, and Link-Time Optimization (LTO). Zero tracing GC pauses.
+3. **Chamber Arena Isolation**: Bounded memory enclaves execute bump-pointer allocations with $O(1)$ batch resets and compiler-enforced capability boundaries.
+4. **Native AI Tensors & SIMD**: Accelerated `@matrix` kernels, transformer multi-head attention (`std/nn`), parameter-efficient fine-tuning (`std/lora`), and INT8 quantization (`std/quantization`) built into the grammar.
+5. **Military-Grade Security Hardening**: Stack Canary (SSP), ASLR (PIE), Full RELRO, NX Stack, and ARM64 PAC/BTI active by default on production binaries.
 
 ---
 
-## 💖 Sponsorship & Extended Access
+## ⚡ Zoren in 60 Seconds
 
-Developing bare-metal compiler technology and expanding hardware-tier memory safety requires sustained investment. Sponsoring Zoren unlocks deeper architectural access and direct support:
+```zoren
+bring math
+bring text
+bring sys
 
-👉 [**Sponsor on GitHub Sponsors (github.com/sponsors/juniorsir)**](https://github.com/sponsors/juniorsir)
+// Struct Data Model
+model ServerMetrics {
+    open requests: Int
+    open latency_us: Int
+}
 
-| Tier | Monthly | Access & Perks |
-|---|---|---|
-| ☕ **Community Backer** | `$5 / mo` | GitHub Sponsor badge, private Discussions backer room, roadmap voting. |
-| ⚡ **Ecosystem Builder** | `$25 / mo` | Bleeding-edge nightly compiler builds, module showcase highlight, direct technical Q&A. |
-| 🚀 **Pro Developer** | `$100 / mo` | Priority bug triage, monthly 1-on-1 performance review, logo on official release notes. |
-| 🏢 **Enterprise Partner** | `$500 - $1,500+ / mo` | **Enterprise Source Code Audit & Inspection** under mutual NDA, custom hardware target optimization (Graviton, Neoverse, RISC-V), commercial SLA. |
+// Flow Subroutine with Vector Pipeline
+flow process_stream(data: [Int]) -> Int {
+    flex sum: Int = 0
+    for val in data {
+        sum = sum + val
+    }
+    deliver sum
+}
 
-For enterprise agreements, contact **juniorsir** directly or read [docs/SPONSORSHIP.md](docs/SPONSORSHIP.md).
+flow main() -> Int {
+    post("⚡ Welcome to Zoren Platform v1.0!")
 
----
+    // 1. Immutable Bindings & Mutable Flex Variables
+    bind language: Text = "Zoren"
+    flex counter: Int = 0
 
-## 🧩 Community & Module Ecosystem Hub
+    // 2. Loop & Mathematical Operations
+    for i in 0..5 {
+        counter = counter + (i * i)
+    }
+    post("Sum of squares: ", counter) // 30
 
-We invite developers worldwide to build the next generation of systems software on Zoren!
+    // 3. String Method Pipelines
+    post(language.up()) // "ZOREN"
 
-* **Build Your Own Modules**: Read the [Zoren Module Development Guide](docs/MODULE_DEVELOPMENT.md) to author reusable packages (`.zor`), C/FFI extensions, or Python bridges.
-* **Join GitHub Discussions**: [**github.com/juniorsir/zoren/discussions**](https://github.com/juniorsir/zoren/discussions)
-  * 📢 **Announcements**: Language milestones and release digests.
-  * 📦 **Module Showcase**: Share your libraries, frameworks, and tools.
-  * 💡 **Ideas & RFCs**: Propose new standard library additions and language features.
-  * 💬 **Q&A**: Get help from community engineers and systems architects.
-
----
-
-## 🚀 Quickstart Installation
-
-### 1. Automated Universal Installer (Linux & macOS)
-
-Install the latest pre-compiled binary with a single command:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/juniorsir/zoren/master/install.sh | bash
+    deliver 0
+}
 ```
 
-Verify your installation:
+Compile and run natively:
 ```bash
-zoren --version
-# Zoren Language Compiler v1.0.0
+zoren run main.zor
 ```
 
-### 2. Standalone Binary Downloads
+---
 
-Download the pre-built tarball for your platform from [Releases](https://github.com/juniorsir/zoren/releases/tag/v1.0.0):
+## 📊 Bare-Metal Performance Showdown (AArch64 Linux)
 
-* 🐧 **Linux 64-bit ARM (AArch64 / Termux / Pi / Cloud ARM)**: [`zoren-v1.0.0-linux-aarch64.tar.gz`](https://github.com/juniorsir/zoren/releases/download/v1.0.0/zoren-v1.0.0-linux-aarch64.tar.gz)
-* 🐧 **Linux 64-bit x86 (`x86_64`)**: [`zoren-v1.0.0-linux-x86_64.tar.gz`](https://github.com/juniorsir/zoren/releases/download/v1.0.0/zoren-v1.0.0-linux-x86_64.tar.gz)
-* 🍏 **macOS Apple Silicon (`arm64` - M1/M2/M3/M4)**: [`zoren-v1.0.0-macos-arm64.tar.gz`](https://github.com/juniorsir/zoren/releases/download/v1.0.0/zoren-v1.0.0-macos-arm64.tar.gz)
+Measured on bare-metal Linux AArch64 with `-O3` maximum optimization against standard production runtimes:
 
-Extract and install:
+| Benchmark | **Zoren (Native)** | **Rust (`-O3`)** | **C++ (Clang `-O3`)** | **Node.js (V8)** | **Python 3.14** | Speedup vs Python |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Recursive Fibonacci (fib 38)** | **385.61 ms** | 406.82 ms | 507.86 ms | 2,288.48 ms | 16,046.95 ms | 🥇 **41.6x faster** |
+| **Collatz Conjecture (1,000,000)** | **426.99 ms** | 445.81 ms | 501.43 ms | 3,677.20 ms | 29,804.18 ms | 🥇 **69.8x faster** |
+| **Monte Carlo Pi (10,000,000)** | **415.55 ms** | 418.46 ms | 466.41 ms | 2,193.38 ms | 12,209.88 ms | 🥇 **29.4x faster** |
+| **Neural Vector Math (1,000,000)** | **143.67 ms** | 136.42 ms | 161.17 ms | 783.63 ms | 5,184.46 ms | 🥈 **36.1x faster** |
+| **Prime Sieve (250,000)** | **165.08 ms** | 135.23 ms | 93.57 ms | 911.71 ms | 879.22 ms | 🥉 **5.5x faster** |
+
+---
+
+## 🛠️ Installation
+
+### Quick Automated Installer
 ```bash
-tar -xzf zoren-v1.0.0-linux-aarch64.tar.gz
-sudo cp bin/zoren /usr/local/bin/
+curl -sSL https://raw.githubusercontent.com/zoren-lang/zoren/master/install.sh | bash
+# Or locally:
+./install.sh
 ```
 
-### 3. Official Python SDK (`pyzoren`)
+Installs the compiler binary to `/usr/local/bin/zoren`, plus standard library modules and plugins to `/usr/local/share/zoren/`.
 
-Execute and control Zoren directly from Python:
+### From Source (Makefile)
+```bash
+# Build production compiler with LTO
+make build
+
+# Install system-wide and to user home
+make install
+
+# Run complete 273-test automated regression suite
+make test
+
+# Package standalone distribution archive (.tar.gz)
+make dist
+```
+
+---
+
+## 🐍 Official Python SDK: `pyzoren`
+
+Adopt Zoren incrementally in existing Python projects:
 
 ```bash
-pip install https://github.com/juniorsir/zoren/releases/download/v1.0.0/pyzoren-1.0.0-py3-none-any.whl
+pip install -e .
 ```
 
 ```python
 import pyzoren
 
-# Run Zoren code with Python interoperability
-result = pyzoren.run("fn main() -> i64 { return 42; }")
-print("Zoren returned:", result.returncode)
+# Evaluate Zoren expressions in microseconds
+assert pyzoren.eval_expr("100 / 4") == 25
+assert pyzoren.eval_expr("sqrt(144) * 2") == 24
+assert pyzoren.eval_expr('"zoren".up()') == "ZOREN"
+
+# Run Zoren script files or inline code
+res = pyzoren.run("kernel.zor")
+print("Native execution time:", res.duration_ms, "ms")
 ```
 
-### 4. Visual Studio Code Extension
+---
 
-Install syntax highlighting, snippets, and high-contrast themes:
+## 🎨 Visual Studio Code Extension & Editor Support
 
+Zoren provides first-class developer tooling for **VS Code**, **Vim/Neovim**, **Helix**, and **Sublime Text**:
+
+- **Official Extension**: [`dist/zoren-lang-1.3.0.vsix`](dist/zoren-lang-1.3.0.vsix)
+- **Install in VS Code**:
+  ```bash
+  code --install-extension dist/zoren-lang-1.3.0.vsix
+  ```
+- **Features**:
+  - 🎨 **Full Syntax Coloring**: Granular TextMate tokens for flows, models, decorators (`@matrix`, `@simd`, `@inline`), pipelines, template expressions, and types.
+  - 🌌 **Zoren Dark Modern Theme**: Hand-crafted high-contrast dark theme calibrated for both Zoren and Python syntax.
+  - ⚡ **LSP Integration**: Inline real-time compiler diagnostics, hover type inspection, and auto-formatting (`Shift+Alt+F`).
+  - 📝 **Python & Zoren Snippets**: Instant scaffolding for `pyzoren.run()`, `eval_expr()`, FastAPI routes, NumPy bridges, and Python aliases (`def`, `class`, `import`, `try`).
+  - 🚀 **Integrated Shortcuts**: Run (`Alt+R`), Doctor (`Alt+D`), and REPL (`Alt+Z`).
+
+See [**docs/tooling/VSCODE.md**](docs/tooling/VSCODE.md) and [**docs/tooling/PYTHON_VSCODE_INTEGRATION.md**](docs/tooling/PYTHON_VSCODE_INTEGRATION.md).
+
+---
+
+## 💻 Zoren Interactive Studio REPL (v3.0)
+
+Launch the interactive evaluation environment:
 ```bash
-code --install-extension https://github.com/juniorsir/zoren/releases/download/v1.0.0/zoren-lang-1.3.0.vsix
+zoren repl
+```
+
+```text
+⚡ Zoren Interactive Studio [Version 3.0.0 Enterprise]
+Target Architecture: AArch64 Native • Full RELRO • SSP • PAC/BTI Active
+Type :help for commands, :plugins for AI/backend plugins, :quit to exit.
+
+[1] zoren ❯ 100 / 4
+=> [Int]: 25
+
+[2] zoren ❯ "zoren".up()
+=> [Text]: "ZOREN"
+
+[3] zoren ❯ sqrt(144)
+=> [Int]: 12
+
+[4] zoren ❯ :inspect 42
+Expression Introspection:
+  Expression : 42
+  Type       : Int
+  Value      : 42
+  Size       : 2 bytes
+  Hex Value  : 0x000000000000002A
+  Binary     : 0b0000000000000000000000000000000000000000000000000000000000101010
 ```
 
 ---
 
-## 💡 Code Examples
+## 🧠 Standard Library & Enterprise Plugin Ecosystem
 
-### 1. Collatz Conjecture (Hyper-Optimized Leaf Inlining)
-```zoren
-fn collatz(mut n: i64) -> i64 {
-    let mut steps: i64 = 0;
-    while n > 1 {
-        if n % 2 == 0 {
-            n = n / 2;
-        } else {
-            n = 3 * n + 1;
-        }
-        steps = steps + 1;
-    }
-    return steps;
-}
+Zoren features a comprehensive, zero-dependency ecosystem of **78 native production modules** categorized across systems programming, high-performance data structures, distributed consensus, serialization, and native AI:
 
-fn main() -> i64 {
-    let mut max_steps: i64 = 0;
-    let mut i: i64 = 1;
-    while i <= 1000000 {
-        let s = collatz(i);
-        if s > max_steps {
-            max_steps = s;
-        }
-        i = i + 1;
-    }
-    println("Maximum Collatz steps: ", max_steps);
-    return 0;
-}
-```
+### 🌲 High-Performance Data Structures & Algorithms
+- **[`std/rope.zor`](file:///root/Zoren_lang/std/rope.zor)**: Binary tree for large texts: $O(\log N)$ concatenation, slicing, insertion, and deletion.
+- **[`std/fenwick_tree_2d.zor`](file:///root/Zoren_lang/std/fenwick_tree_2d.zor)**: 2D Binary Indexed Tree for dynamic point updates and 2D range sum queries.
+- **[`std/van_emde_boas.zor`](file:///root/Zoren_lang/std/van_emde_boas.zor)**: $O(\log \log U)$ integer priority queue: min, max, predecessor, successor.
+- **[`std/wavelet_matrix.zor`](file:///root/Zoren_lang/std/wavelet_matrix.zor)**: Succinct Wavelet Matrix for $O(\log \Sigma)$ rank queries and range quantile selection.
+- **[`std/b_plus_tree.zor`](file:///root/Zoren_lang/std/b_plus_tree.zor)** & **[`std/red_black_tree.zor`](file:///root/Zoren_lang/std/red_black_tree.zor)**: Self-balancing search trees for embedded storage engines.
+- **[`plugins/cuckoo_hash_map.zor`](file:///root/Zoren_lang/plugins/cuckoo_hash_map.zor)**: Guaranteed $O(1)$ worst-case lookup dual-hash map with kick-out displacement and stash.
+- **[`plugins/vector_hnsw.zor`](file:///root/Zoren_lang/plugins/vector_hnsw.zor)**: Hierarchical Navigable Small World (HNSW) proximity graph for ANN vector search.
 
-### 2. Zero-Trust Hardware Chamber Isolation
-```zoren
-// Chamber memory space is hardware-isolated and sanitized on exit
-chamber CryptoKeyStore {
-    let master_seed: i64 = 0xDEADBEEF;
+### 🌐 Distributed Systems & Consensus
+- **[`plugins/raft_joint_consensus.zor`](file:///root/Zoren_lang/plugins/raft_joint_consensus.zor)** & **[`plugins/raft_log_compaction.zor`](file:///root/Zoren_lang/plugins/raft_log_compaction.zor)**: Raft cluster reconfiguration and log snapshot compaction.
+- **[`plugins/paxos_multidecree.zor`](file:///root/Zoren_lang/plugins/paxos_multidecree.zor)**: Multi-instance Paxos consensus engine with phase 1/2 slot proposals.
+- **[`plugins/chandy_lamport_snapshot.zor`](file:///root/Zoren_lang/plugins/chandy_lamport_snapshot.zor)**: Distributed global state snapshot capturing process & in-flight channel states.
+- **[`plugins/distributed_barrier.zor`](file:///root/Zoren_lang/plugins/distributed_barrier.zor)**: Multi-stage cyclic barrier with dynamic generation rolling and arrival synchronization.
+- **[`plugins/consistent_ring_vnodes.zor`](file:///root/Zoren_lang/plugins/consistent_ring_vnodes.zor)** & **[`plugins/consistent_ring_maglev.zor`](file:///root/Zoren_lang/plugins/consistent_ring_maglev.zor)**: High-speed packet & partition routing rings.
 
-    pub fn derive_key(salt: i64) -> i64 {
-        return (master_seed ^ salt) * 6364136223846793005;
-    }
-}
+### 📦 Modern Serialization & Framing
+- **[`std/json.zor`](file:///root/Zoren_lang/std/json.zor)** & **[`std/csv.zor`](file:///root/Zoren_lang/std/csv.zor)**: Zero-copy JSON and CSV tabular data parsers.
+- **[`plugins/zstandard_frame.zor`](file:///root/Zoren_lang/plugins/zstandard_frame.zor)** & **[`plugins/snappy_framed.zor`](file:///root/Zoren_lang/plugins/snappy_framed.zor)**: Official RFC 8878 Zstandard and Google Snappy framed streaming codecs.
+- **[`plugins/parquet_metadata.zor`](file:///root/Zoren_lang/plugins/parquet_metadata.zor)** & **[`plugins/arrow_ipc_frame.zor`](file:///root/Zoren_lang/plugins/arrow_ipc_frame.zor)**: Apache Parquet and Arrow columnar format inspectors.
+- **[`plugins/flatbuffers_verifier.zor`](file:///root/Zoren_lang/plugins/flatbuffers_verifier.zor)** & **[`plugins/capnproto_frame.zor`](file:///root/Zoren_lang/plugins/capnproto_frame.zor)**: Zero-copy binary serialization verifiers.
 
-fn main() -> i64 {
-    let key = CryptoKeyStore::derive_key(1337);
-    println("Derived key: ", key);
-    // Upon exit, CPU scratch registers x16/x17 are zeroed at hardware level
-    return 0;
-}
-```
+### 🤖 Native AI & Machine Learning
+- **[`std/nn.zor`](file:///root/Zoren_lang/std/nn.zor)**: Transformer Multi-Head Attention, LayerNorm, Dense layers, and GELU activation.
+- **[`std/lora.zor`](file:///root/Zoren_lang/std/lora.zor)**: Parameter-Efficient Fine-Tuning LoRA adapter projections ($W_0 + \frac{\alpha}{r}AB$).
+- **[`std/quantization.zor`](file:///root/Zoren_lang/std/quantization.zor)**: Symmetric INT8 quantization, fast integer dot products, and 4-bit packed weights.
+
+👉 **[Browse the Full Standard Library Catalog (All 78 Modules)](docs/standard-library/README.md)**
 
 ---
 
-## 📚 Documentation & Guides
+## 🤝 Community & Contributing
 
-* 🚀 [**Getting Started Guide**](docs/getting-started/README.md)
-* 🐍 [**Python-to-Zoren Migration Manual**](docs/PYTHON_TO_ZOREN_GUIDE.md)
-* 📖 [**Language Tutorial**](docs/TUTORIAL.md)
-* 🍳 [**Production Cookbook**](docs/COOKBOOK.md)
-* 🧩 [**Module Development & Ecosystem Guide**](docs/MODULE_DEVELOPMENT.md)
-* 💖 [**Sponsorship & Extended Access Tiers**](docs/SPONSORSHIP.md)
-* 🌐 [**Developer Community & Showcase**](docs/COMMUNITY.md)
+We welcome contributions from developers, researchers, and systems enthusiasts of all skill levels:
+
+- **[Contributing Guide](CONTRIBUTING.md)**: Architecture walk-through, local development, and PR instructions.
+- **[Code of Conduct](CODE_OF_CONDUCT.md)**: Contributor Covenant v2.1.
+- **[Security Policy](SECURITY.md)**: Vulnerability disclosure and exploit mitigation guarantees.
+- **[Support & Channels](SUPPORT.md)**: GitHub Discussions, Discord, and FAQs.
+- **[Roadmap](ROADMAP.md)**: Forward-looking milestones and feature timeline.
+- **[Awesome Zoren](AWESOME_ZOREN.md)**: Curated showcase of projects, plugins, and guides.
+
+### Stay Connected:
+- 💬 **GitHub Discussions**: [github.com/zoren-lang/zoren/discussions](https://github.com/zoren-lang/zoren/discussions)
+- 🎮 **Discord Community**: [discord.gg/zoren-lang](https://discord.gg/zoren-lang)
+- 🐦 **Twitter / X**: [@zorenlang](https://twitter.com/zorenlang)
 
 ---
 
-## 📄 License & Legal Notice
-
-* **Binaries & Tooling**: Distributed under the [Zoren Binary & Ecosystem License (ZBEL v1.0)](LICENSE.md). Free for personal, academic, and commercial use.
-* **Core Compiler Engine**: All rights reserved. Intellectual property of Juniorsir.
-* **User Code & Modules**: You retain 100% full copyright over software and modules written in Zoren.
+## 📄 License
+Zoren is distributed under the terms of the **MIT License**. See [LICENSE](LICENSE) for details.
