@@ -1,0 +1,96 @@
+// Zoren AI Vector Similarity Suite (plugins/vector_similarity.zor)
+// Production cosine similarity, dot product, Euclidean distance, and nearest-neighbor search for embeddings.
+
+bring sys
+
+open flow vector_int_sqrt(val: Int) -> Int {
+    if val <= 0 { deliver 0 }
+    if val == 1 { deliver 1 }
+
+    flex x0 = val / 2
+    if x0 == 0 { x0 = 1 }
+
+    flex i = 0
+    while i < 32 {
+        flex x1 = (x0 + (val / x0)) / 2
+        if x1 >= x0 {
+            deliver x0
+        }
+        x0 = x1
+        i = i + 1
+    }
+    deliver x0
+}
+
+open flow vector_dot_product(vec_a: Int, vec_b: Int, dim: Int) -> Int {
+    flex total = 0
+    flex i = 0
+    while i < dim {
+        flex a = mem_read_i64(vec_a, i * 8)
+        flex b = mem_read_i64(vec_b, i * 8)
+        total = total + (a * b)
+        i = i + 1
+    }
+    deliver total
+}
+
+open flow vector_magnitude_sq(vec: Int, dim: Int) -> Int {
+    flex total = 0
+    flex i = 0
+    while i < dim {
+        flex v = mem_read_i64(vec, i * 8)
+        total = total + (v * v)
+        i = i + 1
+    }
+    deliver total
+}
+
+// Cosine similarity scaled to 10,000 basis points (10000 = 1.0000)
+open flow vector_cosine_similarity(vec_a: Int, vec_b: Int, dim: Int) -> Int {
+    flex dot = vector_dot_product(vec_a, vec_b, dim)
+    if dot <= 0 { deliver 0 }
+
+    flex mag_a_sq = vector_magnitude_sq(vec_a, dim)
+    flex mag_b_sq = vector_magnitude_sq(vec_b, dim)
+
+    flex mag_a = vector_int_sqrt(mag_a_sq)
+    flex mag_b = vector_int_sqrt(mag_b_sq)
+
+    flex denom = mag_a * mag_b
+    if denom <= 0 { deliver 0 }
+
+    deliver (dot * 10000) / denom
+}
+
+open flow vector_euclidean_distance_sq(vec_a: Int, vec_b: Int, dim: Int) -> Int {
+    flex total = 0
+    flex i = 0
+    while i < dim {
+        flex diff = mem_read_i64(vec_a, i * 8) - mem_read_i64(vec_b, i * 8)
+        total = total + (diff * diff)
+        i = i + 1
+    }
+    deliver total
+}
+
+// Finds the candidate vector with the highest cosine similarity to query_vec
+open flow vector_find_nearest(query_vec: Int, matrix_buf: Int, num_candidates: Int, dim: Int) -> Int {
+    if num_candidates <= 0 { deliver 0 - 1 }
+
+    flex best_idx = 0
+    flex best_sim = 0 - 1
+
+    flex i = 0
+    while i < num_candidates {
+        flex cand_ptr = matrix_buf + (i * dim * 8)
+        flex sim = vector_cosine_similarity(query_vec, cand_ptr, dim)
+
+        if sim > best_sim {
+            best_sim = sim
+            best_idx = i
+        }
+        i = i + 1
+    }
+
+    deliver best_idx
+}

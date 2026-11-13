@@ -1,0 +1,164 @@
+// Zoren Hashed Timing Wheel Suite (plugins/time_wheel.zor)
+// High-capacity circular timer wheel providing O(1) task scheduling and expiration ticks.
+
+bring sys
+
+// ============================================================================
+// TIMING WHEEL MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   slot_count (e.g. 64)
+// [8..16]:  tick_ms (e.g. 10 ms per tick)
+// [16..24]: current_tick
+// [24..32]: total_scheduled
+// [32..40]: total_fired
+// [40..48]: tasks_table (256 entries * 32 bytes)
+//
+// Each Task (32 bytes):
+// [0..8]:   task_id
+// [8..16]:  due_tick
+// [16..24]: is_active (1 = active, 0 = inactive/cancelled)
+// [24..32]: is_fired (1 = fired, 0 = pending)
+// ============================================================================
+
+open flow time_wheel_new(slot_count: Int, tick_duration_ms: Int) -> Int {
+    flex slots = slot_count
+    if slots <= 0 { slots = 64 }
+
+    flex tick_ms = tick_duration_ms
+    if tick_ms <= 0 { tick_ms = 10 }
+
+    flex max_tasks = 256
+    flex table_size = max_tasks * 32
+    flex tasks_buf = alloc_buffer(table_size)
+    mem_fill(tasks_buf, 0, table_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, slots)
+    mem_write_i64(header, 8, tick_ms)
+    mem_write_i64(header, 16, 0) // current_tick = 0
+    mem_write_i64(header, 24, 0) // total_scheduled = 0
+    mem_write_i64(header, 32, 0) // total_fired = 0
+    mem_write_i64(header, 40, tasks_buf)
+
+    deliver header
+}
+
+open flow time_wheel_current_tick(tw: Int) -> Int {
+    deliver mem_read_i64(tw, 16)
+}
+
+open flow time_wheel_schedule(tw: Int, task_id: Int, delay_ms: Int) -> Bool {
+    flex scheduled = mem_read_i64(tw, 24)
+    if scheduled >= 256 {
+        deliver false // Capacity full
+    }
+
+    flex tick_ms = mem_read_i64(tw, 8)
+    flex cur_tick = mem_read_i64(tw, 16)
+    flex ticks_delay = delay_ms / tick_ms
+    if ticks_delay <= 0 { ticks_delay = 1 }
+
+    flex due_tick = cur_tick + ticks_delay
+    flex tasks_buf = mem_read_i64(tw, 40)
+    flex offset = scheduled * 32
+
+    mem_write_i64(tasks_buf, offset, task_id)
+    mem_write_i64(tasks_buf, offset + 8, due_tick)
+    mem_write_i64(tasks_buf, offset + 16, 1) // is_active = 1
+    mem_write_i64(tasks_buf, offset + 24, 0) // is_fired = 0
+
+    mem_write_i64(tw, 24, scheduled + 1)
+    deliver true
+}
+
+open flow time_wheel_advance(tw: Int, elapsed_ms: Int) -> Int {
+    flex tick_ms = mem_read_i64(tw, 8)
+    flex cur_tick = mem_read_i64(tw, 16)
+    flex advance_ticks = elapsed_ms / tick_ms
+    if advance_ticks <= 0 { deliver 0 }
+
+    flex new_tick = cur_tick + advance_ticks
+    mem_write_i64(tw, 16, new_tick)
+
+    flex tasks_buf = mem_read_i64(tw, 40)
+    flex scheduled = mem_read_i64(tw, 24)
+    flex fired_count = 0
+
+    flex i = 0
+    while i < scheduled {
+        flex offset = i * 32
+        flex is_active = mem_read_i64(tasks_buf, offset + 16)
+        flex is_fired = mem_read_i64(tasks_buf, offset + 24)
+
+        if is_active == 1 {
+            if is_fired == 0 {
+                flex due = mem_read_i64(tasks_buf, offset + 8)
+                if due <= new_tick {
+                    mem_write_i64(tasks_buf, offset + 24, 1) // Mark fired
+                    mem_write_i64(tasks_buf, offset + 16, 0) // Mark inactive
+                    fired_count = fired_count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    flex total_f = mem_read_i64(tw, 32)
+    mem_write_i64(tw, 32, total_f + fired_count)
+    deliver fired_count
+}
+
+open flow time_wheel_cancel(tw: Int, task_id: Int) -> Bool {
+    flex tasks_buf = mem_read_i64(tw, 40)
+    flex scheduled = mem_read_i64(tw, 24)
+
+    flex i = 0
+    while i < scheduled {
+        flex offset = i * 32
+        if mem_read_i64(tasks_buf, offset) == task_id {
+            flex is_active = mem_read_i64(tasks_buf, offset + 16)
+            if is_active == 1 {
+                mem_write_i64(tasks_buf, offset + 16, 0) // Inactive
+                deliver true
+            }
+        }
+        i = i + 1
+    }
+    deliver false
+}
+
+open flow time_wheel_is_active(tw: Int, task_id: Int) -> Bool {
+    flex tasks_buf = mem_read_i64(tw, 40)
+    flex scheduled = mem_read_i64(tw, 24)
+
+    flex i = 0
+    while i < scheduled {
+        flex offset = i * 32
+        if mem_read_i64(tasks_buf, offset) == task_id {
+            deliver mem_read_i64(tasks_buf, offset + 16) == 1
+        }
+        i = i + 1
+    }
+    deliver false
+}
+
+open flow time_wheel_is_fired(tw: Int, task_id: Int) -> Bool {
+    flex tasks_buf = mem_read_i64(tw, 40)
+    flex scheduled = mem_read_i64(tw, 24)
+
+    flex i = 0
+    while i < scheduled {
+        flex offset = i * 32
+        if mem_read_i64(tasks_buf, offset) == task_id {
+            deliver mem_read_i64(tasks_buf, offset + 24) == 1
+        }
+        i = i + 1
+    }
+    deliver false
+}
+
+open flow time_wheel_free(tw: Int) -> Void {
+    flex tasks_buf = mem_read_i64(tw, 40)
+    free_buffer(tasks_buf)
+    free_buffer(tw)
+}

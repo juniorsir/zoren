@@ -1,0 +1,191 @@
+// Zoren POSIX USTar Archive Codec Suite (std/tar_archive.zor)
+// Standard 512-byte POSIX USTar header builder, octal encoders, and checksum validation.
+
+bring sys
+
+open flow tar_int_to_octal(val: Int, digit_count: Int) -> Text {
+    flex res = ""
+    flex curr = val
+    flex i = 0
+
+    while i < digit_count {
+        flex rem = curr % 8
+        flex ch = str_slice("01234567", rem, 1)
+        res = str_concat(ch, res)
+        curr = curr / 8
+        i = i + 1
+    }
+
+    deliver res
+}
+
+open flow tar_octal_to_int(oct_str: Text) -> Int {
+    flex len = length(oct_str)
+    flex val = 0
+    flex i = 0
+
+    while i < len {
+        flex ch = str_slice(oct_str, i, 1)
+        flex digit = str_find("01234567", ch)
+        if digit >= 0 {
+            val = (val * 8) + digit
+        }
+        i = i + 1
+    }
+
+    deliver val
+}
+
+open flow tar_write_string(buf: Int, offset: Int, max_len: Int, s: Text) -> Void {
+    flex s_len = length(s)
+    flex write_len = s_len
+    if write_len > max_len {
+        write_len = max_len
+    }
+
+    flex i = 0
+    while i < write_len {
+        flex ch = str_slice(s, i, 1)
+        // Find ASCII byte
+        flex ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+        flex b = str_find(ascii_table, ch)
+        if b >= 0 {
+            mem_write_byte(buf, offset + i, b + 32)
+        } else {
+            mem_write_byte(buf, offset + i, 0)
+        }
+        i = i + 1
+    }
+}
+
+open flow tar_pad_to_block(size: Int) -> Int {
+    if size <= 0 { deliver 512 }
+    flex rem = size % 512
+    if rem == 0 { deliver size }
+    deliver size + (512 - rem)
+}
+
+open flow tar_header_new(filename: Text, file_size: Int, is_dir: Bool) -> Int {
+    flex header = alloc_buffer(512)
+    mem_fill(header, 0, 512)
+
+    // [0..100]: Filename
+    tar_write_string(header, 0, 99, filename)
+
+    // [100..108]: Mode (644 for file, 755 for dir)
+    if is_dir {
+        tar_write_string(header, 100, 7, "0000755")
+    } else {
+        tar_write_string(header, 100, 7, "0000644")
+    }
+
+    // [108..116]: UID (0)
+    tar_write_string(header, 108, 7, "0000000")
+
+    // [116..124]: GID (0)
+    tar_write_string(header, 116, 7, "0000000")
+
+    // [124..136]: File Size (11 octal digits)
+    flex size_oct = tar_int_to_octal(file_size, 11)
+    tar_write_string(header, 124, 11, size_oct)
+
+    // [136..148]: Mtime (11 octal digits)
+    tar_write_string(header, 136, 11, "00000000000")
+
+    // [148..156]: Checksum field (initialized with 8 spaces: ASCII 32)
+    flex i = 0
+    while i < 8 {
+        mem_write_byte(header, 148 + i, 32)
+        i = i + 1
+    }
+
+    // [156]: Typeflag ('0' regular, '5' directory)
+    if is_dir {
+        mem_write_byte(header, 156, 53) // '5'
+    } else {
+        mem_write_byte(header, 156, 48) // '0'
+    }
+
+    // [257..263]: Magic ("ustar\0")
+    tar_write_string(header, 257, 5, "ustar")
+    mem_write_byte(header, 262, 0)
+
+    // [263..265]: Version ("00")
+    mem_write_byte(header, 263, 48) // '0'
+    mem_write_byte(header, 264, 48) // '0'
+
+    // Compute unsigned checksum across all 512 bytes
+    flex chksum = 0
+    i = 0
+    while i < 512 {
+        chksum = chksum + mem_read_byte(header, i)
+        i = i + 1
+    }
+
+    // Format checksum: 6 octal digits + NUL + space
+    flex chk_oct = tar_int_to_octal(chksum, 6)
+    tar_write_string(header, 148, 6, chk_oct)
+    mem_write_byte(header, 154, 0)
+    mem_write_byte(header, 155, 32)
+
+    deliver header
+}
+
+open flow tar_header_get_size(header: Int) -> Int {
+    flex size_str = ""
+    flex i = 0
+    while i < 11 {
+        flex b = mem_read_byte(header, 124 + i)
+        if b >= 48 {
+            if b <= 55 {
+                flex digit = b - 48
+                size_str = str_concat(size_str, int_to_str(digit))
+            }
+        }
+        i = i + 1
+    }
+    deliver tar_octal_to_int(size_str)
+}
+
+open flow tar_header_is_dir(header: Int) -> Bool {
+    deliver mem_read_byte(header, 156) == 53 // '5'
+}
+
+open flow tar_header_validate(header: Int) -> Bool {
+    // Check magic "ustar"
+    if mem_read_byte(header, 257) != 117 { deliver false } // 'u'
+    if mem_read_byte(header, 258) != 115 { deliver false } // 's'
+    if mem_read_byte(header, 259) != 116 { deliver false } // 't'
+    if mem_read_byte(header, 260) != 97  { deliver false } // 'a'
+    if mem_read_byte(header, 261) != 114 { deliver false } // 'r'
+
+    // Read stored checksum
+    flex stored_chk_str = ""
+    flex i = 0
+    while i < 6 {
+        flex b = mem_read_byte(header, 148 + i)
+        if b >= 48 && b <= 55 {
+            stored_chk_str = str_concat(stored_chk_str, int_to_str(b - 48))
+        }
+        i = i + 1
+    }
+    flex stored_chk = tar_octal_to_int(stored_chk_str)
+
+    // Compute checksum treating 148..156 as 8 spaces (32)
+    flex computed_chk = 0
+    i = 0
+    while i < 512 {
+        if i >= 148 && i < 156 {
+            computed_chk = computed_chk + 32
+        } else {
+            computed_chk = computed_chk + mem_read_byte(header, i)
+        }
+        i = i + 1
+    }
+
+    deliver stored_chk == computed_chk
+}
+
+open flow tar_header_free(header: Int) -> Void {
+    free_buffer(header)
+}

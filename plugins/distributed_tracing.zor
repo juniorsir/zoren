@@ -1,0 +1,166 @@
+// Zoren OpenTelemetry / W3C Trace Context Distributed Tracing (plugins/distributed_tracing.zor)
+// Production traceparent codec, span lifecycle tracking, and latency telemetry.
+
+bring sys
+bring crypto
+
+// ============================================================================
+// TRACER MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   span_count
+// [8..16]:  max_spans (64)
+// [16..24]: spans_buf (64 * 32 bytes)
+// [24..32]: reserved
+//
+// Each Span (32 bytes):
+// [0..8]:   span_id_hash
+// [8..16]:  parent_id_hash
+// [16..24]: start_ms
+// [24..32]: duration_ms
+// ============================================================================
+
+open flow traceparent_create(trace_id: Text, span_id: Text, sampled: Bool) -> Text {
+    flex flag = "00"
+    if sampled {
+        flag = "01"
+    }
+
+    flex res = str_concat("00-", trace_id)
+    res = str_concat(res, "-")
+    res = str_concat(res, span_id)
+    res = str_concat(res, "-")
+    deliver str_concat(res, flag)
+}
+
+open flow traceparent_validate(header: Text) -> Bool {
+    flex len = length(header)
+    if len != 55 {
+        deliver false
+    }
+
+    // Check version
+    if constant_time_compare(str_slice(header, 0, 2), "00") != true {
+        deliver false
+    }
+
+    // Check dashes
+    if constant_time_compare(str_slice(header, 2, 1), "-") != true { deliver false }
+    if constant_time_compare(str_slice(header, 35, 1), "-") != true { deliver false }
+    if constant_time_compare(str_slice(header, 52, 1), "-") != true { deliver false }
+
+    deliver true
+}
+
+open flow traceparent_get_trace_id(header: Text) -> Text {
+    if traceparent_validate(header) != true {
+        deliver ""
+    }
+    deliver str_slice(header, 3, 32)
+}
+
+open flow traceparent_get_span_id(header: Text) -> Text {
+    if traceparent_validate(header) != true {
+        deliver ""
+    }
+    deliver str_slice(header, 36, 16)
+}
+
+open flow traceparent_is_sampled(header: Text) -> Bool {
+    if traceparent_validate(header) != true {
+        deliver false
+    }
+    flex flag = str_slice(header, 53, 2)
+    deliver constant_time_compare(flag, "01")
+}
+
+open flow trace_generate_id() -> Text {
+    deliver sys_secure_random_bytes(16)
+}
+
+open flow span_generate_id() -> Text {
+    deliver sys_secure_random_bytes(8)
+}
+
+open flow tracer_new() -> Int {
+    flex max_spans = 64
+    flex table_size = max_spans * 32
+    flex spans_buf = alloc_buffer(table_size)
+    mem_fill(spans_buf, 0, table_size)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 0) // span_count = 0
+    mem_write_i64(header, 8, max_spans)
+    mem_write_i64(header, 16, spans_buf)
+    mem_write_i64(header, 24, 0)
+
+    deliver header
+}
+
+open flow span_start(tracer: Int, span_id: Text, parent_id: Text, start_ms: Int) -> Bool {
+    flex count = mem_read_i64(tracer, 0)
+    flex max_s = mem_read_i64(tracer, 8)
+    if count >= max_s {
+        deliver false
+    }
+
+    flex spans_buf = mem_read_i64(tracer, 16)
+    flex offset = count * 32
+
+    flex s_hash = sys_fast_hash(span_id)
+    flex p_hash = 0
+    if length(parent_id) > 0 {
+        p_hash = sys_fast_hash(parent_id)
+    }
+
+    mem_write_i64(spans_buf, offset, s_hash)
+    mem_write_i64(spans_buf, offset + 8, p_hash)
+    mem_write_i64(spans_buf, offset + 16, start_ms)
+    mem_write_i64(spans_buf, offset + 24, 0 - 1) // duration = -1 (in progress)
+
+    mem_write_i64(tracer, 0, count + 1)
+    deliver true
+}
+
+open flow span_finish(tracer: Int, span_id: Text, end_ms: Int) -> Int {
+    flex count = mem_read_i64(tracer, 0)
+    flex spans_buf = mem_read_i64(tracer, 16)
+    flex s_hash = sys_fast_hash(span_id)
+
+    flex i = 0
+    while i < count {
+        flex offset = i * 32
+        if mem_read_i64(spans_buf, offset) == s_hash {
+            flex start_ms = mem_read_i64(spans_buf, offset + 16)
+            flex dur = end_ms - start_ms
+            if dur < 0 { dur = 0 }
+            mem_write_i64(spans_buf, offset + 24, dur)
+            deliver dur
+        }
+        i = i + 1
+    }
+
+    deliver 0 - 1
+}
+
+open flow span_get_duration(tracer: Int, span_id: Text) -> Int {
+    flex count = mem_read_i64(tracer, 0)
+    flex spans_buf = mem_read_i64(tracer, 16)
+    flex s_hash = sys_fast_hash(span_id)
+
+    flex i = 0
+    while i < count {
+        flex offset = i * 32
+        if mem_read_i64(spans_buf, offset) == s_hash {
+            deliver mem_read_i64(spans_buf, offset + 24)
+        }
+        i = i + 1
+    }
+
+    deliver 0 - 1
+}
+
+open flow tracer_free(tracer: Int) -> Void {
+    flex spans_buf = mem_read_i64(tracer, 16)
+    free_buffer(spans_buf)
+    free_buffer(tracer)
+}

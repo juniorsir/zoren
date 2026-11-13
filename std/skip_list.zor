@@ -1,0 +1,270 @@
+// Zoren Probabilistic Skip List Suite (std/skip_list.zor)
+// Multi-level probabilistic ordered linked list providing O(log N) search, insert, and delete.
+
+bring sys
+
+// ============================================================================
+// SKIP LIST MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   count
+// [8..16]:  max_level (1..8)
+// [16..24]: head_node_idx (0)
+// [24..32]: node_pool_buf (512 nodes * 88 bytes)
+// [32..40]: next_node_idx
+// [40..48]: rng_seed
+//
+// Each Node (88 bytes):
+// [0..8]:   key
+// [8..16]:  val
+// [16..24]: node_level (1..8)
+// [24..88]: forward[8] (8 * 8 bytes: node indices, -1 if none)
+// ============================================================================
+
+open flow skip_list_random_level(list: Int) -> Int {
+    flex seed = mem_read_i64(list, 40)
+    // Linear Congruential Generator step
+    seed = ((seed * 1103515245) + 12345) % 2147483647
+    if seed < 0 { seed = 0 - seed }
+    mem_write_i64(list, 40, seed)
+
+    flex lvl = 1
+    flex cur = seed
+    while lvl < 8 {
+        if (cur % 2) == 1 {
+            lvl = lvl + 1
+            cur = cur / 2
+        } else {
+            deliver lvl
+        }
+    }
+    deliver lvl
+}
+
+open flow skip_list_new() -> Int {
+    flex max_nodes = 512
+    flex node_size = 88
+    flex pool_size = max_nodes * node_size
+    flex pool = alloc_buffer(pool_size)
+    mem_fill(pool, 0, pool_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0) // count = 0
+    mem_write_i64(header, 8, 1) // max_level = 1
+    mem_write_i64(header, 16, 0) // head = 0
+    mem_write_i64(header, 24, pool)
+    mem_write_i64(header, 32, 1) // next_node_idx = 1
+    mem_write_i64(header, 40, 1234567) // initial seed
+
+    // Initialize head sentinel (node 0)
+    mem_write_i64(pool, 0, 0 - 999999999) // key
+    mem_write_i64(pool, 8, 0)
+    mem_write_i64(pool, 16, 8) // level 8
+
+    flex i = 0
+    while i < 8 {
+        mem_write_i64(pool, 24 + (i * 8), 0 - 1) // all forward pointers = -1
+        i = i + 1
+    }
+
+    deliver header
+}
+
+open flow skip_list_size(list: Int) -> Int {
+    deliver mem_read_i64(list, 0)
+}
+
+open flow skip_list_search(list: Int, key: Int) -> Int {
+    flex pool = mem_read_i64(list, 24)
+    flex max_lvl = mem_read_i64(list, 8)
+    flex curr = 0
+
+    flex i = max_lvl - 1
+    while i >= 0 {
+        flex fwd = mem_read_i64(pool, (curr * 88) + 24 + (i * 8))
+        while fwd >= 0 {
+            flex fwd_key = mem_read_i64(pool, fwd * 88)
+            if fwd_key < key {
+                curr = fwd
+                fwd = mem_read_i64(pool, (curr * 88) + 24 + (i * 8))
+            } else {
+                fwd = 0 - 1 // break inner loop
+            }
+        }
+        i = i - 1
+    }
+
+    // Move to bottom level forward
+    flex next_idx = mem_read_i64(pool, (curr * 88) + 24)
+    if next_idx >= 0 {
+        if mem_read_i64(pool, next_idx * 88) == key {
+            deliver mem_read_i64(pool, (next_idx * 88) + 8) // Return value
+        }
+    }
+
+    deliver 0 - 1
+}
+
+open flow skip_list_contains(list: Int, key: Int) -> Bool {
+    flex val = skip_list_search(list, key)
+    deliver val != (0 - 1)
+}
+
+open flow skip_list_insert(list: Int, key: Int, value: Int) -> Bool {
+    flex pool = mem_read_i64(list, 24)
+    flex max_lvl = mem_read_i64(list, 8)
+    flex update = alloc_buffer(8 * 8) // tracks update path across 8 levels
+
+    flex curr = 0
+    flex i = max_lvl - 1
+    while i >= 0 {
+        flex fwd = mem_read_i64(pool, (curr * 88) + 24 + (i * 8))
+        while fwd >= 0 {
+            flex fwd_key = mem_read_i64(pool, fwd * 88)
+            if fwd_key < key {
+                curr = fwd
+                fwd = mem_read_i64(pool, (curr * 88) + 24 + (i * 8))
+            } else {
+                fwd = 0 - 1
+            }
+        }
+        mem_write_i64(update, i * 8, curr)
+        i = i - 1
+    }
+
+    flex next_idx = mem_read_i64(pool, (curr * 88) + 24)
+    if next_idx >= 0 {
+        if mem_read_i64(pool, next_idx * 88) == key {
+            // Key already exists -> update value
+            mem_write_i64(pool, (next_idx * 88) + 8, value)
+            free_buffer(update)
+            deliver true
+        }
+    }
+
+    // Allocate new node
+    flex next_slot = mem_read_i64(list, 32)
+    if next_slot >= 512 {
+        free_buffer(update)
+        deliver false // Capacity reached
+    }
+    mem_write_i64(list, 32, next_slot + 1)
+
+    flex new_lvl = skip_list_random_level(list)
+    if new_lvl > max_lvl {
+        flex l = max_lvl
+        while l < new_lvl {
+            mem_write_i64(update, l * 8, 0) // head sentinel
+            l = l + 1
+        }
+        mem_write_i64(list, 8, new_lvl)
+        max_lvl = new_lvl
+    }
+
+    // Set new node properties
+    flex new_off = next_slot * 88
+    mem_write_i64(pool, new_off, key)
+    mem_write_i64(pool, new_off + 8, value)
+    mem_write_i64(pool, new_off + 16, new_lvl)
+
+    // Splice into levels
+    i = 0
+    while i < new_lvl {
+        flex u_idx = mem_read_i64(update, i * 8)
+        flex u_fwd = mem_read_i64(pool, (u_idx * 88) + 24 + (i * 8))
+
+        mem_write_i64(pool, new_off + 24 + (i * 8), u_fwd)
+        mem_write_i64(pool, (u_idx * 88) + 24 + (i * 8), next_slot)
+        i = i + 1
+    }
+
+    flex count = mem_read_i64(list, 0) + 1
+    mem_write_i64(list, 0, count)
+    free_buffer(update)
+    deliver true
+}
+
+open flow skip_list_delete(list: Int, key: Int) -> Bool {
+    flex pool = mem_read_i64(list, 24)
+    flex max_lvl = mem_read_i64(list, 8)
+    flex update = alloc_buffer(8 * 8)
+
+    flex curr = 0
+    flex i = max_lvl - 1
+    while i >= 0 {
+        flex fwd = mem_read_i64(pool, (curr * 88) + 24 + (i * 8))
+        while fwd >= 0 {
+            flex fwd_key = mem_read_i64(pool, fwd * 88)
+            if fwd_key < key {
+                curr = fwd
+                fwd = mem_read_i64(pool, (curr * 88) + 24 + (i * 8))
+            } else {
+                fwd = 0 - 1
+            }
+        }
+        mem_write_i64(update, i * 8, curr)
+        i = i - 1
+    }
+
+    flex target = mem_read_i64(pool, (curr * 88) + 24)
+    if target < 0 {
+        free_buffer(update)
+        deliver false
+    }
+
+    if mem_read_i64(pool, target * 88) != key {
+        free_buffer(update)
+        deliver false
+    }
+
+    // Unlink across all levels
+    i = 0
+    while i < max_lvl {
+        flex u_idx = mem_read_i64(update, i * 8)
+        if mem_read_i64(pool, (u_idx * 88) + 24 + (i * 8)) == target {
+            flex next_fwd = mem_read_i64(pool, (target * 88) + 24 + (i * 8))
+            mem_write_i64(pool, (u_idx * 88) + 24 + (i * 8), next_fwd)
+        }
+        i = i + 1
+    }
+
+    free_buffer(update)
+    flex count = mem_read_i64(list, 0) - 1
+    mem_write_i64(list, 0, count)
+    deliver true
+}
+
+open flow skip_list_min_key(list: Int) -> Int {
+    flex pool = mem_read_i64(list, 24)
+    flex first_idx = mem_read_i64(pool, 24) // head level 0 forward
+    if first_idx >= 0 {
+        deliver mem_read_i64(pool, first_idx * 88)
+    }
+    deliver 0 - 1
+}
+
+open flow skip_list_max_key(list: Int) -> Int {
+    flex pool = mem_read_i64(list, 24)
+    flex max_lvl = mem_read_i64(list, 8)
+    flex curr = 0
+
+    flex i = max_lvl - 1
+    while i >= 0 {
+        flex fwd = mem_read_i64(pool, (curr * 88) + 24 + (i * 8))
+        while fwd >= 0 {
+            curr = fwd
+            fwd = mem_read_i64(pool, (curr * 88) + 24 + (i * 8))
+        }
+        i = i - 1
+    }
+
+    if curr > 0 {
+        deliver mem_read_i64(pool, curr * 88)
+    }
+    deliver 0 - 1
+}
+
+open flow skip_list_free(list: Int) -> Void {
+    flex pool = mem_read_i64(list, 24)
+    free_buffer(pool)
+    free_buffer(list)
+}

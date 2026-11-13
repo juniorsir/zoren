@@ -1,0 +1,172 @@
+// Zoren Snappy High-Throughput Byte Compressor (plugins/snappy_compress.zor)
+// Production LZ77 byte-level compressor with varint prefix and tag framing for high-throughput RPCs.
+
+bring sys
+bring crypto
+
+open flow snappy_hex_byte(b: Int) -> Text {
+    flex hex_chars = "0123456789abcdef"
+    flex h = (b / 16) % 16
+    flex l = b % 16
+    flex s1 = str_slice(hex_chars, h, 1)
+    flex s2 = str_slice(hex_chars, l, 1)
+    deliver str_concat(s1, s2)
+}
+
+open flow snappy_compress_hex(input: Text) -> Text {
+    flex in_len = length(input)
+    if in_len == 0 { deliver "00" }
+
+    flex res_hex = ""
+    if in_len < 128 {
+        res_hex = snappy_hex_byte(in_len)
+    } else {
+        res_hex = snappy_hex_byte((in_len % 128) + 128)
+        res_hex = str_concat(res_hex, snappy_hex_byte(in_len / 128))
+    }
+
+    flex i = 0
+    flex lit_start = 0
+    flex lit_len = 0
+
+    while i < in_len {
+        flex match_pos = 0 - 1
+        if (i + 4) <= in_len {
+            flex needle = str_slice(input, i, 4)
+            flex p = str_find(input, needle)
+            if p >= 0 && p < i && (i - p) <= 2047 {
+                match_pos = p
+            }
+        }
+
+        if match_pos >= 0 {
+            flex back_offset = i - match_pos
+            flex match_len = 4
+            while (i + match_len) < in_len && match_len < 11 {
+                flex c1 = str_slice(input, match_pos + match_len, 1)
+                flex c2 = str_slice(input, i + match_len, 1)
+                if constant_time_compare(c1, c2) {
+                    match_len = match_len + 1
+                } else {
+                    match_pos = 0 - 2
+                }
+            }
+
+            if lit_len > 0 {
+                flex lit_chunk = str_slice(input, lit_start, lit_len)
+                flex tag_byte = (lit_len - 1) * 4
+                res_hex = str_concat(res_hex, snappy_hex_byte(tag_byte))
+                res_hex = str_concat(res_hex, sys_hex_encode(lit_chunk))
+                lit_len = 0
+            }
+
+            flex len_code = match_len - 4
+            flex off_high = (back_offset / 256) % 8
+            flex copy_tag = (len_code * 32) + (off_high * 4) + 1
+            flex off_low = back_offset % 256
+
+            res_hex = str_concat(res_hex, snappy_hex_byte(copy_tag))
+            res_hex = str_concat(res_hex, snappy_hex_byte(off_low))
+
+            i = i + match_len
+            lit_start = i
+        } else {
+            lit_len = lit_len + 1
+            i = i + 1
+            if lit_len >= 60 {
+                flex lit_chunk = str_slice(input, lit_start, lit_len)
+                flex tag_byte = (lit_len - 1) * 4
+                res_hex = str_concat(res_hex, snappy_hex_byte(tag_byte))
+                res_hex = str_concat(res_hex, sys_hex_encode(lit_chunk))
+                lit_start = i
+                lit_len = 0
+            }
+        }
+    }
+
+    if lit_len > 0 {
+        flex lit_chunk = str_slice(input, lit_start, lit_len)
+        flex tag_byte = (lit_len - 1) * 4
+        res_hex = str_concat(res_hex, snappy_hex_byte(tag_byte))
+        res_hex = str_concat(res_hex, sys_hex_encode(lit_chunk))
+    }
+
+    deliver res_hex
+}
+
+open flow snappy_decompress_hex(compressed_hex: Text) -> Text {
+    flex hex_len = length(compressed_hex)
+    if hex_len < 2 { deliver "" }
+
+    flex hex_chars = "0123456789abcdef"
+    flex h_idx = 0
+
+    flex b0_high = str_find(hex_chars, str_lower(str_slice(compressed_hex, h_idx, 1)))
+    flex b0_low = str_find(hex_chars, str_lower(str_slice(compressed_hex, h_idx + 1, 1)))
+    flex b0 = (b0_high * 16) + b0_low
+    h_idx = h_idx + 2
+
+    flex uncompressed_len = b0
+    if b0 >= 128 {
+        flex b1_high = str_find(hex_chars, str_lower(str_slice(compressed_hex, h_idx, 1)))
+        flex b1_low = str_find(hex_chars, str_lower(str_slice(compressed_hex, h_idx + 1, 1)))
+        flex b1 = (b1_high * 16) + b1_low
+        h_idx = h_idx + 2
+        uncompressed_len = (b0 - 128) + (b1 * 128)
+    }
+
+    flex out = ""
+
+    while h_idx < hex_len {
+        flex tag_high = str_find(hex_chars, str_lower(str_slice(compressed_hex, h_idx, 1)))
+        flex tag_low = str_find(hex_chars, str_lower(str_slice(compressed_hex, h_idx + 1, 1)))
+        if tag_high < 0 || tag_low < 0 {
+            h_idx = hex_len
+        } else {
+            flex tag_byte = (tag_high * 16) + tag_low
+            h_idx = h_idx + 2
+
+            flex tag_type = tag_byte % 4
+
+            if tag_type == 0 {
+                flex lit_len = (tag_byte / 4) + 1
+                flex chunk_hex = str_slice(compressed_hex, h_idx, lit_len * 2)
+                out = str_concat(out, sys_hex_decode(chunk_hex))
+                h_idx = h_idx + (lit_len * 2)
+            } else {
+                if tag_type == 1 {
+                    flex copy_len = ((tag_byte / 32) % 8) + 4
+                    flex off_high = (tag_byte / 4) % 8
+
+                    flex off_low_h = str_find(hex_chars, str_lower(str_slice(compressed_hex, h_idx, 1)))
+                    flex off_low_l = str_find(hex_chars, str_lower(str_slice(compressed_hex, h_idx + 1, 1)))
+                    flex off_low = (off_low_h * 16) + off_low_l
+                    h_idx = h_idx + 2
+
+                    flex offset = (off_high * 256) + off_low
+                    flex out_len = length(out)
+                    flex start = out_len - offset
+
+                    flex copy_chunk = str_slice(out, start, copy_len)
+                    out = str_concat(out, copy_chunk)
+                } else {
+                    h_idx = h_idx + 2
+                }
+            }
+        }
+    }
+
+    deliver out
+}
+
+open flow snappy_compressed_len(input: Text) -> Int {
+    flex c_hex = snappy_compress_hex(input)
+    deliver length(c_hex) / 2
+}
+
+open flow snappy_compression_ratio_pct(input: Text) -> Int {
+    flex in_len = length(input)
+    if in_len == 0 { deliver 100 }
+    flex comp_len = snappy_compressed_len(input)
+    deliver (comp_len * 100) / in_len
+}
