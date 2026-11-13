@@ -74,6 +74,7 @@ Find exactly what you need quickly:
 | Guide | Description | Best For |
 |---|---|---|
 | **[⚡ Quick Reference Cheat Sheet](./QUICK_REFERENCE.md)** | 1-page complete cheat sheet of all keywords, types, and compiler commands. | Everyday coding |
+| **[🧩 Creating Modules & Plugins](./guides/modules_and_plugins.md)** | Guide to creating custom modules & plugins, combining them, and global setup. | Custom packages |
 | **[🐍 Python to Zoren Guide](./PYTHON_TO_ZOREN_GUIDE.md)** | Side-by-side Rosetta Stone comparing Python idioms directly to Zoren. | Python developers |
 | **[🎓 15-Lesson Tutorial Series](./getting-started/01-installation.md)** | Step-by-step beginner journey from installation to advanced abilities. | Beginners |
 | **[🍲 Production Cookbook](./COOKBOOK.md)** | Real-world recipes: HTTP servers, Raft consensus, vector search, and tokenizers. | Backend engineers |
