@@ -1,0 +1,109 @@
+// Zoren Paxos Distributed Consensus Suite (plugins/paxos_consensus.zor)
+// Classical Single-Decree Paxos consensus state machine (Prepare, Promise, Propose, Accept, Decided).
+
+bring sys
+
+// ============================================================================
+// PAXOS NODE MEMORY LAYOUT
+// Header (64 bytes):
+// [0..8]:   node_id
+// [8..16]:  cluster_size
+// [16..24]: promised_n (highest proposal number promised)
+// [24..32]: accepted_n (highest proposal number accepted)
+// [32..40]: accepted_val
+// [40..48]: is_decided (1 or 0)
+// [48..56]: decided_val
+// [56..64]: proposal_seq
+// ============================================================================
+
+open flow paxos_node_new(node_id: Int, cluster_size: Int) -> Int {
+    flex header = alloc_buffer(64)
+    mem_write_i64(header, 0, node_id)
+    mem_write_i64(header, 8, cluster_size)
+    mem_write_i64(header, 16, 0)      // promised_n = 0
+    mem_write_i64(header, 24, 0)      // accepted_n = 0
+    mem_write_i64(header, 32, 0 - 1)  // accepted_val = -1
+    mem_write_i64(header, 40, 0)      // is_decided = 0
+    mem_write_i64(header, 48, 0 - 1)  // decided_val = -1
+    mem_write_i64(header, 56, 0)      // proposal_seq = 0
+
+    deliver header
+}
+
+open flow paxos_get_node_id(node: Int) -> Int {
+    deliver mem_read_i64(node, 0)
+}
+
+open flow paxos_get_cluster_size(node: Int) -> Int {
+    deliver mem_read_i64(node, 8)
+}
+
+open flow paxos_get_promised_n(node: Int) -> Int {
+    deliver mem_read_i64(node, 16)
+}
+
+open flow paxos_get_accepted_n(node: Int) -> Int {
+    deliver mem_read_i64(node, 24)
+}
+
+open flow paxos_get_accepted_val(node: Int) -> Int {
+    deliver mem_read_i64(node, 32)
+}
+
+open flow paxos_is_decided(node: Int) -> Bool {
+    deliver mem_read_i64(node, 40) == 1
+}
+
+open flow paxos_get_decided_val(node: Int) -> Int {
+    deliver mem_read_i64(node, 48)
+}
+
+// Proposer generates a strictly monotonic, unique proposal number partitioned by node_id
+open flow paxos_generate_proposal_n(node: Int) -> Int {
+    flex seq = mem_read_i64(node, 56) + 1
+    mem_write_i64(node, 56, seq)
+
+    flex node_id = mem_read_i64(node, 0)
+    deliver (seq * 100) + node_id
+}
+
+// Phase 1b: Acceptor handles Prepare(n) request
+open flow paxos_handle_prepare(node: Int, proposal_n: Int) -> Bool {
+    flex promised_n = mem_read_i64(node, 16)
+
+    if proposal_n > promised_n {
+        mem_write_i64(node, 16, proposal_n) // Update promised_n
+        deliver true // Grant promise
+    }
+
+    deliver false // Reject stale proposal
+}
+
+// Phase 2b: Acceptor handles Accept(n, val) request
+open flow paxos_handle_accept(node: Int, proposal_n: Int, val: Int) -> Bool {
+    flex promised_n = mem_read_i64(node, 16)
+
+    if proposal_n >= promised_n {
+        mem_write_i64(node, 16, proposal_n) // promised_n = proposal_n
+        mem_write_i64(node, 24, proposal_n) // accepted_n = proposal_n
+        mem_write_i64(node, 32, val)        // accepted_val = val
+        deliver true
+    }
+
+    deliver false
+}
+
+// Final Learn / Decided state commit
+open flow paxos_commit_decision(node: Int, val: Int) -> Bool {
+    mem_write_i64(node, 40, 1)   // is_decided = 1
+    mem_write_i64(node, 48, val) // decided_val = val
+    deliver true
+}
+
+open flow paxos_quorum_size(cluster_size: Int) -> Int {
+    deliver (cluster_size / 2) + 1
+}
+
+open flow paxos_free(node: Int) -> Void {
+    free_buffer(node)
+}

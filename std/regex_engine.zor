@@ -1,0 +1,169 @@
+// Zoren Standard Regular Expression Matcher Suite (std/regex_engine.zor)
+// Lightweight Thompson/Pike regex matcher supporting '.', '*', '+', '?', and anchors '^', '$'.
+
+bring sys
+
+open flow regex_char_match(pattern_ch: Text, text_ch: Text) -> Bool {
+    if constant_time_compare(pattern_ch, ".") {
+        deliver true
+    }
+    deliver constant_time_compare(pattern_ch, text_ch)
+}
+
+open flow regex_match_here(pattern: Text, text: Text, p_idx: Int, t_idx: Int) -> Bool {
+    flex p_len = length(pattern)
+    flex t_len = length(text)
+
+    // Reached end of pattern -> match successful
+    if p_idx >= p_len {
+        deliver true
+    }
+
+    flex curr_p = str_slice(pattern, p_idx, 1)
+
+    // Check end-of-string anchor '$'
+    if constant_time_compare(curr_p, "$") {
+        if p_idx == (p_len - 1) {
+            deliver t_idx == t_len
+        }
+    }
+
+    // Check if next token is a quantifier: '*', '+', '?'
+    if (p_idx + 1) < p_len {
+        flex quant = str_slice(pattern, p_idx + 1, 1)
+
+        // Zero-or-more quantifier '*'
+        if constant_time_compare(quant, "*") {
+            // First check 0 occurrences
+            if regex_match_here(pattern, text, p_idx + 2, t_idx) {
+                deliver true
+            }
+            flex cur_t = t_idx
+            while cur_t < t_len {
+                flex c_t = str_slice(text, cur_t, 1)
+                if regex_char_match(curr_p, c_t) != true {
+                    deliver false
+                }
+                cur_t = cur_t + 1
+                if regex_match_here(pattern, text, p_idx + 2, cur_t) {
+                    deliver true
+                }
+            }
+            deliver false
+        }
+
+        // One-or-more quantifier '+'
+        if constant_time_compare(quant, "+") {
+            if t_idx >= t_len {
+                deliver false
+            }
+            flex first_t = str_slice(text, t_idx, 1)
+            if regex_char_match(curr_p, first_t) != true {
+                deliver false
+            }
+            flex cur_t = t_idx + 1
+            if regex_match_here(pattern, text, p_idx + 2, cur_t) {
+                deliver true
+            }
+            while cur_t < t_len {
+                flex c_t = str_slice(text, cur_t, 1)
+                if regex_char_match(curr_p, c_t) != true {
+                    deliver false
+                }
+                cur_t = cur_t + 1
+                if regex_match_here(pattern, text, p_idx + 2, cur_t) {
+                    deliver true
+                }
+            }
+            deliver false
+        }
+
+        // Optional quantifier '?'
+        if constant_time_compare(quant, "?") {
+            if t_idx < t_len {
+                flex cur_t = str_slice(text, t_idx, 1)
+                if regex_char_match(curr_p, cur_t) {
+                    if regex_match_here(pattern, text, p_idx + 2, t_idx + 1) {
+                        deliver true
+                    }
+                }
+            }
+            deliver regex_match_here(pattern, text, p_idx + 2, t_idx)
+        }
+    }
+
+    // Single character match
+    if t_idx < t_len {
+        flex t_ch = str_slice(text, t_idx, 1)
+        if regex_char_match(curr_p, t_ch) {
+            deliver regex_match_here(pattern, text, p_idx + 1, t_idx + 1)
+        }
+    }
+
+    deliver false
+}
+
+open flow regex_match(pattern: Text, text: Text) -> Bool {
+    flex p_len = length(pattern)
+    flex t_len = length(text)
+
+    if p_len == 0 {
+        deliver true
+    }
+
+    // Check leading anchor '^'
+    flex first_p = str_slice(pattern, 0, 1)
+    if constant_time_compare(first_p, "^") {
+        deliver regex_match_here(pattern, text, 1, 0)
+    }
+
+    // Try match at every position in text
+    flex i = 0
+    while i <= t_len {
+        if regex_match_here(pattern, text, 0, i) {
+            deliver true
+        }
+        i = i + 1
+    }
+
+    deliver false
+}
+
+open flow regex_match_exact(pattern: Text, text: Text) -> Bool {
+    flex p = pattern
+    if constant_time_compare(str_slice(p, 0, 1), "^") != true {
+        p = str_concat("^", p)
+    }
+    flex p_len = length(p)
+    if constant_time_compare(str_slice(p, p_len - 1, 1), "$") != true {
+        p = str_concat(p, "$")
+    }
+    deliver regex_match(p, text)
+}
+
+open flow regex_find(pattern: Text, text: Text) -> Int {
+    flex p_len = length(pattern)
+    flex t_len = length(text)
+
+    if p_len == 0 {
+        deliver 0
+    }
+
+    flex first_p = str_slice(pattern, 0, 1)
+    if constant_time_compare(first_p, "^") {
+        if regex_match_here(pattern, text, 1, 0) {
+            deliver 0
+        }
+        deliver 0 - 1
+    }
+
+    flex i = 0
+    while i <= t_len {
+        if regex_match_here(pattern, text, 0, i) {
+            deliver i
+        }
+        i = i + 1
+    }
+
+    deliver 0 - 1
+}

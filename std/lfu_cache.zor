@@ -1,0 +1,178 @@
+// Zoren Least Frequently Used (LFU) Cache Suite (std/lfu_cache.zor)
+// High-efficiency in-memory cache with access frequency tracking and deterministic tie-break eviction.
+
+bring sys
+
+// ============================================================================
+// LFU CACHE MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   size
+// [8..16]:  capacity
+// [16..24]: min_freq
+// [24..32]: tick_counter
+// [32..40]: entries_buf (capacity * 32 bytes)
+// [40..48]: reserved
+//
+// Each Entry (32 bytes):
+// [0..8]:   key
+// [8..16]:  val
+// [16..24]: freq
+// [24..32]: last_tick
+// ============================================================================
+
+open flow lfu_new(capacity: Int) -> Int {
+    flex cap = capacity
+    if cap <= 0 { cap = 16 }
+
+    flex table_size = cap * 32
+    flex entries_buf = alloc_buffer(table_size)
+    mem_fill(entries_buf, 0, table_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0)   // size = 0
+    mem_write_i64(header, 8, cap) // capacity
+    mem_write_i64(header, 16, 0)  // min_freq = 0
+    mem_write_i64(header, 24, 0)  // tick_counter = 0
+    mem_write_i64(header, 32, entries_buf)
+    mem_write_i64(header, 40, 0)
+
+    deliver header
+}
+
+open flow lfu_size(cache: Int) -> Int {
+    deliver mem_read_i64(cache, 0)
+}
+
+open flow lfu_capacity(cache: Int) -> Int {
+    deliver mem_read_i64(cache, 8)
+}
+
+open flow lfu_get(cache: Int, key: Int) -> Int {
+    flex size = mem_read_i64(cache, 0)
+    flex entries = mem_read_i64(cache, 32)
+    flex ticks = mem_read_i64(cache, 24) + 1
+    mem_write_i64(cache, 24, ticks)
+
+    flex i = 0
+    while i < size {
+        flex off = i * 32
+        flex k = mem_read_i64(entries, off)
+        if k == key {
+            flex v = mem_read_i64(entries, off + 8)
+            flex f = mem_read_i64(entries, off + 16) + 1
+            mem_write_i64(entries, off + 16, f)
+            mem_write_i64(entries, off + 24, ticks)
+            deliver v
+        }
+        i = i + 1
+    }
+
+    deliver 0 - 1
+}
+
+open flow lfu_contains(cache: Int, key: Int) -> Bool {
+    flex size = mem_read_i64(cache, 0)
+    flex entries = mem_read_i64(cache, 32)
+
+    flex i = 0
+    while i < size {
+        flex k = mem_read_i64(entries, i * 32)
+        if k == key {
+            deliver true
+        }
+        i = i + 1
+    }
+    deliver false
+}
+
+open flow lfu_get_freq(cache: Int, key: Int) -> Int {
+    flex size = mem_read_i64(cache, 0)
+    flex entries = mem_read_i64(cache, 32)
+
+    flex i = 0
+    while i < size {
+        flex off = i * 32
+        flex k = mem_read_i64(entries, off)
+        if k == key {
+            deliver mem_read_i64(entries, off + 16)
+        }
+        i = i + 1
+    }
+    deliver 0
+}
+
+open flow lfu_put(cache: Int, key: Int, value: Int) -> Bool {
+    flex size = mem_read_i64(cache, 0)
+    flex cap = mem_read_i64(cache, 8)
+    flex entries = mem_read_i64(cache, 32)
+    flex ticks = mem_read_i64(cache, 24) + 1
+    mem_write_i64(cache, 24, ticks)
+
+    // Check if key already exists -> update value & frequency
+    flex i = 0
+    while i < size {
+        flex off = i * 32
+        flex k = mem_read_i64(entries, off)
+        if k == key {
+            mem_write_i64(entries, off + 8, value)
+            flex f = mem_read_i64(entries, off + 16) + 1
+            mem_write_i64(entries, off + 16, f)
+            mem_write_i64(entries, off + 24, ticks)
+            deliver true
+        }
+        i = i + 1
+    }
+
+    // New item: if under capacity, insert into new slot
+    if size < cap {
+        flex new_off = size * 32
+        mem_write_i64(entries, new_off, key)
+        mem_write_i64(entries, new_off + 8, value)
+        mem_write_i64(entries, new_off + 16, 1) // freq = 1
+        mem_write_i64(entries, new_off + 24, ticks)
+        mem_write_i64(cache, 0, size + 1)
+        mem_write_i64(cache, 16, 1) // min_freq = 1
+        deliver true
+    }
+
+    // Capacity full: find slot with minimum frequency (and oldest tick) to evict
+    flex evict_idx = 0
+    flex min_f = mem_read_i64(entries, 16)
+    flex min_t = mem_read_i64(entries, 24)
+
+    i = 1
+    while i < size {
+        flex off = i * 32
+        flex f = mem_read_i64(entries, off + 16)
+        flex t = mem_read_i64(entries, off + 24)
+        if f < min_f {
+            min_f = f
+            min_t = t
+            evict_idx = i
+        } else {
+            if f == min_f {
+                if t < min_t {
+                    min_t = t
+                    evict_idx = i
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Overwrite evict_idx with new item
+    flex evict_off = evict_idx * 32
+    mem_write_i64(entries, evict_off, key)
+    mem_write_i64(entries, evict_off + 8, value)
+    mem_write_i64(entries, evict_off + 16, 1) // freq = 1
+    mem_write_i64(entries, evict_off + 24, ticks)
+    mem_write_i64(cache, 16, 1) // min_freq = 1
+
+    deliver true
+}
+
+open flow lfu_free(cache: Int) -> Void {
+    flex entries = mem_read_i64(cache, 32)
+    free_buffer(entries)
+    free_buffer(cache)
+}

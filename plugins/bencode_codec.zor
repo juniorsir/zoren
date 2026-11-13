@@ -1,0 +1,138 @@
+// Zoren BitTorrent Bencode P2P Wire Codec (plugins/bencode_codec.zor)
+// Production Bencode serialization and deserialization suite (integers, strings, lists, dicts).
+
+bring sys
+
+open flow bencode_encode_int(val: Int) -> Text {
+    flex s = str_concat("i", int_to_str(val))
+    deliver str_concat(s, "e")
+}
+
+open flow bencode_decode_int(encoded: Text) -> Int {
+    flex len = length(encoded)
+    if len < 3 {
+        deliver 0
+    }
+
+    flex first_ch = str_slice(encoded, 0, 1)
+    flex last_ch = str_slice(encoded, len - 1, 1)
+
+    if constant_time_compare(first_ch, "i") != true {
+        deliver 0
+    }
+    if constant_time_compare(last_ch, "e") != true {
+        deliver 0
+    }
+
+    flex num_str = str_slice(encoded, 1, len - 2)
+    flex is_neg = false
+    flex start = 0
+    if constant_time_compare(str_slice(num_str, 0, 1), "-") {
+        is_neg = true
+        start = 1
+    }
+
+    flex num_len = length(num_str)
+    flex val = 0
+    flex i = start
+    while i < num_len {
+        flex ch = str_slice(num_str, i, 1)
+        flex digit = str_find("0123456789", ch)
+        if digit >= 0 {
+            val = (val * 10) + digit
+        }
+        i = i + 1
+    }
+
+    if is_neg {
+        deliver 0 - val
+    }
+    deliver val
+}
+
+open flow bencode_encode_str(s: Text) -> Text {
+    flex len = length(s)
+    flex res = str_concat(int_to_str(len), ":")
+    deliver str_concat(res, s)
+}
+
+open flow bencode_decode_str(encoded: Text) -> Text {
+    flex colon_pos = str_find(encoded, ":")
+    if colon_pos <= 0 {
+        deliver ""
+    }
+
+    flex len_str = str_slice(encoded, 0, colon_pos)
+    flex str_len = 0
+    flex i = 0
+    while i < length(len_str) {
+        flex d = str_find("0123456789", str_slice(len_str, i, 1))
+        if d >= 0 {
+            str_len = (str_len * 10) + d
+        }
+        i = i + 1
+    }
+
+    flex total_len = length(encoded)
+    flex start_data = colon_pos + 1
+    if (start_data + str_len) > total_len {
+        deliver ""
+    }
+
+    deliver str_slice(encoded, start_data, str_len)
+}
+
+open flow bencode_encode_list_2(item1_encoded: Text, item2_encoded: Text) -> Text {
+    flex res = str_concat("l", item1_encoded)
+    res = str_concat(res, item2_encoded)
+    deliver str_concat(res, "e")
+}
+
+open flow bencode_encode_dict_entry(key: Text, val_encoded: Text) -> Text {
+    flex k_enc = bencode_encode_str(key)
+    deliver str_concat(k_enc, val_encoded)
+}
+
+open flow bencode_is_valid(encoded: Text) -> Bool {
+    flex len = length(encoded)
+    if len < 2 {
+        deliver false
+    }
+
+    flex first_ch = str_slice(encoded, 0, 1)
+
+    // Integer: i...e
+    if constant_time_compare(first_ch, "i") {
+        flex last_ch = str_slice(encoded, len - 1, 1)
+        deliver constant_time_compare(last_ch, "e")
+    }
+
+    // List: l...e
+    if constant_time_compare(first_ch, "l") {
+        flex last_ch = str_slice(encoded, len - 1, 1)
+        deliver constant_time_compare(last_ch, "e")
+    }
+
+    // Dict: d...e
+    if constant_time_compare(first_ch, "d") {
+        flex last_ch = str_slice(encoded, len - 1, 1)
+        deliver constant_time_compare(last_ch, "e")
+    }
+
+    // String: len:str
+    flex colon_pos = str_find(encoded, ":")
+    if colon_pos > 0 {
+        flex len_str = str_slice(encoded, 0, colon_pos)
+        flex declared_len = 0
+        flex i = 0
+        while i < length(len_str) {
+            flex d = str_find("0123456789", str_slice(len_str, i, 1))
+            if d < 0 { deliver false }
+            declared_len = (declared_len * 10) + d
+            i = i + 1
+        }
+        deliver length(encoded) == (colon_pos + 1 + declared_len)
+    }
+
+    deliver false
+}

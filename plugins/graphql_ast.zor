@@ -1,0 +1,203 @@
+// Zoren GraphQL Query AST Tokenizer & Parser Suite (plugins/graphql_ast.zor)
+// Production GraphQL query lexer parsing operation types, operation names, and selection sets.
+
+bring sys
+
+open flow graphql_validate_braces(query: Text) -> Bool {
+    flex len = length(query)
+    flex brace_depth = 0
+    flex paren_depth = 0
+    flex in_str = false
+
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(query, i, 1)
+
+        if constant_time_compare(ch, "\"") {
+            in_str = in_str != true
+        } else {
+            if in_str != true {
+                if constant_time_compare(ch, "{") { brace_depth = brace_depth + 1 }
+                if constant_time_compare(ch, "}") {
+                    brace_depth = brace_depth - 1
+                    if brace_depth < 0 { deliver false }
+                }
+                if constant_time_compare(ch, "(") { paren_depth = paren_depth + 1 }
+                if constant_time_compare(ch, ")") {
+                    paren_depth = paren_depth - 1
+                    if paren_depth < 0 { deliver false }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    if in_str { deliver false }
+    if brace_depth != 0 { deliver false }
+    if paren_depth != 0 { deliver false }
+    deliver true
+}
+
+open flow graphql_get_operation_type(query: Text) -> Text {
+    flex trimmed = str_trim(query)
+    if length(trimmed) == 0 {
+        deliver "query"
+    }
+
+    if str_find(trimmed, "mutation") == 0 {
+        deliver "mutation"
+    }
+    if str_find(trimmed, "subscription") == 0 {
+        deliver "subscription"
+    }
+    if str_find(trimmed, "query") == 0 {
+        deliver "query"
+    }
+    if constant_time_compare(str_slice(trimmed, 0, 1), "{") {
+        deliver "query"
+    }
+
+    // Check if starts anywhere before first {
+    flex brace_pos = str_find(trimmed, "{")
+    if brace_pos > 0 {
+        flex header = str_slice(trimmed, 0, brace_pos)
+        if str_find(header, "mutation") >= 0 {
+            deliver "mutation"
+        }
+        if str_find(header, "subscription") >= 0 {
+            deliver "subscription"
+        }
+    }
+
+    deliver "query"
+}
+
+open flow graphql_get_operation_name(query: Text) -> Text {
+    flex trimmed = str_trim(query)
+    flex brace_pos = str_find(trimmed, "{")
+    if brace_pos <= 0 {
+        deliver ""
+    }
+
+    flex header = str_trim(str_slice(trimmed, 0, brace_pos))
+    flex paren_pos = str_find(header, "(")
+    if paren_pos >= 0 {
+        header = str_trim(str_slice(header, 0, paren_pos))
+    }
+
+    // Header might be "query MyQuery" or "mutation CreateUser"
+    flex space_pos = str_find(header, " ")
+    if space_pos >= 0 {
+        deliver str_trim(str_slice(header, space_pos + 1, length(header) - space_pos - 1))
+    }
+
+    deliver ""
+}
+
+open flow graphql_contains_field(query: Text, field_name: Text) -> Bool {
+    if length(field_name) == 0 {
+        deliver false
+    }
+
+    flex first_brace = str_find(query, "{")
+    if first_brace < 0 {
+        deliver false
+    }
+
+    flex last_brace = 0 - 1
+    flex q_len = length(query)
+    flex i = q_len - 1
+    while i >= 0 {
+        if constant_time_compare(str_slice(query, i, 1), "}") {
+            last_brace = i
+            i = 0 - 1 // break
+        }
+        i = i - 1
+    }
+
+    if last_brace <= first_brace {
+        deliver false
+    }
+
+    flex body = str_slice(query, first_brace, last_brace - first_brace + 1)
+    flex pos = str_find(body, field_name)
+    if pos < 0 {
+        deliver false
+    }
+
+    // Verify word boundaries around field_name
+    flex name_len = length(field_name)
+    flex before_ok = false
+    flex after_ok = false
+
+    if pos == 0 {
+        before_ok = true
+    } else {
+        flex prev_ch = str_slice(body, pos - 1, 1)
+        if constant_time_compare(prev_ch, " ") || constant_time_compare(prev_ch, "{") ||
+           constant_time_compare(prev_ch, "\n") || constant_time_compare(prev_ch, "\t") ||
+           constant_time_compare(prev_ch, ",") {
+            before_ok = true
+        }
+    }
+
+    flex end_pos = pos + name_len
+    if end_pos >= length(body) {
+        after_ok = true
+    } else {
+        flex next_ch = str_slice(body, end_pos, 1)
+        if constant_time_compare(next_ch, " ") || constant_time_compare(next_ch, "}") ||
+           constant_time_compare(next_ch, "{") || constant_time_compare(next_ch, "(") ||
+           constant_time_compare(next_ch, "\n") || constant_time_compare(next_ch, "\t") ||
+           constant_time_compare(next_ch, ",") {
+            after_ok = true
+        }
+    }
+
+    deliver before_ok && after_ok
+}
+
+open flow graphql_count_fields(query: Text) -> Int {
+    flex len = length(query)
+    flex in_field = false
+    flex count = 0
+    flex in_paren = false
+    flex in_str = false
+    flex depth = 0
+
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(query, i, 1)
+
+        if constant_time_compare(ch, "\"") {
+            in_str = in_str != true
+        } else {
+            if in_str != true {
+                if constant_time_compare(ch, "(") { in_paren = true }
+                if constant_time_compare(ch, ")") { in_paren = false }
+                if constant_time_compare(ch, "{") { depth = depth + 1 }
+                if constant_time_compare(ch, "}") { depth = depth - 1 }
+
+                if depth > 0 && in_paren != true {
+                    flex is_ident = false
+                    flex digits_and_letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789"
+                    if str_find(digits_and_letters, ch) >= 0 {
+                        is_ident = true
+                    }
+
+                    if is_ident {
+                        if in_field != true {
+                            in_field = true
+                            count = count + 1
+                        }
+                    } else {
+                        in_field = false
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    deliver count
+}

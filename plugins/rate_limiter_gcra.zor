@@ -1,0 +1,79 @@
+// Zoren Generic Cell Rate Algorithm (GCRA) Rate Limiter (plugins/rate_limiter_gcra.zor)
+// Production virtual scheduling rate limiter providing strict telecom-grade traffic shaping and burst tolerance.
+
+bring sys
+
+// ============================================================================
+// GCRA RATE LIMITER MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   emission_interval (T, in ms)
+// [8..16]:  burst_tolerance (tau, in ms)
+// [16..24]: tat (Theoretical Arrival Time, in ms)
+// [24..32]: allowed_count
+// [32..40]: rejected_count
+// [40..48]: reserved
+// ============================================================================
+
+open flow gcra_new(emission_interval_ms: Int, burst_tolerance_ms: Int) -> Int {
+    flex t = emission_interval_ms
+    if t <= 0 { t = 10 } // Default 10ms
+
+    flex tau = burst_tolerance_ms
+    if tau < 0 { tau = 0 }
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, t)
+    mem_write_i64(header, 8, tau)
+    mem_write_i64(header, 16, 0) // tat = 0
+    mem_write_i64(header, 24, 0) // allowed = 0
+    mem_write_i64(header, 32, 0) // rejected = 0
+    mem_write_i64(header, 40, 0)
+
+    deliver header
+}
+
+open flow gcra_get_tat(limiter: Int) -> Int {
+    deliver mem_read_i64(limiter, 16)
+}
+
+open flow gcra_get_allowed_count(limiter: Int) -> Int {
+    deliver mem_read_i64(limiter, 24)
+}
+
+open flow gcra_get_rejected_count(limiter: Int) -> Int {
+    deliver mem_read_i64(limiter, 32)
+}
+
+open flow gcra_allow(limiter: Int, now_ms: Int) -> Bool {
+    flex t = mem_read_i64(limiter, 0)
+    flex tau = mem_read_i64(limiter, 8)
+    flex tat = mem_read_i64(limiter, 16)
+
+    flex new_tat = tat
+    if now_ms > tat {
+        new_tat = now_ms
+    }
+
+    // Check if new_tat exceeds allowed burst tolerance window
+    if (new_tat - now_ms) > tau {
+        flex rej = mem_read_i64(limiter, 32) + 1
+        mem_write_i64(limiter, 32, rej)
+        deliver false // Request limited/rejected
+    }
+
+    // Request accepted: advance Theoretical Arrival Time by emission interval T
+    mem_write_i64(limiter, 16, new_tat + t)
+    flex allowed = mem_read_i64(limiter, 24) + 1
+    mem_write_i64(limiter, 24, allowed)
+    deliver true
+}
+
+open flow gcra_reset(limiter: Int) -> Void {
+    mem_write_i64(limiter, 16, 0)
+    mem_write_i64(limiter, 24, 0)
+    mem_write_i64(limiter, 32, 0)
+}
+
+open flow gcra_free(limiter: Int) -> Void {
+    free_buffer(limiter)
+}
