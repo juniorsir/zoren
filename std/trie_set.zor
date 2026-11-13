@@ -1,0 +1,277 @@
+// Zoren Standard Prefix Trie Set (std/trie_set.zor)
+// High-performance string prefix trie supporting prefix membership, autocomplete prefixes, and set queries.
+
+bring sys
+
+// ============================================================================
+// TRIE SET MEMORY LAYOUT
+// Header (32 bytes):
+// [0..8]:   node_count
+// [8..16]:  max_nodes (1024)
+// [16..24]: nodes_table (node_count * 40 bytes)
+// [24..32]: total_words
+//
+// Each Node (40 bytes):
+// [0..8]:   char_byte (0..255)
+// [8..16]:  first_child_idx (-1 if none)
+// [16..24]: next_sibling_idx (-1 if none)
+// [24..32]: is_terminal (1 = terminal word, 0 = prefix)
+// [32..40]: subtree_words (count of terminal words in this subtree)
+// ============================================================================
+
+open flow trie_char_to_byte(ch: Text) -> Int {
+    flex ascii_str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    flex pos = str_find(ascii_str, ch)
+    if pos >= 0 {
+        deliver pos + 32
+    }
+    if constant_time_compare(ch, "\n") { deliver 10 }
+    if constant_time_compare(ch, "\t") { deliver 9 }
+    if constant_time_compare(ch, "\r") { deliver 13 }
+    if constant_time_compare(ch, "\0") { deliver 0 }
+
+    flex h = sys_hex_encode(ch)
+    if length(h) >= 2 {
+        flex hex_digits = "0123456789abcdef"
+        flex n0 = str_find(hex_digits, str_slice(h, 0, 1))
+        flex n1 = str_find(hex_digits, str_slice(h, 1, 1))
+        if n0 >= 0 {
+            if n1 >= 0 {
+                deliver n0 * 16 + n1
+            }
+        }
+    }
+    deliver 0
+}
+
+open flow trie_set_new() -> Int {
+    flex max_nodes = 1024
+    flex node_size = 40
+    flex table_size = max_nodes * node_size
+    flex table = alloc_buffer(table_size)
+    mem_fill(table, 0, table_size)
+
+    flex header = alloc_buffer(32)
+    mem_write_i64(header, 0, 1) // Root node at index 0
+    mem_write_i64(header, 8, max_nodes)
+    mem_write_i64(header, 16, table)
+    mem_write_i64(header, 24, 0) // total_words = 0
+
+    // Initialize root node
+    mem_write_i64(table, 0, 0)   // char_byte = 0
+    mem_write_i64(table, 8, -1)  // first_child = -1
+    mem_write_i64(table, 16, -1) // next_sibling = -1
+    mem_write_i64(table, 24, 0)  // is_terminal = 0
+    mem_write_i64(table, 32, 0)  // subtree_words = 0
+
+    deliver header
+}
+
+open flow trie_find_child(table: Int, parent_idx: Int, byte_val: Int) -> Int {
+    flex p_offset = parent_idx * 40
+    flex curr = mem_read_i64(table, p_offset + 8) // first_child
+
+    while curr >= 0 {
+        flex c_offset = curr * 40
+        flex b = mem_read_i64(table, c_offset)
+        if b == byte_val {
+            deliver curr
+        }
+        curr = mem_read_i64(table, c_offset + 16) // next_sibling
+    }
+
+    deliver -1
+}
+
+open flow trie_set_insert(trie: Int, word: Text) -> Bool {
+    flex word_len = length(word)
+    if word_len == 0 {
+        deliver false
+    }
+
+    flex node_count = mem_read_i64(trie, 0)
+    flex max_nodes = mem_read_i64(trie, 8)
+    flex table = mem_read_i64(trie, 16)
+    flex total_words = mem_read_i64(trie, 24)
+
+    flex curr = 0
+    flex i = 0
+
+    while i < word_len {
+        flex ch = str_slice(word, i, 1)
+        flex b = trie_char_to_byte(ch)
+        flex child = trie_find_child(table, curr, b)
+
+        if child < 0 {
+            if node_count >= max_nodes {
+                deliver false // Capacity reached
+            }
+            child = node_count
+            node_count = node_count + 1
+            mem_write_i64(trie, 0, node_count)
+
+            // Setup new child node
+            flex c_offset = child * 40
+            mem_write_i64(table, c_offset, b)
+            mem_write_i64(table, c_offset + 8, -1)  // first_child = -1
+            mem_write_i64(table, c_offset + 24, 0)  // is_terminal = 0
+            mem_write_i64(table, c_offset + 32, 0)  // subtree_words = 0
+
+            // Link to parent first_child sibling chain
+            flex p_offset = curr * 40
+            flex old_first = mem_read_i64(table, p_offset + 8)
+            mem_write_i64(table, c_offset + 16, old_first) // next_sibling = old_first
+            mem_write_i64(table, p_offset + 8, child)      // parent.first_child = child
+        }
+
+        curr = child
+        i = i + 1
+    }
+
+    flex final_offset = curr * 40
+    flex already_term = mem_read_i64(table, final_offset + 24)
+    if already_term == 1 {
+        deliver false // Word already present in set
+    }
+
+    mem_write_i64(table, final_offset + 24, 1) // Mark as terminal
+    mem_write_i64(trie, 24, total_words + 1)
+
+    // Second pass to increment subtree_words on path
+    curr = 0
+    i = 0
+    while i < word_len {
+        flex p_off = curr * 40
+        flex sw = mem_read_i64(table, p_off + 32)
+        mem_write_i64(table, p_off + 32, sw + 1)
+
+        flex ch = str_slice(word, i, 1)
+        flex b = trie_char_to_byte(ch)
+        curr = trie_find_child(table, curr, b)
+        i = i + 1
+    }
+    flex term_off = curr * 40
+    flex term_sw = mem_read_i64(table, term_off + 32)
+    mem_write_i64(table, term_off + 32, term_sw + 1)
+
+    deliver true
+}
+
+open flow trie_set_contains(trie: Int, word: Text) -> Bool {
+    flex word_len = length(word)
+    if word_len == 0 {
+        deliver false
+    }
+
+    flex table = mem_read_i64(trie, 16)
+    flex curr = 0
+    flex i = 0
+
+    while i < word_len {
+        flex ch = str_slice(word, i, 1)
+        flex b = trie_char_to_byte(ch)
+        flex child = trie_find_child(table, curr, b)
+        if child < 0 {
+            deliver false
+        }
+        curr = child
+        i = i + 1
+    }
+
+    flex c_offset = curr * 40
+    flex is_term = mem_read_i64(table, c_offset + 24)
+    deliver is_term == 1
+}
+
+open flow trie_set_starts_with(trie: Int, prefix: Text) -> Bool {
+    flex prefix_len = length(prefix)
+    if prefix_len == 0 {
+        deliver true
+    }
+
+    flex table = mem_read_i64(trie, 16)
+    flex curr = 0
+    flex i = 0
+
+    while i < prefix_len {
+        flex ch = str_slice(prefix, i, 1)
+        flex b = trie_char_to_byte(ch)
+        flex child = trie_find_child(table, curr, b)
+        if child < 0 {
+            deliver false
+        }
+        curr = child
+        i = i + 1
+    }
+
+    deliver true
+}
+
+open flow trie_set_count_prefix(trie: Int, prefix: Text) -> Int {
+    flex prefix_len = length(prefix)
+    flex table = mem_read_i64(trie, 16)
+    flex curr = 0
+
+    if prefix_len == 0 {
+        deliver mem_read_i64(trie, 24)
+    }
+
+    flex i = 0
+    while i < prefix_len {
+        flex ch = str_slice(prefix, i, 1)
+        flex b = trie_char_to_byte(ch)
+        flex child = trie_find_child(table, curr, b)
+        if child < 0 {
+            deliver 0
+        }
+        curr = child
+        i = i + 1
+    }
+
+    flex c_offset = curr * 40
+    deliver mem_read_i64(table, c_offset + 32)
+}
+
+open flow trie_set_size(trie: Int) -> Int {
+    deliver mem_read_i64(trie, 24)
+}
+
+open flow trie_set_node_count(trie: Int) -> Int {
+    deliver mem_read_i64(trie, 0)
+}
+
+open flow trie_set_remove(trie: Int, word: Text) -> Bool {
+    if trie_set_contains(trie, word) != true {
+        deliver false
+    }
+
+    flex word_len = length(word)
+    flex table = mem_read_i64(trie, 16)
+    flex total_words = mem_read_i64(trie, 24)
+    mem_write_i64(trie, 24, total_words - 1)
+
+    flex curr = 0
+    flex i = 0
+
+    while i < word_len {
+        flex p_off = curr * 40
+        flex sw = mem_read_i64(table, p_off + 32)
+        if sw > 0 {
+            mem_write_i64(table, p_off + 32, sw - 1)
+        }
+
+        flex ch = str_slice(word, i, 1)
+        flex b = trie_char_to_byte(ch)
+        curr = trie_find_child(table, curr, b)
+        i = i + 1
+    }
+
+    flex term_off = curr * 40
+    flex term_sw = mem_read_i64(table, term_off + 32)
+    if term_sw > 0 {
+        mem_write_i64(table, term_off + 32, term_sw - 1)
+    }
+    mem_write_i64(table, term_off + 24, 0) // Unmark terminal
+
+    deliver true
+}

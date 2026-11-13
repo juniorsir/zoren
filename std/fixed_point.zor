@@ -1,0 +1,190 @@
+// Zoren Fixed-Point Decimal Arithmetic Suite (std/fixed_point.zor)
+// 64-bit 4-decimal place fixed-point representation (Scale = 10,000) for currency and financial math.
+
+bring sys
+
+open flow fp_scale() -> Int {
+    deliver 10000
+}
+
+open flow fp_from_int(val: Int) -> Int {
+    deliver val * 10000
+}
+
+open flow fp_to_int(fp: Int) -> Int {
+    deliver fp / 10000
+}
+
+open flow fp_from_parts(whole: Int, fraction_4digits: Int) -> Int {
+    if whole >= 0 {
+        deliver (whole * 10000) + fraction_4digits
+    }
+    deliver (whole * 10000) - fraction_4digits
+}
+
+open flow fp_abs(a: Int) -> Int {
+    if a < 0 {
+        deliver 0 - a
+    }
+    deliver a
+}
+
+open flow fp_add(a: Int, b: Int) -> Int {
+    deliver a + b
+}
+
+open flow fp_sub(a: Int, b: Int) -> Int {
+    deliver a - b
+}
+
+open flow fp_mul(a: Int, b: Int) -> Int {
+    deliver (a * b) / 10000
+}
+
+open flow fp_div(a: Int, b: Int) -> Int {
+    if b == 0 {
+        deliver 0
+    }
+    deliver (a * 10000) / b
+}
+
+open flow fp_percent(amount: Int, basis_points: Int) -> Int {
+    deliver (amount * basis_points) / 10000
+}
+
+open flow fp_compare(a: Int, b: Int) -> Int {
+    if a < b {
+        deliver -1
+    }
+    if a > b {
+        deliver 1
+    }
+    deliver 0
+}
+
+open flow fp_round(fp: Int, decimals: Int) -> Int {
+    if decimals >= 4 {
+        deliver fp
+    }
+
+    flex factor = 10000
+    if decimals == 3 { factor = 10 }
+    if decimals == 2 { factor = 100 }
+    if decimals == 1 { factor = 1000 }
+    if decimals == 0 { factor = 10000 }
+
+    flex half = factor / 2
+    if fp >= 0 {
+        deliver ((fp + half) / factor) * factor
+    }
+    deliver ((fp - half) / factor) * factor
+}
+
+open flow fp_parse_uint(s: Text) -> Int {
+    flex len = length(s)
+    flex res = 0
+    flex i = 0
+    while i < len {
+        flex ch = str_slice(s, i, 1)
+        flex d = str_find("0123456789", ch)
+        if d >= 0 {
+            res = res * 10 + d
+        }
+        i = i + 1
+    }
+    deliver res
+}
+
+open flow fp_from_str(s: Text) -> Int {
+    flex len = length(s)
+    if len == 0 {
+        deliver 0
+    }
+
+    flex is_neg = false
+    flex start_idx = 0
+    flex first_ch = str_slice(s, 0, 1)
+    if constant_time_compare(first_ch, "-") {
+        is_neg = true
+        start_idx = 1
+    }
+
+    flex dot_pos = str_find(s, ".")
+    flex whole = 0
+    flex frac = 0
+
+    if dot_pos < 0 {
+        // Integer only
+        flex int_part = str_slice(s, start_idx, len - start_idx)
+        whole = fp_parse_uint(int_part)
+        flex val = whole * 10000
+        if is_neg { deliver 0 - val }
+        deliver val
+    }
+
+    // Has decimal point
+    if dot_pos > start_idx {
+        flex whole_str = str_slice(s, start_idx, dot_pos - start_idx)
+        whole = fp_parse_uint(whole_str)
+    }
+
+    flex frac_start = dot_pos + 1
+    flex frac_len = len - frac_start
+    if frac_len > 0 {
+        if frac_len == 1 {
+            flex d1 = fp_parse_uint(str_slice(s, frac_start, 1))
+            frac = d1 * 1000
+        }
+        if frac_len == 2 {
+            flex d2 = fp_parse_uint(str_slice(s, frac_start, 2))
+            frac = d2 * 100
+        }
+        if frac_len == 3 {
+            flex d3 = fp_parse_uint(str_slice(s, frac_start, 3))
+            frac = d3 * 10
+        }
+        if frac_len >= 4 {
+            flex d4 = fp_parse_uint(str_slice(s, frac_start, 4))
+            frac = d4
+        }
+    }
+
+    flex total = (whole * 10000) + frac
+    if is_neg {
+        deliver 0 - total
+    }
+    deliver total
+}
+
+open flow fp_to_str(fp: Int) -> Text {
+    flex is_neg = false
+    flex val = fp
+    if val < 0 {
+        is_neg = true
+        val = 0 - val
+    }
+
+    flex whole = val / 10000
+    flex frac = val % 10000
+
+    flex frac_str = int_to_str(frac)
+    if frac < 10 {
+        frac_str = str_concat("000", frac_str)
+    } else {
+        if frac < 100 {
+            frac_str = str_concat("00", frac_str)
+        } else {
+            if frac < 1000 {
+                frac_str = str_concat("0", frac_str)
+            }
+        }
+    }
+
+    flex res = str_concat(int_to_str(whole), ".")
+    res = str_concat(res, frac_str)
+
+    if is_neg {
+        res = str_concat("-", res)
+    }
+    deliver res
+}

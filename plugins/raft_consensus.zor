@@ -30,6 +30,10 @@ bring sys
 // [24..32]: reserved
 // ============================================================================
 
+open flow raft_state_follower() -> Int { deliver 0 }
+open flow raft_state_candidate() -> Int { deliver 1 }
+open flow raft_state_leader() -> Int { deliver 2 }
+
 open flow raft_node_new(node_id: Int, peer_count: Int) -> Int {
     flex header = alloc_buffer(64)
     flex log_buf = alloc_buffer(8192)
@@ -53,9 +57,26 @@ open flow raft_node_new(node_id: Int, peer_count: Int) -> Int {
     deliver node
 }
 
+open flow raft_new(node_id: Int, cluster_size: Int) -> Int {
+    flex peers = 0
+    if cluster_size > 1 {
+        peers = cluster_size - 1
+    }
+    deliver raft_node_new(node_id, peers)
+}
+
+open flow raft_get_node_id(node_ptr: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    deliver mem_read_i64(header, 0)
+}
+
 open flow raft_get_state(node_ptr: Int) -> Int {
     flex header = mem_read_i64(node_ptr, 0)
     deliver mem_read_i64(header, 8)
+}
+
+open flow raft_is_leader(node_ptr: Int) -> Bool {
+    deliver raft_get_state(node_ptr) == 2
 }
 
 open flow raft_get_term(node_ptr: Int) -> Int {
@@ -80,6 +101,15 @@ open flow raft_get_last_applied(node_ptr: Int) -> Int {
 
 open flow raft_get_log_count(node_ptr: Int) -> Int {
     deliver mem_read_i64(node_ptr, 16)
+}
+
+open flow raft_get_log_len(node_ptr: Int) -> Int {
+    deliver raft_get_log_count(node_ptr)
+}
+
+open flow raft_get_votes_received(node_ptr: Int) -> Int {
+    flex header = mem_read_i64(node_ptr, 0)
+    deliver mem_read_i64(header, 56)
 }
 
 // Node triggers election timeout: increments term, votes for self, becomes CANDIDATE
@@ -131,6 +161,14 @@ open flow raft_receive_vote(node_ptr: Int, from_term: Int) -> Int {
     }
 
     deliver 1
+}
+
+open flow raft_receive_vote_response(node_ptr: Int, from_id: Int, term: Int, granted: Bool) -> Bool {
+    if granted != true {
+        deliver false
+    }
+    flex state = raft_receive_vote(node_ptr, term)
+    deliver state == 2
 }
 
 // Handle RequestVote RPC
@@ -192,6 +230,17 @@ open flow raft_handle_request_vote(
     deliver 1
 }
 
+open flow raft_receive_vote_request(
+    node_ptr: Int,
+    candidate_id: Int,
+    candidate_term: Int,
+    candidate_last_log_index: Int,
+    candidate_last_log_term: Int
+) -> Bool {
+    flex res = raft_handle_request_vote(node_ptr, candidate_id, candidate_term, candidate_last_log_index, candidate_last_log_term)
+    deliver res == 1
+}
+
 // Leader appends command to local log
 open flow raft_leader_propose(node_ptr: Int, command_id: Int, value: Int) -> Int {
     flex header = mem_read_i64(node_ptr, 0)
@@ -217,6 +266,14 @@ open flow raft_leader_propose(node_ptr: Int, command_id: Int, value: Int) -> Int
 
     mem_write_i64(node_ptr, 16, new_index)
     deliver new_index
+}
+
+open flow raft_append_command(node_ptr: Int, command_id: Int) -> Int {
+    flex idx = raft_leader_propose(node_ptr, command_id, 0)
+    if idx > 0 {
+        deliver idx - 1
+    }
+    deliver 0 - 1
 }
 
 // Follower handles AppendEntries RPC
@@ -281,6 +338,18 @@ open flow raft_handle_append_entries(
     }
 
     deliver 1
+}
+
+open flow raft_receive_append_entries(
+    node_ptr: Int,
+    leader_id: Int,
+    term: Int,
+    prev_log_index: Int,
+    prev_log_term: Int,
+    leader_commit: Int
+) -> Bool {
+    flex res = raft_handle_append_entries(node_ptr, term, prev_log_index, prev_log_term, 0, 0, 0, leader_commit)
+    deliver res == 1
 }
 
 // Applies committed log entries to the application state machine

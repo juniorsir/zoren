@@ -1,0 +1,133 @@
+// Zoren gRPC Wire Framing & Codec Suite (plugins/grpc_frame.zor)
+// RFC / gRPC over HTTP/2 5-byte prefix message framing, status codes, and validation.
+
+bring sys
+
+open flow grpc_hex_byte(b: Int) -> Text {
+    flex hex_chars = "0123456789abcdef"
+    flex high = (b / 16) % 16
+    flex low = b % 16
+    flex s1 = str_slice(hex_chars, high, 1)
+    flex s2 = str_slice(hex_chars, low, 1)
+    deliver str_concat(s1, s2)
+}
+
+open flow grpc_encode_frame(payload: Text, compressed: Bool) -> Text {
+    flex comp_byte = "00"
+    if compressed {
+        comp_byte = "01"
+    }
+
+    flex payload_len = length(payload)
+    flex b0 = (payload_len / 16777216) % 256
+    flex b1 = (payload_len / 65536) % 256
+    flex b2 = (payload_len / 256) % 256
+    flex b3 = payload_len % 256
+
+    flex header_hex = comp_byte
+    header_hex = str_concat(header_hex, grpc_hex_byte(b0))
+    header_hex = str_concat(header_hex, grpc_hex_byte(b1))
+    header_hex = str_concat(header_hex, grpc_hex_byte(b2))
+    header_hex = str_concat(header_hex, grpc_hex_byte(b3))
+
+    flex payload_hex = sys_hex_encode(payload)
+    deliver str_concat(header_hex, payload_hex)
+}
+
+open flow grpc_decode_header_compressed(frame_hex: Text) -> Bool {
+    if length(frame_hex) < 2 {
+        deliver false
+    }
+    flex flag = str_slice(frame_hex, 0, 2)
+    deliver constant_time_compare(flag, "01")
+}
+
+open flow grpc_decode_header_len(frame_hex: Text) -> Int {
+    if length(frame_hex) < 10 {
+        deliver -1
+    }
+
+    flex len_hex = str_slice(frame_hex, 2, 8)
+    flex hex_chars = "0123456789abcdef"
+    flex total = 0
+    flex i = 0
+
+    while i < 8 {
+        flex ch = str_slice(len_hex, i, 1)
+        flex digit = str_find(hex_chars, str_lower(ch))
+        if digit < 0 {
+            deliver -1
+        }
+        total = (total * 16) + digit
+        i = i + 1
+    }
+
+    deliver total
+}
+
+open flow grpc_extract_payload_hex(frame_hex: Text) -> Text {
+    flex len = length(frame_hex)
+    if len <= 10 {
+        deliver ""
+    }
+    deliver str_slice(frame_hex, 10, len - 10)
+}
+
+open flow grpc_extract_payload_text(frame_hex: Text) -> Text {
+    flex p_hex = grpc_extract_payload_hex(frame_hex)
+    if length(p_hex) == 0 {
+        deliver ""
+    }
+    deliver sys_hex_decode(p_hex)
+}
+
+open flow grpc_validate_frame(frame_hex: Text) -> Bool {
+    flex frame_len = length(frame_hex)
+    if frame_len < 10 {
+        deliver false
+    }
+
+    flex flag = str_slice(frame_hex, 0, 2)
+    if constant_time_compare(flag, "00") != true {
+        if constant_time_compare(flag, "01") != true {
+            deliver false
+        }
+    }
+
+    flex declared_len = grpc_decode_header_len(frame_hex)
+    if declared_len < 0 {
+        deliver false
+    }
+
+    flex payload_hex_len = frame_len - 10
+    deliver (declared_len * 2) == payload_hex_len
+}
+
+open flow grpc_content_type() -> Text {
+    deliver "application/grpc+proto"
+}
+
+open flow grpc_is_success(code: Int) -> Bool {
+    deliver code == 0
+}
+
+open flow grpc_status_code_name(code: Int) -> Text {
+    if code == 0 { deliver "OK" }
+    if code == 1 { deliver "CANCELLED" }
+    if code == 2 { deliver "UNKNOWN" }
+    if code == 3 { deliver "INVALID_ARGUMENT" }
+    if code == 4 { deliver "DEADLINE_EXCEEDED" }
+    if code == 5 { deliver "NOT_FOUND" }
+    if code == 6 { deliver "ALREADY_EXISTS" }
+    if code == 7 { deliver "PERMISSION_DENIED" }
+    if code == 8 { deliver "RESOURCE_EXHAUSTED" }
+    if code == 9 { deliver "FAILED_PRECONDITION" }
+    if code == 10 { deliver "ABORTED" }
+    if code == 11 { deliver "OUT_OF_RANGE" }
+    if code == 12 { deliver "UNIMPLEMENTED" }
+    if code == 13 { deliver "INTERNAL" }
+    if code == 14 { deliver "UNAVAILABLE" }
+    if code == 15 { deliver "DATA_LOSS" }
+    if code == 16 { deliver "UNAUTHENTICATED" }
+    deliver "UNKNOWN"
+}

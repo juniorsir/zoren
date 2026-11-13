@@ -1,0 +1,317 @@
+// Zoren Directed Acyclic Graph (DAG) Task Scheduler (plugins/dag_scheduler.zor)
+// Production workflow graph scheduler with cycle validation, stage batching, and critical path analysis.
+
+bring sys
+
+// ============================================================================
+// DAG SCHEDULER MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   task_count
+// [8..16]:  max_tasks (64)
+// [16..24]: edge_count
+// [24..32]: stage_count
+// [32..40]: data_buf (6000 bytes)
+// [40..48]: stages_buf (32768 bytes)
+//
+// data_buf offsets:
+// [0..4096]:      adj_matrix (64 * 64 bytes: adj[u * 64 + v] = 1 if u -> v)
+// [4096..4608]:   costs (64 * 8 bytes)
+// [4608..5120]:   task_exists (64 * 8 bytes)
+// [5120..5632]:   in_degrees (64 * 8 bytes)
+// ============================================================================
+
+open flow dag_new() -> Int {
+    flex max_tasks = 64
+    flex data_size = 6000
+    flex data_buf = alloc_buffer(data_size)
+    mem_fill(data_buf, 0, data_size)
+
+    flex stages_size = 64 * 64 * 8
+    flex stages_buf = alloc_buffer(stages_size)
+    mem_fill(stages_buf, 0, stages_size)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 0) // task_count = 0
+    mem_write_i64(header, 8, max_tasks)
+    mem_write_i64(header, 16, 0) // edge_count = 0
+    mem_write_i64(header, 24, 0) // stage_count = 0
+    mem_write_i64(header, 32, data_buf)
+    mem_write_i64(header, 40, stages_buf)
+
+    deliver header
+}
+
+open flow dag_add_task(dag: Int, task_id: Int, duration_cost: Int) -> Bool {
+    if task_id < 0 { deliver false }
+    if task_id >= 64 { deliver false }
+
+    flex data_buf = mem_read_i64(dag, 32)
+    flex exists = mem_read_i64(data_buf, 4608 + (task_id * 8))
+
+    if exists == 0 {
+        mem_write_i64(data_buf, 4608 + (task_id * 8), 1)
+        flex cnt = mem_read_i64(dag, 0)
+        mem_write_i64(dag, 0, cnt + 1)
+    }
+
+    mem_write_i64(data_buf, 4096 + (task_id * 8), duration_cost)
+    deliver true
+}
+
+open flow dag_add_dependency(dag: Int, prereq_id: Int, dependent_id: Int) -> Bool {
+    if prereq_id < 0 { deliver false }
+    if prereq_id >= 64 { deliver false }
+    if dependent_id < 0 { deliver false }
+    if dependent_id >= 64 { deliver false }
+    if prereq_id == dependent_id { deliver false } // Self-loop not allowed
+
+    flex data_buf = mem_read_i64(dag, 32)
+    flex p_exists = mem_read_i64(data_buf, 4608 + (prereq_id * 8))
+    if p_exists == 0 {
+        dag_add_task(dag, prereq_id, 0)
+    }
+
+    flex d_exists = mem_read_i64(data_buf, 4608 + (dependent_id * 8))
+    if d_exists == 0 {
+        dag_add_task(dag, dependent_id, 0)
+    }
+
+    flex adj_idx = (prereq_id * 64) + dependent_id
+    flex current_edge = mem_read_byte(data_buf, adj_idx)
+
+    if current_edge == 0 {
+        mem_write_byte(data_buf, adj_idx, 1)
+        flex edges = mem_read_i64(dag, 16)
+        mem_write_i64(dag, 16, edges + 1)
+
+        flex cur_indeg = mem_read_i64(data_buf, 5120 + (dependent_id * 8))
+        mem_write_i64(data_buf, 5120 + (dependent_id * 8), cur_indeg + 1)
+    }
+
+    deliver true
+}
+
+open flow dag_is_acyclic(dag: Int) -> Bool {
+    flex task_count = mem_read_i64(dag, 0)
+    if task_count == 0 {
+        deliver true
+    }
+
+    flex data_buf = mem_read_i64(dag, 32)
+    flex temp_indeg = alloc_buffer(64 * 8)
+
+    // Copy in-degrees
+    flex i = 0
+    while i < 64 {
+        flex deg = mem_read_i64(data_buf, 5120 + (i * 8))
+        mem_write_i64(temp_indeg, i * 8, deg)
+        i = i + 1
+    }
+
+    flex processed = 0
+    flex progress = true
+
+    while progress {
+        progress = false
+        i = 0
+        while i < 64 {
+            flex exists = mem_read_i64(data_buf, 4608 + (i * 8))
+            if exists == 1 {
+                flex deg = mem_read_i64(temp_indeg, i * 8)
+                if deg == 0 {
+                    // Process task i
+                    mem_write_i64(temp_indeg, i * 8, -1) // Mark processed
+                    processed = processed + 1
+                    progress = true
+
+                    // Decrement outgoing neighbors
+                    flex j = 0
+                    while j < 64 {
+                        flex has_edge = mem_read_byte(data_buf, (i * 64) + j)
+                        if has_edge == 1 {
+                            flex neighbor_deg = mem_read_i64(temp_indeg, j * 8)
+                            if neighbor_deg > 0 {
+                                mem_write_i64(temp_indeg, j * 8, neighbor_deg - 1)
+                            }
+                        }
+                        j = j + 1
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    deliver processed == task_count
+}
+
+open flow dag_build_stages(dag: Int) -> Int {
+    if dag_is_acyclic(dag) != true {
+        deliver -1 // Cannot build stages for cyclic graph
+    }
+
+    flex task_count = mem_read_i64(dag, 0)
+    if task_count == 0 {
+        mem_write_i64(dag, 24, 0)
+        deliver 0
+    }
+
+    flex data_buf = mem_read_i64(dag, 32)
+    flex stages_buf = mem_read_i64(dag, 40)
+    flex task_stage = alloc_buffer(64 * 8)
+    mem_fill(task_stage, 0, 64 * 8)
+
+    // Iteratively push stage numbers along edges
+    flex changed = true
+    flex max_s = 0
+
+    while changed {
+        changed = false
+        flex u = 0
+        while u < 64 {
+            flex u_exists = mem_read_i64(data_buf, 4608 + (u * 8))
+            if u_exists == 1 {
+                flex s_u = mem_read_i64(task_stage, u * 8)
+                flex v = 0
+                while v < 64 {
+                    flex edge = mem_read_byte(data_buf, (u * 64) + v)
+                    if edge == 1 {
+                        flex s_v = mem_read_i64(task_stage, v * 8)
+                        if s_u + 1 > s_v {
+                            mem_write_i64(task_stage, v * 8, s_u + 1)
+                            if (s_u + 1) > max_s {
+                                max_s = s_u + 1
+                            }
+                            changed = true
+                        }
+                    }
+                    v = v + 1
+                }
+            }
+            u = u + 1
+        }
+    }
+
+    flex total_stages = max_s + 1
+    mem_write_i64(dag, 24, total_stages)
+
+    // Clear stages_buf
+    mem_fill(stages_buf, 0, 64 * 64 * 8)
+
+    // Populate stages_buf:
+    // For each stage s:
+    // stages_buf[s * 64 * 8 + 0] is count of tasks in stage s
+    // stages_buf[s * 64 * 8 + (1 + k) * 8] is task_id of k-th task
+    flex s = 0
+    while s < total_stages {
+        flex count_in_s = 0
+        flex t = 0
+        while t < 64 {
+            flex t_exists = mem_read_i64(data_buf, 4608 + (t * 8))
+            if t_exists == 1 {
+                if mem_read_i64(task_stage, t * 8) == s {
+                    count_in_s = count_in_s + 1
+                    flex slot_offset = (s * 64 * 8) + (count_in_s * 8)
+                    mem_write_i64(stages_buf, slot_offset, t)
+                }
+            }
+            t = t + 1
+        }
+        mem_write_i64(stages_buf, s * 64 * 8, count_in_s)
+        s = s + 1
+    }
+
+    deliver total_stages
+}
+
+open flow dag_get_stage_count(dag: Int) -> Int {
+    deliver mem_read_i64(dag, 24)
+}
+
+open flow dag_get_stage_size(dag: Int, stage_idx: Int) -> Int {
+    flex total_stages = mem_read_i64(dag, 24)
+    if stage_idx < 0 { deliver 0 }
+    if stage_idx >= total_stages { deliver 0 }
+
+    flex stages_buf = mem_read_i64(dag, 40)
+    deliver mem_read_i64(stages_buf, stage_idx * 64 * 8)
+}
+
+open flow dag_get_stage_task(dag: Int, stage_idx: Int, slot_idx: Int) -> Int {
+    flex total_stages = mem_read_i64(dag, 24)
+    if stage_idx < 0 { deliver -1 }
+    if stage_idx >= total_stages { deliver -1 }
+
+    flex size = dag_get_stage_size(dag, stage_idx)
+    if slot_idx < 0 { deliver -1 }
+    if slot_idx >= size { deliver -1 }
+
+    flex stages_buf = mem_read_i64(dag, 40)
+    flex slot_offset = (stage_idx * 64 * 8) + ((slot_idx + 1) * 8)
+    deliver mem_read_i64(stages_buf, slot_offset)
+}
+
+open flow dag_critical_path_cost(dag: Int) -> Int {
+    if dag_is_acyclic(dag) != true {
+        deliver -1
+    }
+
+    flex data_buf = mem_read_i64(dag, 32)
+    flex finish_time = alloc_buffer(64 * 8)
+
+    // Initialize finish_time[i] = cost[i]
+    flex i = 0
+    while i < 64 {
+        flex exists = mem_read_i64(data_buf, 4608 + (i * 8))
+        if exists == 1 {
+            flex cost = mem_read_i64(data_buf, 4096 + (i * 8))
+            mem_write_i64(finish_time, i * 8, cost)
+        } else {
+            mem_write_i64(finish_time, i * 8, 0)
+        }
+        i = i + 1
+    }
+
+    // Relax along edges
+    flex changed = true
+    while changed {
+        changed = false
+        flex u = 0
+        while u < 64 {
+            flex u_exists = mem_read_i64(data_buf, 4608 + (u * 8))
+            if u_exists == 1 {
+                flex f_u = mem_read_i64(finish_time, u * 8)
+                flex v = 0
+                while v < 64 {
+                    flex edge = mem_read_byte(data_buf, (u * 64) + v)
+                    if edge == 1 {
+                        flex cost_v = mem_read_i64(data_buf, 4096 + (v * 8))
+                        flex f_v = mem_read_i64(finish_time, v * 8)
+                        if f_u + cost_v > f_v {
+                            mem_write_i64(finish_time, v * 8, f_u + cost_v)
+                            changed = true
+                        }
+                    }
+                    v = v + 1
+                }
+            }
+            u = u + 1
+        }
+    }
+
+    // Find max finish_time
+    flex max_cost = 0
+    i = 0
+    while i < 64 {
+        flex exists = mem_read_i64(data_buf, 4608 + (i * 8))
+        if exists == 1 {
+            flex ft = mem_read_i64(finish_time, i * 8)
+            if ft > max_cost {
+                max_cost = ft
+            }
+        }
+        i = i + 1
+    }
+
+    deliver max_cost
+}

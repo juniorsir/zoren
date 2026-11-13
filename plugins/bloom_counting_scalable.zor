@@ -1,0 +1,227 @@
+// Zoren Scalable Counting Bloom Filter (plugins/bloom_counting_scalable.zor)
+// Multi-slice counting bloom filter supporting dynamic capacity growth and item deletions.
+
+bring sys
+
+// ============================================================================
+// SCALABLE COUNTING BLOOM FILTER MEMORY LAYOUT
+// Header (48 bytes):
+// [0..8]:   layer_count (active layers, 1..4)
+// [8..16]:  max_layers (4)
+// [16..24]: total_items
+// [24..32]: layer_caps_buf (4 * 8 bytes)
+// [32..40]: layer_tables_buf (4 * 8 bytes: buffer pointers)
+// [40..48]: layer_items_buf (4 * 8 bytes: items per layer)
+// ============================================================================
+
+open flow scbf_hash1(key: Text, cap: Int, layer: Int) -> Int {
+    flex h = sys_fast_hash(key)
+    flex val = ((h + (layer * 7919)) * 16777619) % cap
+    if val < 0 { deliver 0 - val }
+    deliver val
+}
+
+open flow scbf_hash2(key: Text, cap: Int, layer: Int) -> Int {
+    flex h = sys_fast_hash(key)
+    flex val = ((h * 33) + (layer * 38642921) + 5381) % cap
+    if val < 0 { deliver 0 - val }
+    deliver val
+}
+
+open flow scbf_hash3(key: Text, cap: Int, layer: Int) -> Int {
+    flex h = sys_fast_hash(key)
+    flex val = ((h + 1013904223 + (layer * 65537)) * 31) % cap
+    if val < 0 { deliver 0 - val }
+    deliver val
+}
+
+open flow scbf_new() -> Int {
+    flex max_layers = 4
+    flex caps_buf = alloc_buffer(max_layers * 8)
+    flex tables_buf = alloc_buffer(max_layers * 8)
+    flex items_buf = alloc_buffer(max_layers * 8)
+
+    // Layer capacities: 256, 512, 1024, 2048
+    mem_write_i64(caps_buf, 0, 256)
+    mem_write_i64(caps_buf, 8, 512)
+    mem_write_i64(caps_buf, 16, 1024)
+    mem_write_i64(caps_buf, 24, 2048)
+
+    // Allocate Layer 0 initially
+    flex l0_buf = alloc_buffer(256)
+    mem_fill(l0_buf, 0, 256)
+    mem_write_i64(tables_buf, 0, l0_buf)
+    mem_write_i64(tables_buf, 8, 0)
+    mem_write_i64(tables_buf, 16, 0)
+    mem_write_i64(tables_buf, 24, 0)
+
+    mem_fill(items_buf, 0, max_layers * 8)
+
+    flex header = alloc_buffer(48)
+    mem_write_i64(header, 0, 1) // layer_count = 1
+    mem_write_i64(header, 8, max_layers)
+    mem_write_i64(header, 16, 0) // total_items = 0
+    mem_write_i64(header, 24, caps_buf)
+    mem_write_i64(header, 32, tables_buf)
+    mem_write_i64(header, 40, items_buf)
+
+    deliver header
+}
+
+open flow scbf_total_items(scbf: Int) -> Int {
+    deliver mem_read_i64(scbf, 16)
+}
+
+open flow scbf_layer_count(scbf: Int) -> Int {
+    deliver mem_read_i64(scbf, 0)
+}
+
+open flow scbf_layer_items(scbf: Int, layer_idx: Int) -> Int {
+    flex max_layers = mem_read_i64(scbf, 8)
+    if layer_idx < 0 { deliver 0 }
+    if layer_idx >= max_layers { deliver 0 }
+
+    flex items_buf = mem_read_i64(scbf, 40)
+    deliver mem_read_i64(items_buf, layer_idx * 8)
+}
+
+open flow scbf_grow_layer(scbf: Int) -> Bool {
+    flex layer_cnt = mem_read_i64(scbf, 0)
+    flex max_layers = mem_read_i64(scbf, 8)
+    if layer_cnt >= max_layers {
+        deliver false
+    }
+
+    flex caps_buf = mem_read_i64(scbf, 24)
+    flex tables_buf = mem_read_i64(scbf, 32)
+    flex new_cap = mem_read_i64(caps_buf, layer_cnt * 8)
+
+    flex new_buf = alloc_buffer(new_cap)
+    mem_fill(new_buf, 0, new_cap)
+
+    mem_write_i64(tables_buf, layer_cnt * 8, new_buf)
+    mem_write_i64(scbf, 0, layer_cnt + 1)
+    deliver true
+}
+
+open flow scbf_insert(scbf: Int, key: Text) -> Bool {
+    flex layer_cnt = mem_read_i64(scbf, 0)
+    flex max_layers = mem_read_i64(scbf, 8)
+    flex curr_layer = layer_cnt - 1
+
+    flex items_buf = mem_read_i64(scbf, 40)
+    flex caps_buf = mem_read_i64(scbf, 24)
+    flex tables_buf = mem_read_i64(scbf, 32)
+
+    flex curr_items = mem_read_i64(items_buf, curr_layer * 8)
+    flex curr_cap = mem_read_i64(caps_buf, curr_layer * 8)
+
+    // Check if current layer is full (capacity / 2 is threshold for low false-positive rate)
+    flex threshold = curr_cap / 2
+    if curr_items >= threshold {
+        if layer_cnt < max_layers {
+            scbf_grow_layer(scbf)
+            layer_cnt = mem_read_i64(scbf, 0)
+            curr_layer = layer_cnt - 1
+            curr_cap = mem_read_i64(caps_buf, curr_layer * 8)
+        }
+    }
+
+    flex table = mem_read_i64(tables_buf, curr_layer * 8)
+    flex idx1 = scbf_hash1(key, curr_cap, curr_layer)
+    flex idx2 = scbf_hash2(key, curr_cap, curr_layer)
+    flex idx3 = scbf_hash3(key, curr_cap, curr_layer)
+
+    flex c1 = mem_read_byte(table, idx1)
+    flex c2 = mem_read_byte(table, idx2)
+    flex c3 = mem_read_byte(table, idx3)
+
+    if c1 < 255 { mem_write_byte(table, idx1, c1 + 1) }
+    if c2 < 255 { mem_write_byte(table, idx2, c2 + 1) }
+    if c3 < 255 { mem_write_byte(table, idx3, c3 + 1) }
+
+    mem_write_i64(items_buf, curr_layer * 8, curr_items + 1)
+    flex total = mem_read_i64(scbf, 16)
+    mem_write_i64(scbf, 16, total + 1)
+
+    deliver true
+}
+
+open flow scbf_contains(scbf: Int, key: Text) -> Bool {
+    flex layer_cnt = mem_read_i64(scbf, 0)
+    flex caps_buf = mem_read_i64(scbf, 24)
+    flex tables_buf = mem_read_i64(scbf, 32)
+
+    flex l = 0
+    while l < layer_cnt {
+        flex cap = mem_read_i64(caps_buf, l * 8)
+        flex table = mem_read_i64(tables_buf, l * 8)
+
+        flex idx1 = scbf_hash1(key, cap, l)
+        flex idx2 = scbf_hash2(key, cap, l)
+        flex idx3 = scbf_hash3(key, cap, l)
+
+        flex c1 = mem_read_byte(table, idx1)
+        flex c2 = mem_read_byte(table, idx2)
+        flex c3 = mem_read_byte(table, idx3)
+
+        if c1 > 0 {
+            if c2 > 0 {
+                if c3 > 0 {
+                    deliver true
+                }
+            }
+        }
+        l = l + 1
+    }
+
+    deliver false
+}
+
+open flow scbf_remove(scbf: Int, key: Text) -> Bool {
+    flex layer_cnt = mem_read_i64(scbf, 0)
+    flex caps_buf = mem_read_i64(scbf, 24)
+    flex tables_buf = mem_read_i64(scbf, 32)
+    flex items_buf = mem_read_i64(scbf, 40)
+
+    // Search backwards from newest layer to layer 0
+    flex l = layer_cnt - 1
+    while l >= 0 {
+        flex cap = mem_read_i64(caps_buf, l * 8)
+        flex table = mem_read_i64(tables_buf, l * 8)
+
+        flex idx1 = scbf_hash1(key, cap, l)
+        flex idx2 = scbf_hash2(key, cap, l)
+        flex idx3 = scbf_hash3(key, cap, l)
+
+        flex c1 = mem_read_byte(table, idx1)
+        flex c2 = mem_read_byte(table, idx2)
+        flex c3 = mem_read_byte(table, idx3)
+
+        if c1 > 0 {
+            if c2 > 0 {
+                if c3 > 0 {
+                    // Match found in layer l: decrement counters
+                    mem_write_byte(table, idx1, c1 - 1)
+                    mem_write_byte(table, idx2, c2 - 1)
+                    mem_write_byte(table, idx3, c3 - 1)
+
+                    flex l_items = mem_read_i64(items_buf, l * 8)
+                    if l_items > 0 {
+                        mem_write_i64(items_buf, l * 8, l_items - 1)
+                    }
+
+                    flex total = mem_read_i64(scbf, 16)
+                    if total > 0 {
+                        mem_write_i64(scbf, 16, total - 1)
+                    }
+
+                    deliver true
+                }
+            }
+        }
+        l = l - 1
+    }
+
+    deliver false
+}
