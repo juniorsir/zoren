@@ -132,3 +132,12 @@ bring string_utils
 3. **Explicit Deliver:** Ensure every code path exits with `deliver <val>`.
 4. **Memory Hygiene:** If your module allocates native memory buffers using `alloc_buffer(size)`, always provide a corresponding cleanup flow (e.g. `destroy(ptr)` calling `free_buffer(ptr)`).
 5. **No Global State Leakage:** Encapsulate state inside models or allocated structures rather than relying on uncontained mutable globals.
+
+---
+
+## 7. Distributing Modules with ZorPack
+
+Ready to share your module with the world? Check out the **[ZorPack Package Management Guide](./package_management.md)** to learn how to:
+- Publish cryptographically sealed `.zpkg` bundles using `zoren publish`.
+- Install registry and Git packages with `zoren add <pkg>`.
+- Leverage zero-bloat caching and capability security graphs.
