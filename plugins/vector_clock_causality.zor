@@ -1,0 +1,106 @@
+// Zoren Vector Clock Causality Engine (plugins/vector_clock_causality.zor)
+// Distributed causality tracker determining happened-before relationships (A -> B),
+// concurrent branching divergence, and partial ordering in multi-node clusters.
+
+bring sys
+
+// Vector Clock Header (16 bytes):
+// [0..8]:  num_nodes (capacity of cluster nodes, e.g. 16 or 64)
+// [8..16]: clocks_buf (array of i64 logical timestamps)
+
+open flow vc_create(num_nodes: Int) -> Int {
+    flex buf_size = num_nodes * 8
+    flex clocks_buf = alloc_buffer(buf_size)
+    mem_fill(clocks_buf, 0, buf_size)
+
+    flex vc = alloc_buffer(16)
+    mem_write_i64(vc, 0, num_nodes)
+    mem_write_i64(vc, 8, clocks_buf)
+    deliver vc
+}
+
+open flow vc_destroy(vc: Int) -> Int {
+    if vc != 0 {
+        flex buf = mem_read_i64(vc, 8)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(vc)
+    }
+    deliver 0
+}
+
+open flow vc_get(vc: Int, node_id: Int) -> Int {
+    flex num = mem_read_i64(vc, 0)
+    if node_id < 0 || node_id >= num { deliver 0 }
+    flex buf = mem_read_i64(vc, 8)
+    deliver mem_read_i64(buf, node_id * 8)
+}
+
+open flow vc_set(vc: Int, node_id: Int, val: Int) -> Int {
+    flex num = mem_read_i64(vc, 0)
+    if node_id < 0 || node_id >= num { deliver 0 }
+    flex buf = mem_read_i64(vc, 8)
+    mem_write_i64(buf, node_id * 8, val)
+    deliver val
+}
+
+// Advances the logical clock of `node_id` by 1
+open flow vc_tick(vc: Int, node_id: Int) -> Int {
+    flex old_val = vc_get(vc, node_id)
+    flex new_val = old_val + 1
+    vc_set(vc, node_id, new_val)
+    deliver new_val
+}
+
+// Merges vector clock `other` into `target`: target[i] = max(target[i], other[i])
+open flow vc_merge(target: Int, other: Int) -> Int {
+    flex num_target = mem_read_i64(target, 0)
+    flex num_other = mem_read_i64(other, 0)
+    flex min_nodes = num_target
+    if num_other < min_nodes { min_nodes = num_other }
+
+    flex i = 0
+    while i < min_nodes {
+        flex val_t = vc_get(target, i)
+        flex val_o = vc_get(other, i)
+        if val_o > val_t {
+            vc_set(target, i, val_o)
+        }
+        i = i + 1
+    }
+    deliver 1
+}
+
+// Returns true if clock A happened before clock B (A -> B):
+// Requires: for all i, A[i] <= B[i], and for at least one j, A[j] < B[j].
+open flow vc_happened_before(vc_a: Int, vc_b: Int) -> Bool {
+    flex num = mem_read_i64(vc_a, 0)
+    flex strictly_less = false
+
+    flex i = 0
+    while i < num {
+        flex va = vc_get(vc_a, i)
+        flex vb = vc_get(vc_b, i)
+
+        if va > vb {
+            deliver false // Violation: A has seen something B hasn't
+        }
+        if va < vb {
+            strictly_less = true
+        }
+        i = i + 1
+    }
+
+    deliver strictly_less
+}
+
+// Returns true if event A and event B are concurrent (A || B)
+// Concurrent means neither A -> B nor B -> A.
+open flow vc_is_concurrent(vc_a: Int, vc_b: Int) -> Bool {
+    flex a_before_b = vc_happened_before(vc_a, vc_b)
+    if a_before_b { deliver false }
+
+    flex b_before_a = vc_happened_before(vc_b, vc_a)
+    if b_before_a { deliver false }
+
+    deliver true
+}

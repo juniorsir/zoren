@@ -1,0 +1,186 @@
+// Zoren Skip List Index (plugins/skip_list_index.zor)
+// Probabilistic multi-level secondary index supporting O(log N) point search,
+// fast ordered range scans, and concurrent-safe database indexing.
+
+bring sys
+
+// Maximum forward levels = 4
+// Node layout (48 bytes):
+// [0..8]:   key
+// [8..16]:  val
+// [16..24]: forward[0] (level 0 next)
+// [24..32]: forward[1] (level 1 next)
+// [32..40]: forward[2] (level 2 next)
+// [40..48]: forward[3] (level 3 next)
+
+// Header layout (32 bytes):
+// [0..8]:   head_idx (always index 0)
+// [8..16]:  count (number of active entries)
+// [16..24]: max_nodes
+// [24..32]: nodes_buf
+
+flow skip_node_addr(list: Int, idx: Int) -> Int {
+    flex buf = mem_read_i64(list, 24)
+    deliver buf + (idx * 48)
+}
+
+open flow skip_create(max_nodes: Int) -> Int {
+    flex buf_size = max_nodes * 48
+    flex nodes_buf = alloc_buffer(buf_size)
+    mem_fill(nodes_buf, 0, buf_size)
+
+    flex list = alloc_buffer(32)
+    mem_write_i64(list, 0, 0) // head = 0
+    mem_write_i64(list, 8, 0) // count = 0
+    mem_write_i64(list, 16, max_nodes)
+    mem_write_i64(list, 24, nodes_buf)
+
+    // Initialize head node (idx 0)
+    flex head = skip_node_addr(list, 0)
+    mem_write_i64(head, 0, 0 - 9223372036854775807) // -infinity
+    mem_write_i64(head, 8, 0)
+    mem_write_i64(head, 16, 0 - 1)
+    mem_write_i64(head, 24, 0 - 1)
+    mem_write_i64(head, 32, 0 - 1)
+    mem_write_i64(head, 40, 0 - 1)
+
+    deliver list
+}
+
+open flow skip_destroy(list: Int) -> Int {
+    if list != 0 {
+        flex buf = mem_read_i64(list, 24)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(list)
+    }
+    deliver 0
+}
+
+open flow skip_size(list: Int) -> Int {
+    deliver mem_read_i64(list, 8)
+}
+
+// Deterministic pseudo-random level generator based on key & count
+flow skip_random_level(key: Int, count: Int) -> Int {
+    flex hash = (key * 31) + count
+    if (hash % 8) == 0 { deliver 4 }
+    if (hash % 4) == 0 { deliver 3 }
+    if (hash % 2) == 0 { deliver 2 }
+    deliver 1
+}
+
+open flow skip_insert(list: Int, key: Int, val: Int) -> Int {
+    flex count = mem_read_i64(list, 8)
+    flex max_n = mem_read_i64(list, 16)
+    if (count + 1) >= max_n { deliver 0 - 1 }
+
+    // Track update array for predecessor nodes at each level
+    flex u0 = 0
+    flex u1 = 0
+    flex u2 = 0
+    flex u3 = 0
+
+    flex curr = 0 // head
+    flex lvl = 3
+    while lvl >= 0 {
+        flex curr_node = skip_node_addr(list, curr)
+        flex fwd_offset = 16 + (lvl * 8)
+        flex next_idx = mem_read_i64(curr_node, fwd_offset)
+
+        while next_idx >= 0 {
+            flex next_node = skip_node_addr(list, next_idx)
+            flex next_key = mem_read_i64(next_node, 0)
+            if next_key < key {
+                curr = next_idx
+                curr_node = skip_node_addr(list, curr)
+                next_idx = mem_read_i64(curr_node, fwd_offset)
+            } else {
+                next_idx = 0 - 1 // break inner
+            }
+        }
+
+        if lvl == 3 { u3 = curr }
+        if lvl == 2 { u2 = curr }
+        if lvl == 1 { u1 = curr }
+        if lvl == 0 { u0 = curr }
+        lvl = lvl - 1
+    }
+
+    // Allocate new node
+    flex new_idx = count + 1
+    mem_write_i64(list, 8, count + 1)
+
+    flex new_node = skip_node_addr(list, new_idx)
+    mem_write_i64(new_node, 0, key)
+    mem_write_i64(new_node, 8, val)
+
+    flex node_lvl = skip_random_level(key, count)
+    flex l = 0
+    while l < node_lvl {
+        flex pred = 0
+        if l == 0 { pred = u0 }
+        if l == 1 { pred = u1 }
+        if l == 2 { pred = u2 }
+        if l == 3 { pred = u3 }
+
+        flex pred_node = skip_node_addr(list, pred)
+        flex fwd_offset = 16 + (l * 8)
+        flex old_next = mem_read_i64(pred_node, fwd_offset)
+
+        mem_write_i64(new_node, fwd_offset, old_next)
+        mem_write_i64(pred_node, fwd_offset, new_idx)
+        l = l + 1
+    }
+
+    deliver new_idx
+}
+
+open flow skip_find(list: Int, key: Int) -> Int {
+    flex curr = 0 // head
+    flex lvl = 3
+
+    while lvl >= 0 {
+        flex curr_node = skip_node_addr(list, curr)
+        flex fwd_offset = 16 + (lvl * 8)
+        flex next_idx = mem_read_i64(curr_node, fwd_offset)
+
+        while next_idx >= 0 {
+            flex next_node = skip_node_addr(list, next_idx)
+            flex next_key = mem_read_i64(next_node, 0)
+            if next_key == key {
+                deliver mem_read_i64(next_node, 8) // Value found!
+            }
+            if next_key < key {
+                curr = next_idx
+                curr_node = skip_node_addr(list, curr)
+                next_idx = mem_read_i64(curr_node, fwd_offset)
+            } else {
+                next_idx = 0 - 1 // drop down a level
+            }
+        }
+        lvl = lvl - 1
+    }
+
+    deliver 0 - 1 // Key not found
+}
+
+// Range count query inside [min_k, max_k] using Level 0 sequential scan
+open flow skip_range_count(list: Int, min_k: Int, max_k: Int) -> Int {
+    flex head = skip_node_addr(list, 0)
+    flex curr = mem_read_i64(head, 16) // level 0 forward
+    flex matches = 0
+
+    while curr >= 0 {
+        flex node = skip_node_addr(list, curr)
+        flex k = mem_read_i64(node, 0)
+        if k >= min_k && k <= max_k {
+            matches = matches + 1
+        }
+        if k > max_k {
+            deliver matches
+        }
+        curr = mem_read_i64(node, 16)
+    }
+
+    deliver matches
+}

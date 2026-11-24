@@ -1,0 +1,197 @@
+// Zoren Pairing Heap (std/pairing_heap.zor)
+// Self-balancing min-priority queue with O(1) insert/find-min and O(log N) delete-min.
+// Widely used in Dijkstra shortest-path algorithms and priority schedulers.
+
+bring sys
+
+// Node layout (40 bytes):
+// [0..8]:   key (priority, smaller = higher priority)
+// [8..16]:  val (associated value/ID)
+// [16..24]: child (index of first child, -1 if none)
+// [24..32]: sibling (index of next sibling, -1 if none)
+// [32..40]: prev (index of prev sibling or parent, -1 if none)
+
+// Heap layout (32 bytes):
+// [0..8]:   root_idx (-1 if empty)
+// [8..16]:  count
+// [16..24]: max_nodes
+// [24..32]: nodes_buf
+
+flow ph_node_addr(heap: Int, idx: Int) -> Int {
+    flex buf = mem_read_i64(heap, 24)
+    deliver buf + (idx * 40)
+}
+
+open flow ph_create(max_nodes: Int) -> Int {
+    flex buf_size = max_nodes * 40
+    flex nodes_buf = alloc_buffer(buf_size)
+    mem_fill(nodes_buf, 0, buf_size)
+
+    flex heap = alloc_buffer(32)
+    mem_write_i64(heap, 0, 0 - 1) // root = -1
+    mem_write_i64(heap, 8, 0)     // count = 0
+    mem_write_i64(heap, 16, max_nodes)
+    mem_write_i64(heap, 24, nodes_buf)
+    deliver heap
+}
+
+open flow ph_destroy(heap: Int) -> Int {
+    if heap != 0 {
+        flex buf = mem_read_i64(heap, 24)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(heap)
+    }
+    deliver 0
+}
+
+open flow ph_size(heap: Int) -> Int {
+    deliver mem_read_i64(heap, 8)
+}
+
+// Melds two subtrees rooted at h1 and h2, returning index of the combined root
+flow ph_meld(heap: Int, h1: Int, h2: Int) -> Int {
+    if h1 < 0 { deliver h2 }
+    if h2 < 0 { deliver h1 }
+
+    flex node1 = ph_node_addr(heap, h1)
+    flex node2 = ph_node_addr(heap, h2)
+
+    flex k1 = mem_read_i64(node1, 0)
+    flex k2 = mem_read_i64(node2, 0)
+
+    if k1 <= k2 {
+        // h2 becomes the leftmost child of h1
+        flex old_child = mem_read_i64(node1, 16)
+        mem_write_i64(node2, 24, old_child)
+        mem_write_i64(node2, 32, h1)
+        if old_child >= 0 {
+            flex old_c_addr = ph_node_addr(heap, old_child)
+            mem_write_i64(old_c_addr, 32, h2)
+        }
+        mem_write_i64(node1, 16, h2)
+        mem_write_i64(node1, 24, 0 - 1)
+        mem_write_i64(node1, 32, 0 - 1)
+        deliver h1
+    } else {
+        // h1 becomes the leftmost child of h2
+        flex old_child = mem_read_i64(node2, 16)
+        mem_write_i64(node1, 24, old_child)
+        mem_write_i64(node1, 32, h2)
+        if old_child >= 0 {
+            flex old_c_addr = ph_node_addr(heap, old_child)
+            mem_write_i64(old_c_addr, 32, h1)
+        }
+        mem_write_i64(node2, 16, h1)
+        mem_write_i64(node2, 24, 0 - 1)
+        mem_write_i64(node2, 32, 0 - 1)
+        deliver h2
+    }
+}
+
+open flow ph_insert(heap: Int, key: Int, val: Int) -> Int {
+    flex count = mem_read_i64(heap, 8)
+    flex max_n = mem_read_i64(heap, 16)
+    if count >= max_n { deliver 0 - 1 }
+
+    flex new_idx = count
+    mem_write_i64(heap, 8, count + 1)
+
+    flex node = ph_node_addr(heap, new_idx)
+    mem_write_i64(node, 0, key)
+    mem_write_i64(node, 8, val)
+    mem_write_i64(node, 16, 0 - 1)
+    mem_write_i64(node, 24, 0 - 1)
+    mem_write_i64(node, 32, 0 - 1)
+
+    flex root = mem_read_i64(heap, 0)
+    flex new_root = ph_meld(heap, root, new_idx)
+    mem_write_i64(heap, 0, new_root)
+    deliver new_idx
+}
+
+open flow ph_find_min_key(heap: Int) -> Int {
+    flex root = mem_read_i64(heap, 0)
+    if root < 0 { deliver 0 - 1 }
+    flex node = ph_node_addr(heap, root)
+    deliver mem_read_i64(node, 0)
+}
+
+open flow ph_find_min_val(heap: Int) -> Int {
+    flex root = mem_read_i64(heap, 0)
+    if root < 0 { deliver 0 - 1 }
+    flex node = ph_node_addr(heap, root)
+    deliver mem_read_i64(node, 8)
+}
+
+// Two-pass pairing deletion of min node
+open flow ph_delete_min(heap: Int) -> Int {
+    flex root = mem_read_i64(heap, 0)
+    if root < 0 { deliver 0 - 1 }
+
+    flex root_node = ph_node_addr(heap, root)
+    flex min_val = mem_read_i64(root_node, 8)
+    flex first_child = mem_read_i64(root_node, 16)
+
+    flex count = mem_read_i64(heap, 8)
+    mem_write_i64(heap, 8, count - 1)
+
+    if first_child < 0 {
+        mem_write_i64(heap, 0, 0 - 1)
+        deliver min_val
+    }
+
+    // Collect all subtrees from sibling linked list
+    flex max_n = mem_read_i64(heap, 16)
+    flex trees_buf = alloc_buffer(max_n * 8)
+    flex num_trees = 0
+
+    flex curr = first_child
+    while curr >= 0 {
+        flex curr_node = ph_node_addr(heap, curr)
+        flex next_sib = mem_read_i64(curr_node, 24)
+        mem_write_i64(curr_node, 24, 0 - 1)
+        mem_write_i64(curr_node, 32, 0 - 1)
+
+        mem_write_i64(trees_buf, num_trees * 8, curr)
+        num_trees = num_trees + 1
+        curr = next_sib
+    }
+
+    // Pass 1: Pair up siblings from left to right
+    flex pairs_buf = alloc_buffer(max_n * 8)
+    flex num_pairs = 0
+    flex i = 0
+
+    while i < num_trees {
+        if (i + 1) < num_trees {
+            flex t1 = mem_read_i64(trees_buf, i * 8)
+            flex t2 = mem_read_i64(trees_buf, (i + 1) * 8)
+            flex melded = ph_meld(heap, t1, t2)
+            mem_write_i64(pairs_buf, num_pairs * 8, melded)
+            num_pairs = num_pairs + 1
+            i = i + 2
+        } else {
+            flex t_single = mem_read_i64(trees_buf, i * 8)
+            mem_write_i64(pairs_buf, num_pairs * 8, t_single)
+            num_pairs = num_pairs + 1
+            i = i + 1
+        }
+    }
+
+    // Pass 2: Merge pairs from right to left
+    flex final_root = 0 - 1
+    if num_pairs > 0 {
+        final_root = mem_read_i64(pairs_buf, (num_pairs - 1) * 8)
+        flex p = num_pairs - 2
+        while p >= 0 {
+            flex tp = mem_read_i64(pairs_buf, p * 8)
+            final_root = ph_meld(heap, final_root, tp)
+            p = p - 1
+        }
+    }
+
+    mem_write_i64(heap, 0, final_root)
+    free_buffer(trees_buf)
+    free_buffer(pairs_buf)
+    deliver min_val
+}

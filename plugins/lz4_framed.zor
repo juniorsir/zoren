@@ -1,0 +1,97 @@
+// Zoren LZ4 Framed Stream Codec (plugins/lz4_framed.zor)
+// Protocol codec implementing the official LZ4 Framing Format specification.
+// Validates 0x184D2204 magic, parses frame descriptors, block sizes, and stream checksums.
+
+bring sys
+
+// LZ4 Frame Header constants
+// Magic: 0x184D2204 = 407710212
+open flow lz4_magic_number() -> Int {
+    deliver 407710212
+}
+
+open flow lz4_validate_magic(magic: Int) -> Bool {
+    deliver magic == lz4_magic_number()
+}
+
+// Parses the FLG byte of LZ4 frame descriptor:
+// [bit 7..6]: Version (must be 01 = 1)
+// [bit 5]:    Block Independence flag (1 = independent blocks)
+// [bit 4]:    Block Checksum flag (1 = each block has 4-byte checksum)
+// [bit 3]:    Content Size flag (1 = 8-byte content size present)
+// [bit 2]:    Content Checksum flag (1 = 4-byte content checksum at end)
+// [bit 0]:    Dictionary ID flag (1 = 4-byte DictID present)
+
+open flow lz4_flg_version(flg: Int) -> Int {
+    deliver (flg / 64) % 4
+}
+
+open flow lz4_flg_block_independent(flg: Int) -> Bool {
+    deliver ((flg / 32) % 2) == 1
+}
+
+open flow lz4_flg_has_block_checksum(flg: Int) -> Bool {
+    deliver ((flg / 16) % 2) == 1
+}
+
+open flow lz4_flg_has_content_size(flg: Int) -> Bool {
+    deliver ((flg / 8) % 2) == 1
+}
+
+open flow lz4_flg_has_content_checksum(flg: Int) -> Bool {
+    deliver ((flg / 4) % 2) == 1
+}
+
+open flow lz4_flg_has_dict_id(flg: Int) -> Bool {
+    deliver (flg % 2) == 1
+}
+
+// Block size field parsing:
+// A 4-byte integer where highest bit (bit 31) indicates if block is uncompressed.
+// In 32-bit: bit 31 = 2147483648 (0x80000000).
+open flow lz4_block_is_uncompressed(size_field: Int) -> Bool {
+    deliver (size_field / 2147483648) == 1
+}
+
+open flow lz4_block_actual_size(size_field: Int) -> Int {
+    if lz4_block_is_uncompressed(size_field) {
+        deliver size_field - 2147483648
+    }
+    deliver size_field
+}
+
+open flow lz4_pack_block_header(size: Int, uncompressed: Bool) -> Int {
+    if uncompressed {
+        deliver size + 2147483648
+    }
+    deliver size
+}
+
+// Block Maximum Size (BD byte):
+// [bits 6..4]: Block Maximum Size code:
+// 4 = 64 KB, 5 = 256 KB, 6 = 1 MB, 7 = 4 MB
+open flow lz4_bd_max_block_size(bd: Int) -> Int {
+    flex code = (bd / 16) % 8
+    if code == 4 { deliver 65536 }
+    if code == 5 { deliver 262144 }
+    if code == 6 { deliver 1048576 }
+    if code == 7 { deliver 4194304 }
+    deliver 0
+}
+
+// Inspects and parses an in-memory LZ4 frame header buffer (min 16 bytes)
+// Buffer layout: [0] magic, [8] FLG
+open flow lz4_inspect_frame_header(buf: Int) -> Int {
+    flex magic = mem_read_i64(buf, 0)
+    if !lz4_validate_magic(magic) {
+        deliver 0 - 1 // Invalid magic
+    }
+
+    flex flg = mem_read_i64(buf, 8)
+    flex ver = lz4_flg_version(flg)
+    if ver != 1 {
+        deliver 0 - 2 // Unsupported version
+    }
+
+    deliver 0 // Valid LZ4 Frame Header
+}

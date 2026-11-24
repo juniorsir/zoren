@@ -1,0 +1,235 @@
+// Zoren 2D K-d Tree (std/kd_tree_2d.zor)
+// High-performance 2D space-partitioning tree for spatial indexing,
+// range bounding-box search (O(log N)), and nearest neighbor lookups.
+
+bring sys
+
+// Node layout (48 bytes):
+// [0..8]:   x (coordinate 1)
+// [8..16]:  y (coordinate 2)
+// [16..24]: point_id (user identifier)
+// [24..32]: axis (0 = split along X, 1 = split along Y)
+// [32..40]: left_idx (-1 if empty)
+// [40..48]: right_idx (-1 if empty)
+
+// Tree Header (32 bytes):
+// [0..8]:   root_idx (-1 if empty)
+// [8..16]:  node_count
+// [16..24]: max_nodes
+// [24..32]: nodes_buf
+
+flow kd2d_node_addr(tree: Int, idx: Int) -> Int {
+    flex buf = mem_read_i64(tree, 24)
+    deliver buf + (idx * 48)
+}
+
+open flow kd2d_create(max_nodes: Int) -> Int {
+    flex buf_size = max_nodes * 48
+    flex nodes_buf = alloc_buffer(buf_size)
+    mem_fill(nodes_buf, 0, buf_size)
+
+    flex tree = alloc_buffer(32)
+    mem_write_i64(tree, 0, 0 - 1) // root_idx = -1
+    mem_write_i64(tree, 8, 0)     // count = 0
+    mem_write_i64(tree, 16, max_nodes)
+    mem_write_i64(tree, 24, nodes_buf)
+    deliver tree
+}
+
+open flow kd2d_destroy(tree: Int) -> Int {
+    if tree != 0 {
+        flex buf = mem_read_i64(tree, 24)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(tree)
+    }
+    deliver 0
+}
+
+open flow kd2d_size(tree: Int) -> Int {
+    deliver mem_read_i64(tree, 8)
+}
+
+open flow kd2d_insert(tree: Int, x: Int, y: Int, point_id: Int) -> Int {
+    flex count = mem_read_i64(tree, 8)
+    flex max_n = mem_read_i64(tree, 16)
+    if count >= max_n { deliver 0 - 1 }
+
+    flex new_idx = count
+    mem_write_i64(tree, 8, count + 1)
+
+    flex node = kd2d_node_addr(tree, new_idx)
+    mem_write_i64(node, 0, x)
+    mem_write_i64(node, 8, y)
+    mem_write_i64(node, 16, point_id)
+    mem_write_i64(node, 24, 0) // default axis X
+    mem_write_i64(node, 32, 0 - 1)
+    mem_write_i64(node, 40, 0 - 1)
+
+    flex root = mem_read_i64(tree, 0)
+    if root < 0 {
+        mem_write_i64(tree, 0, new_idx)
+        deliver new_idx
+    }
+
+    flex curr = root
+    flex parent = 0 - 1
+    flex is_left = 0
+    flex curr_axis = 0
+
+    while curr >= 0 {
+        parent = curr
+        flex curr_node = kd2d_node_addr(tree, curr)
+        curr_axis = mem_read_i64(curr_node, 24)
+        flex val_node = 0
+        flex val_new = 0
+
+        if curr_axis == 0 {
+            val_node = mem_read_i64(curr_node, 0)
+            val_new = x
+        } else {
+            val_node = mem_read_i64(curr_node, 8)
+            val_new = y
+        }
+
+        if val_new < val_node {
+            is_left = 1
+            curr = mem_read_i64(curr_node, 32)
+        } else {
+            is_left = 0
+            curr = mem_read_i64(curr_node, 40)
+        }
+    }
+
+    flex parent_node = kd2d_node_addr(tree, parent)
+    flex next_axis = 1 - curr_axis
+    mem_write_i64(node, 24, next_axis)
+
+    if is_left == 1 {
+        mem_write_i64(parent_node, 32, new_idx)
+    } else {
+        mem_write_i64(parent_node, 40, new_idx)
+    }
+
+    deliver new_idx
+}
+
+// Range count query inside bounding box [min_x, max_x] and [min_y, max_y]
+open flow kd2d_range_count(tree: Int, min_x: Int, max_x: Int, min_y: Int, max_y: Int) -> Int {
+    flex count = mem_read_i64(tree, 8)
+    if count == 0 { deliver 0 }
+
+    flex matched = 0
+    flex stack = alloc_buffer(count * 8)
+    flex top = 0
+
+    // Push root
+    flex root = mem_read_i64(tree, 0)
+    if root >= 0 {
+        mem_write_i64(stack, top * 8, root)
+        top = top + 1
+    }
+
+    while top > 0 {
+        top = top - 1
+        flex curr = mem_read_i64(stack, top * 8)
+        flex node = kd2d_node_addr(tree, curr)
+
+        flex nx = mem_read_i64(node, 0)
+        flex ny = mem_read_i64(node, 8)
+        flex axis = mem_read_i64(node, 24)
+
+        if nx >= min_x && nx <= max_x && ny >= min_y && ny <= max_y {
+            matched = matched + 1
+        }
+
+        flex left = mem_read_i64(node, 32)
+        flex right = mem_read_i64(node, 40)
+
+        if axis == 0 {
+            if left >= 0 && min_x <= nx {
+                mem_write_i64(stack, top * 8, left)
+                top = top + 1
+            }
+            if right >= 0 && max_x >= nx {
+                mem_write_i64(stack, top * 8, right)
+                top = top + 1
+            }
+        } else {
+            if left >= 0 && min_y <= ny {
+                mem_write_i64(stack, top * 8, left)
+                top = top + 1
+            }
+            if right >= 0 && max_y >= ny {
+                mem_write_i64(stack, top * 8, right)
+                top = top + 1
+            }
+        }
+    }
+
+    free_buffer(stack)
+    deliver matched
+}
+
+// Exact nearest neighbor search using squared Euclidean distance
+open flow kd2d_nearest_neighbor(tree: Int, target_x: Int, target_y: Int) -> Int {
+    flex count = mem_read_i64(tree, 8)
+    if count == 0 { deliver 0 - 1 }
+
+    flex best_id = 0 - 1
+    flex best_dist_sq = 9223372036854775807 // Int max
+
+    flex stack = alloc_buffer(count * 8)
+    flex top = 0
+
+    flex root = mem_read_i64(tree, 0)
+    if root >= 0 {
+        mem_write_i64(stack, top * 8, root)
+        top = top + 1
+    }
+
+    while top > 0 {
+        top = top - 1
+        flex curr = mem_read_i64(stack, top * 8)
+        flex node = kd2d_node_addr(tree, curr)
+
+        flex nx = mem_read_i64(node, 0)
+        flex ny = mem_read_i64(node, 8)
+        flex pid = mem_read_i64(node, 16)
+        flex axis = mem_read_i64(node, 24)
+
+        flex dx = nx - target_x
+        flex dy = ny - target_y
+        flex dist_sq = (dx * dx) + (dy * dy)
+
+        if dist_sq < best_dist_sq {
+            best_dist_sq = dist_sq
+            best_id = pid
+        }
+
+        flex left = mem_read_i64(node, 32)
+        flex right = mem_read_i64(node, 40)
+
+        flex split_diff = 0
+        if axis == 0 { split_diff = target_x - nx }
+        else { split_diff = target_y - ny }
+
+        flex first = left
+        flex second = right
+        if split_diff > 0 {
+            first = right
+            second = left
+        }
+
+        if second >= 0 && (split_diff * split_diff) < best_dist_sq {
+            mem_write_i64(stack, top * 8, second)
+            top = top + 1
+        }
+        if first >= 0 {
+            mem_write_i64(stack, top * 8, first)
+            top = top + 1
+        }
+    }
+
+    free_buffer(stack)
+    deliver best_id
+}

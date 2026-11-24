@@ -1,0 +1,218 @@
+// Zoren Self-Hosted Compiler: Native Lexer (std/compiler/lexer.zor)
+// Tokenizes Zoren source code into structured tokens in 100% native Zoren.
+
+bring sys
+bring text
+bring crypto
+
+flow char_at(s: Text, idx: Int) -> Text {
+    deliver str_slice(s, idx, 1)
+}
+
+flow is_alpha(ch: Text) -> Bool {
+    flex letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+    deliver index_of(letters, ch) >= 0
+}
+
+flow is_digit(ch: Text) -> Bool {
+    flex digits = "0123456789"
+    deliver index_of(digits, ch) >= 0
+}
+
+flow is_alnum(ch: Text) -> Bool {
+    flex chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789"
+    deliver index_of(chars, ch) >= 0
+}
+
+// Token Types
+open flow tok_eof() -> Int { deliver 0 }
+open flow tok_flow() -> Int { deliver 1 }
+open flow tok_bind() -> Int { deliver 2 }
+open flow tok_flex() -> Int { deliver 3 }
+open flow tok_deliver() -> Int { deliver 4 }
+open flow tok_if() -> Int { deliver 5 }
+open flow tok_else() -> Int { deliver 6 }
+open flow tok_while() -> Int { deliver 7 }
+open flow tok_bring() -> Int { deliver 8 }
+open flow tok_open() -> Int { deliver 9 }
+open flow tok_model() -> Int { deliver 10 }
+open flow tok_ident() -> Int { deliver 20 }
+open flow tok_int() -> Int { deliver 21 }
+open flow tok_plus() -> Int { deliver 30 }
+open flow tok_minus() -> Int { deliver 31 }
+open flow tok_star() -> Int { deliver 32 }
+open flow tok_slash() -> Int { deliver 33 }
+open flow tok_assign() -> Int { deliver 34 }
+open flow tok_arrow() -> Int { deliver 35 }
+open flow tok_eq() -> Int { deliver 36 }
+open flow tok_neq() -> Int { deliver 37 }
+open flow tok_lparen() -> Int { deliver 40 }
+open flow tok_rparen() -> Int { deliver 41 }
+open flow tok_lbrace() -> Int { deliver 42 }
+open flow tok_rbrace() -> Int { deliver 43 }
+open flow tok_colon() -> Int { deliver 44 }
+open flow tok_comma() -> Int { deliver 45 }
+
+flow lex_tok_addr(lexer: Int, idx: Int) -> Int {
+    flex buf = mem_read_i64(lexer, 32)
+    deliver buf + (idx * 24)
+}
+
+open flow lexer_create(max_tokens: Int) -> Int {
+    flex buf_size = max_tokens * 24
+    flex tokens_buf = alloc_buffer(buf_size)
+    mem_fill(tokens_buf, 0, buf_size)
+
+    flex lexer = alloc_buffer(40)
+    mem_write_i64(lexer, 0, 0) // src_len
+    mem_write_i64(lexer, 8, 0) // cursor
+    mem_write_i64(lexer, 16, 0) // token_count
+    mem_write_i64(lexer, 24, max_tokens)
+    mem_write_i64(lexer, 32, tokens_buf)
+    deliver lexer
+}
+
+open flow lexer_destroy(lexer: Int) -> Int {
+    if lexer != 0 {
+        flex buf = mem_read_i64(lexer, 32)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(lexer)
+    }
+    deliver 0
+}
+
+flow lexer_emit(lexer: Int, tok_type: Int, val: Int, line: Int) -> Int {
+    flex count = mem_read_i64(lexer, 16)
+    flex max_t = mem_read_i64(lexer, 24)
+    if count >= max_t { deliver 0 - 1 }
+
+    flex addr = lex_tok_addr(lexer, count)
+    mem_write_i64(addr, 0, tok_type)
+    mem_write_i64(addr, 8, val)
+    mem_write_i64(addr, 16, line)
+
+    mem_write_i64(lexer, 16, count + 1)
+    deliver count
+}
+
+open flow lexer_token_count(lexer: Int) -> Int {
+    deliver mem_read_i64(lexer, 16)
+}
+
+open flow lexer_token_type(lexer: Int, idx: Int) -> Int {
+    flex addr = lex_tok_addr(lexer, idx)
+    deliver mem_read_i64(addr, 0)
+}
+
+open flow lexer_token_val(lexer: Int, idx: Int) -> Int {
+    flex addr = lex_tok_addr(lexer, idx)
+    deliver mem_read_i64(addr, 8)
+}
+
+open flow lexer_tokenize(lexer: Int, src: Text) -> Int {
+    flex len = str_len(src)
+    flex i = 0
+    flex line = 1
+
+    while i < len {
+        flex ch = char_at(src, i)
+
+        // Whitespace & newlines
+        if constant_time_compare(ch, " ") || constant_time_compare(ch, "\t") || constant_time_compare(ch, "\r") {
+            i = i + 1
+        } else if constant_time_compare(ch, "\n") {
+            line = line + 1
+            i = i + 1
+        } else if constant_time_compare(ch, "/") && (i + 1) < len && constant_time_compare(char_at(src, i + 1), "/") {
+            while i < len && !constant_time_compare(char_at(src, i), "\n") {
+                i = i + 1
+            }
+        } else if constant_time_compare(ch, "(") {
+            lexer_emit(lexer, tok_lparen(), 0, line)
+            i = i + 1
+        } else if constant_time_compare(ch, ")") {
+            lexer_emit(lexer, tok_rparen(), 0, line)
+            i = i + 1
+        } else if constant_time_compare(ch, "{") {
+            lexer_emit(lexer, tok_lbrace(), 0, line)
+            i = i + 1
+        } else if constant_time_compare(ch, "}") {
+            lexer_emit(lexer, tok_rbrace(), 0, line)
+            i = i + 1
+        } else if constant_time_compare(ch, ":") {
+            lexer_emit(lexer, tok_colon(), 0, line)
+            i = i + 1
+        } else if constant_time_compare(ch, ",") {
+            lexer_emit(lexer, tok_comma(), 0, line)
+            i = i + 1
+        } else if constant_time_compare(ch, "+") {
+            lexer_emit(lexer, tok_plus(), 0, line)
+            i = i + 1
+        } else if constant_time_compare(ch, "*") {
+            lexer_emit(lexer, tok_star(), 0, line)
+            i = i + 1
+        } else if constant_time_compare(ch, "-") && (i + 1) < len && constant_time_compare(char_at(src, i + 1), ">") {
+            lexer_emit(lexer, tok_arrow(), 0, line)
+            i = i + 2
+        } else if constant_time_compare(ch, "-") {
+            lexer_emit(lexer, tok_minus(), 0, line)
+            i = i + 1
+        } else if constant_time_compare(ch, "=") && (i + 1) < len && constant_time_compare(char_at(src, i + 1), "=") {
+            lexer_emit(lexer, tok_eq(), 0, line)
+            i = i + 2
+        } else if constant_time_compare(ch, "=") {
+            lexer_emit(lexer, tok_assign(), 0, line)
+            i = i + 1
+        } else if is_digit(ch) {
+            flex num = 0
+            while i < len && is_digit(char_at(src, i)) {
+                flex digit = index_of("0123456789", char_at(src, i))
+                num = (num * 10) + digit
+                i = i + 1
+            }
+            lexer_emit(lexer, tok_int(), num, line)
+        } else if is_alpha(ch) {
+            flex ident = ""
+            while i < len && is_alnum(char_at(src, i)) {
+                ident = str_concat(ident, char_at(src, i))
+                i = i + 1
+            }
+
+            if constant_time_compare(ident, "flow") {
+                lexer_emit(lexer, tok_flow(), 0, line)
+            } else if constant_time_compare(ident, "bind") {
+                lexer_emit(lexer, tok_bind(), 0, line)
+            } else if constant_time_compare(ident, "flex") {
+                lexer_emit(lexer, tok_flex(), 0, line)
+            } else if constant_time_compare(ident, "deliver") {
+                lexer_emit(lexer, tok_deliver(), 0, line)
+            } else if constant_time_compare(ident, "if") {
+                lexer_emit(lexer, tok_if(), 0, line)
+            } else if constant_time_compare(ident, "else") {
+                lexer_emit(lexer, tok_else(), 0, line)
+            } else if constant_time_compare(ident, "while") {
+                lexer_emit(lexer, tok_while(), 0, line)
+            } else if constant_time_compare(ident, "bring") {
+                lexer_emit(lexer, tok_bring(), 0, line)
+            } else if constant_time_compare(ident, "open") {
+                lexer_emit(lexer, tok_open(), 0, line)
+            } else if constant_time_compare(ident, "model") {
+                lexer_emit(lexer, tok_model(), 0, line)
+            } else {
+                flex h = 2166136261
+                flex k = 0
+                flex id_len = str_len(ident)
+                while k < id_len {
+                    h = (h * 16777619) + str_len(char_at(ident, k))
+                    k = k + 1
+                }
+                lexer_emit(lexer, tok_ident(), h, line)
+            }
+        } else {
+            i = i + 1
+        }
+    }
+
+    lexer_emit(lexer, tok_eof(), 0, line)
+    deliver lexer_token_count(lexer)
+}

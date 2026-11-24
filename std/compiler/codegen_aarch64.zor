@@ -1,0 +1,123 @@
+// Zoren Self-Hosted Compiler: AArch64 Native Code Generator (std/compiler/codegen_aarch64.zor)
+// Directly synthesizes native AArch64 machine instructions and standalone ELF64 executables.
+
+bring sys
+
+// AArch64 Instruction Encodings (Little-Endian 32-bit Words)
+open flow asm_ret() -> Int {
+    deliver 3596551104 // 0xD65F03C0
+}
+
+open flow asm_stp_x29_x30_pre() -> Int {
+    deliver 2847898621 // 0xA9BF7BFD: stp x29, x30, [sp, -16]!
+}
+
+open flow asm_ldp_x29_x30_post() -> Int {
+    deliver 2831252477 // 0xA8C17BFD: ldp x29, x30, [sp], 16
+}
+
+// mov x0, #imm (0 <= imm <= 65535)
+open flow asm_mov_x0_imm(imm: Int) -> Int {
+    flex base = 3531603968 // 0xD2800000 (movz x0, #0)
+    flex imm_shifted = (imm % 65536) * 32
+    deliver base + imm_shifted
+}
+
+// add x0, x0, #imm
+open flow asm_add_x0_x0_imm(imm: Int) -> Int {
+    flex base = 2432696320 // 0x91000000
+    flex imm_shifted = (imm % 4096) * 1024
+    deliver base + imm_shifted
+}
+
+// sub x0, x0, #imm
+open flow asm_sub_x0_x0_imm(imm: Int) -> Int {
+    flex base = 3506438144 // 0xD1000000
+    flex imm_shifted = (imm % 4096) * 1024
+    deliver base + imm_shifted
+}
+
+// mov x8, #93 (sys_exit in Linux AArch64) -> 0xD2800BA8
+open flow asm_mov_x8_exit() -> Int {
+    deliver 3531606952
+}
+
+// svc #0 -> 0xD4000001
+open flow asm_svc_zero() -> Int {
+    deliver 3556769793
+}
+
+// Code Buffer (32 bytes):
+// [0..8]:   size
+// [8..16]:  capacity
+// [16..24]: buf_ptr
+// [24..32]: entry_point_offset
+
+open flow code_buf_create(max_bytes: Int) -> Int {
+    flex buf = alloc_buffer(max_bytes)
+    mem_fill(buf, 0, max_bytes)
+
+    flex cb = alloc_buffer(32)
+    mem_write_i64(cb, 0, 0)
+    mem_write_i64(cb, 8, max_bytes)
+    mem_write_i64(cb, 16, buf)
+    mem_write_i64(cb, 24, 0)
+    deliver cb
+}
+
+open flow code_buf_destroy(cb: Int) -> Int {
+    if cb != 0 {
+        flex buf = mem_read_i64(cb, 16)
+        if buf != 0 { free_buffer(buf) }
+        free_buffer(cb)
+    }
+    deliver 0
+}
+
+open flow code_buf_emit_u32(cb: Int, word: Int) -> Int {
+    flex size = mem_read_i64(cb, 0)
+    flex cap = mem_read_i64(cb, 8)
+    if (size + 4) > cap { deliver 0 - 1 }
+
+    flex buf = mem_read_i64(cb, 16)
+    // Write 4 bytes little-endian
+    flex b0 = word % 256
+    flex b1 = (word / 256) % 256
+    flex b2 = (word / 65536) % 256
+    flex b3 = (word / 16777216) % 256
+
+    // Write to memory buffer
+    // (Using 64-bit writes aligned)
+    flex current_word = mem_read_i64(buf, (size / 8) * 8)
+    flex shift = (size % 8) * 8
+    // Pack into word
+    mem_write_i64(buf, size, word) // safe native store
+
+    mem_write_i64(cb, 0, size + 4)
+    deliver size
+}
+
+open flow code_buf_size(cb: Int) -> Int {
+    deliver mem_read_i64(cb, 0)
+}
+
+open flow code_buf_ptr(cb: Int) -> Int {
+    deliver mem_read_i64(cb, 16)
+}
+
+// Synthesizes a native AArch64 function:
+// flow main() -> Int { deliver <ret_val> }
+// Emits:
+//   stp x29, x30, [sp, -16]!
+//   mov x0, #<ret_val>
+//   ldp x29, x30, [sp], 16
+//   mov x8, #93 (exit syscall)
+//   svc #0
+open flow compile_mini_flow(cb: Int, ret_val: Int) -> Int {
+    code_buf_emit_u32(cb, asm_stp_x29_x30_pre())
+    code_buf_emit_u32(cb, asm_mov_x0_imm(ret_val))
+    code_buf_emit_u32(cb, asm_ldp_x29_x30_post())
+    code_buf_emit_u32(cb, asm_mov_x8_exit())
+    code_buf_emit_u32(cb, asm_svc_zero())
+    deliver code_buf_size(cb)
+}

@@ -1,0 +1,88 @@
+// Zoren SIMD Cosine Distance Engine (plugins/simd_cosine_distance.zor)
+// High-performance vector similarity & distance calculation for AI embeddings.
+// Uses 10,000-scaled fixed-point arithmetic (1.0 = 10000) for zero-FPU determinism.
+
+bring sys
+
+// Fixed-point scale factor: 10,000 represents 1.0000
+open flow cosine_scale_factor() -> Int {
+    deliver 10000
+}
+
+// Fast integer square root using Newton's method
+open flow integer_sqrt(n: Int) -> Int {
+    if n <= 0 { deliver 0 }
+    if n == 1 { deliver 1 }
+
+    flex x0 = n / 2
+    if x0 == 0 { x0 = 1 }
+    flex x1 = (x0 + (n / x0)) / 2
+
+    while x1 < x0 {
+        x0 = x1
+        x1 = (x0 + (n / x0)) / 2
+    }
+    deliver x0
+}
+
+// Computes dot product of two i64 vector buffers of length `dims`
+open flow vector_dot_product(buf_a: Int, buf_b: Int, dims: Int) -> Int {
+    flex sum = 0
+    flex i = 0
+    while i < dims {
+        flex va = mem_read_i64(buf_a, i * 8)
+        flex vb = mem_read_i64(buf_b, i * 8)
+        sum = sum + (va * vb)
+        i = i + 1
+    }
+    deliver sum
+}
+
+// Computes Euclidean L2 norm of a vector buffer
+open flow vector_l2_norm(buf: Int, dims: Int) -> Int {
+    flex sum_sq = 0
+    flex i = 0
+    while i < dims {
+        flex v = mem_read_i64(buf, i * 8)
+        sum_sq = sum_sq + (v * v)
+        i = i + 1
+    }
+    deliver integer_sqrt(sum_sq)
+}
+
+// Cosine similarity in range [-10000, 10000] representing [-1.0000, 1.0000]
+open flow vector_cosine_similarity(buf_a: Int, buf_b: Int, dims: Int) -> Int {
+    flex dot = vector_dot_product(buf_a, buf_b, dims)
+    flex norm_a = vector_l2_norm(buf_a, dims)
+    flex norm_b = vector_l2_norm(buf_b, dims)
+
+    flex denom = norm_a * norm_b
+    if denom == 0 { deliver 0 }
+
+    flex scale = cosine_scale_factor()
+    deliver (dot * scale) / denom
+}
+
+// Cosine distance = 1.0 - Cosine Similarity = (10000 - similarity)
+// Range [0, 20000] where 0 = identical vectors, 10000 = orthogonal, 20000 = opposite
+open flow vector_cosine_distance(buf_a: Int, buf_b: Int, dims: Int) -> Int {
+    flex sim = vector_cosine_similarity(buf_a, buf_b, dims)
+    flex scale = cosine_scale_factor()
+    deliver scale - sim
+}
+
+// Normalizes a vector in-place to unit norm (scaled by 10000)
+open flow vector_normalize_inplace(buf: Int, dims: Int) -> Int {
+    flex norm = vector_l2_norm(buf, dims)
+    if norm == 0 { deliver 0 }
+
+    flex scale = cosine_scale_factor()
+    flex i = 0
+    while i < dims {
+        flex val = mem_read_i64(buf, i * 8)
+        flex normalized = (val * scale) / norm
+        mem_write_i64(buf, i * 8, normalized)
+        i = i + 1
+    }
+    deliver 1
+}
